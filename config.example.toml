@@ -1,0 +1,62 @@
+# Pastel configuration. Copy to ~/.config/pastel/config.toml.
+#
+# Everything here is the default: an empty file gives the same desktop, so delete
+# whatever you don't change. Unknown keys are errors.
+
+# Shown where nothing covers the screen. For a wallpaper, autostart `swaybg`.
+background = "#1e2028"
+
+# Shell commands run once at startup.
+autostart = []
+
+[input]
+mod = "super"              # what `Mod` means in [binds]
+nested-mod = "alt"         # ...when running inside another compositor
+focus-follows-mouse = false
+
+[layout]
+type = "scrolling"
+gap = 12.0
+default-width = 0.5                                    # of the screen
+preset-widths = [0.3333333333333333, 0.5, 0.6666666666666666]    # what Mod+R cycles
+center-focus = "never"                                 # "always", "on-overflow"
+
+[window]
+corner-radius = 12.0
+border-width = 2.0
+active-color = "#a6c8ff"
+inactive-color = "#4a4f5c"
+shadow-color = "#00000070"
+shadow-size = 24.0
+opacity = 1.0
+blur = true                # visible behind translucent windows
+blur-xray = true           # blur only the wallpaper: much cheaper, ignores windows behind
+
+[animation]
+enabled = true
+slowdown = 1.0             # 2.0 is half speed
+# A curve is either a spring or a timed ease:
+window-movement = { stiffness = 800.0, damping = 1.0 }
+workspace-switch = { stiffness = 900.0, damping = 1.0 }
+window-open = { ms = 180.0, easing = "out-cubic" }
+window-close = { ms = 160.0, easing = "out-quad" }
+focus-ring = { ms = 120.0, easing = "out-cubic" }
+overlay = { ms = 140.0, easing = "out-cubic" }
+# easing: linear, out-quad, out-cubic, out-quint, out-expo, in-out-cubic
+
+[overlay]
+at-startup = true          # show the hotkey overlay when Pastel starts
+font = "sans-serif"
+
+# Merged over the defaults; bind to "none" to remove one. `pastel --list-actions`
+# prints every action, and the hotkey overlay (Mod+Shift+/) shows what's bound.
+[binds]
+# "Mod+Return" = "spawn foot"
+# "Mod+B" = "spawn firefox"
+# "Mod+D" = "none"
+
+# Patterns are case-sensitive substrings. Later rules win.
+# [[window-rule]]
+# app-id = "foot"
+# opacity = 0.9
+# default-width = 0.33
