@@ -33,7 +33,10 @@ impl FromStr for Combo {
                 if part.is_empty() {
                     return Err(format!("`{text}` has no key"));
                 }
-                return Ok(Combo { mods, key: canonical_key(part) });
+                return Ok(Combo {
+                    mods,
+                    key: canonical_key(part),
+                });
             }
             mods |= match part.to_ascii_lowercase().as_str() {
                 "mod" => MOD,
@@ -51,7 +54,11 @@ impl FromStr for Combo {
 /// xkb names are case-sensitive and `Return` is not `return`, but people write `Q`
 /// to mean the Q key: only single letters fold.
 fn canonical_key(key: &str) -> String {
-    if key.chars().count() == 1 { key.to_lowercase() } else { key.to_string() }
+    if key.chars().count() == 1 {
+        key.to_lowercase()
+    } else {
+        key.to_string()
+    }
 }
 
 impl Combo {
@@ -61,7 +68,10 @@ impl Combo {
         if mods & MOD != 0 {
             mods = (mods & !MOD) | mod_key;
         }
-        Combo { mods, key: self.key.clone() }
+        Combo {
+            mods,
+            key: self.key.clone(),
+        }
     }
 
     /// As shown in the overlay: `Mod + Shift + H`.
@@ -70,7 +80,12 @@ impl Combo {
         if self.mods & MOD != 0 {
             parts.push("Mod");
         }
-        for (bit, name) in [(CTRL, "Ctrl"), (ALT, "Alt"), (LOGO, "Super"), (SHIFT, "Shift")] {
+        for (bit, name) in [
+            (CTRL, "Ctrl"),
+            (ALT, "Alt"),
+            (LOGO, "Super"),
+            (SHIFT, "Shift"),
+        ] {
             if self.mods & bit != 0 && !(self.mods & MOD != 0 && bit == mod_key) {
                 parts.push(name);
             }
@@ -127,7 +142,10 @@ impl Binds {
 
     /// The lookup used on every key press, with `Mod` resolved.
     pub fn table(&self, mod_key: u32) -> HashMap<Combo, Action> {
-        let resolved = self.list.iter().map(|(c, a)| (c.resolved(mod_key), a.clone()));
+        let resolved = self
+            .list
+            .iter()
+            .map(|(c, a)| (c.resolved(mod_key), a.clone()));
         resolved.collect()
     }
 }
@@ -149,7 +167,9 @@ impl Binds {
     pub fn overlay_rows(&self, mod_key: u32) -> Vec<OverlayRow> {
         let mut rows: Vec<(Section, String, Vec<String>)> = Vec::new();
         for (combo, action) in &self.list {
-            let Some((section, title)) = action.title() else { continue };
+            let Some((section, title)) = action.title() else {
+                continue;
+            };
             let label = combo.label(mod_key);
             match rows.iter_mut().find(|(_, t, _)| *t == title) {
                 Some((_, _, labels)) => labels.push(label),

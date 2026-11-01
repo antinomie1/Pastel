@@ -3,6 +3,7 @@ name = "pastel"
 description = "A modular scrolling Wayland compositor built on luminaria"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 pastel-core.workspace = true

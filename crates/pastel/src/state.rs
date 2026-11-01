@@ -192,7 +192,9 @@ impl<'a> State<'a> {
     pub fn handle(&mut self, event: Event) {
         match event {
             Event::Input(input) => self.input(input),
-            Event::Button { pressed: true, hit, .. } => self.click(hit.tag, hit.surface),
+            Event::Button {
+                pressed: true, hit, ..
+            } => self.click(hit.tag, hit.surface),
             Event::Output(_, OutputEvent::Present(_)) => self.presented = true,
             Event::Output(_, OutputEvent::ModeChanged) | Event::LayoutChanged => {
                 self.arrange_monitors();
@@ -236,26 +238,45 @@ impl<'a> State<'a> {
         let shell = self.services.shell();
         match event {
             ToplevelEvent::Created => {
-                let Some(toplevel) = shell.toplevel(surface) else { return };
+                let Some(toplevel) = shell.toplevel(surface) else {
+                    return;
+                };
                 let rule = self.config.rule_for(&toplevel.app_id(), &toplevel.title());
                 self.windows.insert(id, rule);
-                self.desktop.add_window(id, WindowHint { width: rule.default_width });
+                self.desktop.add_window(
+                    id,
+                    WindowHint {
+                        width: rule.default_width,
+                    },
+                );
             }
             ToplevelEvent::Map => {
-                let Some(window) = self.windows.get_mut(id) else { return };
+                let Some(window) = self.windows.get_mut(id) else {
+                    return;
+                };
                 window.mapped = true;
                 let scale = f64::from(self.services.layout.primary_scale());
-                self.services.globals.fractional_scale().set_scale(surface, scale);
+                self.services
+                    .globals
+                    .fractional_scale()
+                    .set_scale(surface, scale);
                 let rule = window.rule;
                 // A window that hid itself left the layout on unmap.
                 let known = self.desktop.monitors().iter().flat_map(|m| &m.workspaces);
                 if !known.into_iter().any(|w| w.layout.contains(id)) {
-                    self.desktop.add_window(id, WindowHint { width: rule.default_width });
+                    self.desktop.add_window(
+                        id,
+                        WindowHint {
+                            width: rule.default_width,
+                        },
+                    );
                 }
                 self.desktop.focus_window(id);
             }
             ToplevelEvent::Unmap => {
-                let Some(window) = self.windows.get_mut(id) else { return };
+                let Some(window) = self.windows.get_mut(id) else {
+                    return;
+                };
                 window.mapped = false;
                 window.configured = None;
                 let rule = window.rule;
@@ -279,7 +300,9 @@ impl<'a> State<'a> {
                 self.answer_request(id);
             }
             ToplevelEvent::IdentityChange => {
-                let Some(toplevel) = shell.toplevel(surface) else { return };
+                let Some(toplevel) = shell.toplevel(surface) else {
+                    return;
+                };
                 let rule = self.config.rule_for(&toplevel.app_id(), &toplevel.title());
                 if let Some(window) = self.windows.get_mut(id) {
                     window.rule = rule;
@@ -306,7 +329,9 @@ impl<'a> State<'a> {
             }
             LayerSurfaceEvent::Map => {
                 self.layers.set_mapped(surface, true);
-                let wants = shell.layer_surface(surface).map(|l| l.keyboard_interactivity());
+                let wants = shell
+                    .layer_surface(surface)
+                    .map(|l| l.keyboard_interactivity());
                 if wants == Some(KeyboardInteractivity::Exclusive) {
                     self.layer_focus = Some(surface);
                 }
@@ -321,7 +346,9 @@ impl<'a> State<'a> {
             }
             LayerSurfaceEvent::StateChange => {}
             LayerSurfaceEvent::NewPopup(popup) => {
-                self.services.popups.set_parent(self.services.shell(), popup, surface);
+                self.services
+                    .popups
+                    .set_parent(self.services.shell(), popup, surface);
                 return;
             }
         }
@@ -340,7 +367,8 @@ impl<'a> State<'a> {
             let full = self.services.layout.output_box(output);
             let id = output.id().0;
             let usable = self.layers.arrange(id as u32, full, full);
-            self.desktop.set_monitor_geometry(id, logical(full), logical(usable));
+            self.desktop
+                .set_monitor_geometry(id, logical(full), logical(usable));
         }
         if let Some(monitor) = self.desktop.monitors().first() {
             let (w, h) = (monitor.usable.w as i32, monitor.usable.h as i32);
@@ -364,7 +392,12 @@ impl<'a> State<'a> {
     /// Tell clients what the layout decided, sending only what changed.
     fn configure_windows(&mut self) {
         let shell = self.services.shell();
-        let Self { desktop, windows, placements, .. } = self;
+        let Self {
+            desktop,
+            windows,
+            placements,
+            ..
+        } = self;
         for monitor in desktop.monitors() {
             for workspace in &monitor.workspaces {
                 placements.clear();
@@ -372,7 +405,9 @@ impl<'a> State<'a> {
                 for placement in placements.iter() {
                     let size = (placement.rect.w as i32, placement.rect.h as i32);
                     let wanted = (size.0, size.1, placement.fullscreen);
-                    let Some(window) = windows.get_mut(placement.id) else { continue };
+                    let Some(window) = windows.get_mut(placement.id) else {
+                        continue;
+                    };
                     if window.configured == Some(wanted) {
                         continue;
                     }
@@ -392,9 +427,10 @@ impl<'a> State<'a> {
 
     /// Give the keyboard to whoever should have it.
     fn sync_focus(&mut self) {
-        let window = self.desktop.focused_window().filter(|&id| {
-            self.windows.get(id).is_some_and(|w| w.mapped)
-        });
+        let window = self
+            .desktop
+            .focused_window()
+            .filter(|&id| self.windows.get(id).is_some_and(|w| w.mapped));
         let want = self.layer_focus.or(window.map(surface_of));
         if want == self.focus {
             return;
@@ -431,11 +467,15 @@ impl<'a> State<'a> {
             layers: &self.layers,
             popups: self.services.popups,
         };
-        let mut animating =
-            self.composer.compose(&mut self.desktop, &host, now, &mut self.scene);
+        let mut animating = self
+            .composer
+            .compose(&mut self.desktop, &host, now, &mut self.scene);
         if let Some(monitor) = self.desktop.focused_monitor() {
-            let context =
-                OverlayContext { renderer: self.services.renderer, monitor: monitor.rect, now };
+            let context = OverlayContext {
+                renderer: self.services.renderer,
+                monitor: monitor.rect,
+                now,
+            };
             animating |= self.hotkeys.draw(&context, &mut self.scene);
         }
         self.animating = animating;
@@ -444,5 +484,9 @@ impl<'a> State<'a> {
 }
 
 pub(crate) fn mod_key(config: &Config, nested: bool) -> u32 {
-    if nested { config.input.nested_mod_key } else { config.input.mod_key }
+    if nested {
+        config.input.nested_mod_key
+    } else {
+        config.input.mod_key
+    }
 }

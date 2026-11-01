@@ -5,14 +5,15 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "BSD-2-Clause"
 
 [workspace.dependencies]
 pastel-core = { path = "crates/pastel-core" }
 pastel-layout = { path = "crates/pastel-layout" }
 pastel-config = { path = "crates/pastel-config" }
 pastel-render = { path = "crates/pastel-render" }
-# A sibling checkout: Pastel needs changes that aren't on GitHub yet (AGENTS.md).
-luminaria = { path = "../luminaria/bindings/rust", features = ["text"] }
+# Pinned to a commit; bump `rev` to update. To hack on both, see AGENTS.md.
+luminaria = { git = "https://github.com/antinomie1/luminaria", rev = "e016e63c4e45a9f2e6deabc8404ef062dfb8cdd3", features = ["text"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 

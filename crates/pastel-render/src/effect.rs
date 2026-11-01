@@ -50,7 +50,10 @@ impl Effect for Shadow {
         if window.fullscreen || self.size <= 0.0 {
             return;
         }
-        let shadow = Rgba { a: self.color.a * window.alpha, ..self.color };
+        let shadow = Rgba {
+            a: self.color.a * window.alpha,
+            ..self.color
+        };
         let caster = to_pixels(window.rect.inflated(self.grow));
         let item = SceneItem::rect(caster, Color::rgba(0.0, 0.0, 0.0, 0.0))
             .with_corner_radius(self.radius)
@@ -110,7 +113,7 @@ struct Blur {
 impl Effect for Blur {
     fn style(&self, window: &WindowFrame, item: &mut SceneItem) {
         if !window.fullscreen && window.rule.blur.unwrap_or(self.enabled) {
-            *item = item.with_blur(self.xray);
+            *item = item.with_blur(self.xray).with_blur_opacity(window.alpha);
         }
     }
 }
@@ -143,7 +146,10 @@ impl Pipeline {
             }),
             Box::new(Rounding(radius)),
             Box::new(Opacity(config.opacity)),
-            Box::new(Blur { enabled: config.blur, xray: config.blur_xray }),
+            Box::new(Blur {
+                enabled: config.blur,
+                xray: config.blur_xray,
+            }),
         ])
     }
 

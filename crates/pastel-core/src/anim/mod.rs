@@ -26,12 +26,22 @@ pub struct Anim {
 impl Anim {
     /// At rest at `value`.
     pub fn new(value: f64, curve: Rc<dyn Curve>) -> Self {
-        Self { from: value, to: value, start: 0.0, v0: 0.0, curve }
+        Self {
+            from: value,
+            to: value,
+            start: 0.0,
+            v0: 0.0,
+            curve,
+        }
     }
 
     fn sample(&self, now: f64) -> Sample {
         if self.from == self.to {
-            return Sample { value: 1.0, velocity: 0.0, done: true };
+            return Sample {
+                value: 1.0,
+                velocity: 0.0,
+                done: true,
+            };
         }
         self.curve.sample((now - self.start).max(0.0), self.v0)
     }
@@ -64,7 +74,11 @@ impl Anim {
         self.to = to;
         self.start = now;
         // Rescale to the new distance: velocity is in progress per second.
-        self.v0 = if value == to { 0.0 } else { velocity / (to - value) };
+        self.v0 = if value == to {
+            0.0
+        } else {
+            velocity / (to - value)
+        };
     }
 
     /// Replay from `from` to the current target.
@@ -121,11 +135,21 @@ impl AnimRect {
     }
 
     pub fn value(&self, now: f64) -> Rect {
-        Rect::new(self.x.value(now), self.y.value(now), self.w.value(now), self.h.value(now))
+        Rect::new(
+            self.x.value(now),
+            self.y.value(now),
+            self.w.value(now),
+            self.h.value(now),
+        )
     }
 
     pub fn target(&self) -> Rect {
-        Rect::new(self.x.target(), self.y.target(), self.w.target(), self.h.target())
+        Rect::new(
+            self.x.target(),
+            self.y.target(),
+            self.w.target(),
+            self.h.target(),
+        )
     }
 
     pub fn set(&mut self, rect: Rect, now: f64) {

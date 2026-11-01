@@ -30,7 +30,14 @@ pub struct Windows {
 
 impl Windows {
     pub fn insert(&mut self, id: WindowId, rule: ResolvedRule) {
-        self.map.insert(id, Window { rule, mapped: false, configured: None });
+        self.map.insert(
+            id,
+            Window {
+                rule,
+                mapped: false,
+                configured: None,
+            },
+        );
     }
 
     pub fn remove(&mut self, id: WindowId) -> Option<Window> {
@@ -68,7 +75,9 @@ impl Host for SceneHost<'_, '_> {
     }
 
     fn window(&self, id: WindowId, x: i32, y: i32) -> Option<SceneItem> {
-        self.shell.toplevel(surface_of(id)).map(|t| SceneItem::toplevel(&t, x, y))
+        self.shell
+            .toplevel(surface_of(id))
+            .map(|t| SceneItem::toplevel(&t, x, y))
     }
 
     fn rule(&self, id: WindowId) -> ResolvedRule {

@@ -6,7 +6,8 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::Client;
-use luminaria::backend::{BackendKind, BackendOptions, InputEvent, Modifiers};
+use luminaria::Event;
+use luminaria::backend::{BackendKind, BackendOptions, InputEvent, Modifiers, OutputEvent};
 use luminaria::core::Display;
 use luminaria::util::{KeymapState, Keysym};
 use pastel::app;
@@ -27,14 +28,19 @@ const BLUE: u32 = 0xff5070d0;
 /// Run a scenario on a fresh compositor.
 fn scenario(config: &str, body: impl for<'a> FnOnce(&mut State<'a>, &'a Display, &Client)) {
     let config = Config::parse(config).expect("config");
-    let options = BackendOptions { kind: BackendKind::Headless, ..BackendOptions::default() };
+    let options = BackendOptions {
+        kind: BackendKind::Headless,
+        ..BackendOptions::default()
+    };
     app::run(options, config, None, |state, display| {
         let seat = state.services.globals.seat();
         seat.set_capabilities(true, true, false);
         let keymap = KeymapState::from_layout("us").expect("keymap").text();
         assert!(seat.set_keymap(&keymap));
         let client = Client::connect(state.socket());
-        settle(state, display, "output arrives", |s| !s.desktop.monitors().is_empty());
+        settle(state, display, "output arrives", |s| {
+            !s.desktop.monitors().is_empty()
+        });
         body(state, display, &client);
         Ok(())
     })
@@ -42,7 +48,12 @@ fn scenario(config: &str, body: impl for<'a> FnOnce(&mut State<'a>, &'a Display,
 }
 
 /// Run the loop until `done`, or fail saying what never happened.
-fn settle(state: &mut State<'_>, display: &Display, what: &str, mut done: impl FnMut(&State<'_>) -> bool) {
+fn settle(
+    state: &mut State<'_>,
+    display: &Display,
+    what: &str,
+    mut done: impl FnMut(&State<'_>) -> bool,
+) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !done(state) {
         assert!(Instant::now() < deadline, "timed out waiting: {what}");
@@ -51,13 +62,32 @@ fn settle(state: &mut State<'_>, display: &Display, what: &str, mut done: impl F
 }
 
 fn press(state: &mut State<'_>, mods: u32, key: u32, keysym: Keysym) {
-    let modifiers = Modifiers { depressed: mods, ..Modifiers::default() };
-    state.input(InputEvent::Key { key, pressed: true, keysym, modifiers });
-    state.input(InputEvent::Key { key, pressed: false, keysym, modifiers });
+    let modifiers = Modifiers {
+        depressed: mods,
+        ..Modifiers::default()
+    };
+    state.input(InputEvent::Key {
+        key,
+        pressed: true,
+        keysym,
+        modifiers,
+    });
+    state.input(InputEvent::Key {
+        key,
+        pressed: false,
+        keysym,
+        modifiers,
+    });
 }
 
 fn window_count(state: &State<'_>) -> usize {
-    state.desktop.monitors().iter().flat_map(|m| &m.workspaces).map(|w| w.layout.len()).sum()
+    state
+        .desktop
+        .monitors()
+        .iter()
+        .flat_map(|m| &m.workspaces)
+        .map(|w| w.layout.len())
+        .sum()
 }
 
 fn wait_for_windows(state: &mut State<'_>, display: &Display, count: usize) {
@@ -66,7 +96,9 @@ fn wait_for_windows(state: &mut State<'_>, display: &Display, count: usize) {
             && s.desktop.monitors()[0].workspaces.iter().all(|w| {
                 let mut placed = Vec::new();
                 w.layout.place(&mut placed);
-                placed.iter().all(|p| s.windows.get(p.id).is_some_and(|w| w.mapped))
+                placed
+                    .iter()
+                    .all(|p| s.windows.get(p.id).is_some_and(|w| w.mapped))
             })
     });
 }
@@ -106,7 +138,11 @@ fn bindings_move_focus_and_never_reach_clients() {
         press(state, LOGO, KEY_H, Keysym::h);
         settle(state, display, "focus left", |_| client.seen(0).activated);
         assert!(!client.seen(1).activated);
-        assert!(client.keys().is_empty(), "the binding leaked: {:?}", client.keys());
+        assert!(
+            client.keys().is_empty(),
+            "the binding leaked: {:?}",
+            client.keys()
+        );
     });
 }
 
@@ -157,7 +193,9 @@ fn closing_asks_the_client_and_its_window_leaves_when_it_goes() {
         client.open("one", RED);
         wait_for_windows(state, display, 1);
         press(state, LOGO, KEY_Q, Keysym::q);
-        settle(state, display, "close request", |_| client.seen(0).close_requests == 1);
+        settle(state, display, "close request", |_| {
+            client.seen(0).close_requests == 1
+        });
         assert_eq!(window_count(state), 1, "the client decides when it's gone");
         client.close(0);
         settle(state, display, "window gone", |s| window_count(s) == 0);
@@ -184,11 +222,45 @@ fn nothing_moving_means_no_timer_at_all() {
     scenario("[overlay]\nat-startup = false", |state, display, client| {
         client.open("one", RED);
         wait_for_windows(state, display, 1);
-        settle(state, display, "animations finish", |s| s.timeout().is_none());
+        settle(state, display, "animations finish", |s| {
+            s.timeout().is_none()
+        });
         client.close(0);
         settle(state, display, "ghost appears", |s| s.timeout().is_some());
         settle(state, display, "ghost fades", |s| s.timeout().is_none());
         assert!(window_id_unknown(state));
+    });
+}
+
+/// Rounded and translucent windows go through an offscreen group. Those must stop
+/// producing frames when nothing changes, or the screen never idles.
+#[test]
+fn a_still_screen_presents_nothing_even_with_rounded_translucent_windows() {
+    let config = "[overlay]\nat-startup = false\n[window]\nopacity = 0.8";
+    scenario(config, |state, display, client| {
+        client.open("one", RED);
+        client.open("two", BLUE);
+        wait_for_windows(state, display, 2);
+        settle(state, display, "animations finish", |s| {
+            s.timeout().is_none()
+        });
+        // What's in flight when the last animation ends.
+        for _ in 0..30 {
+            app::step(state, display, Some(Duration::from_millis(5))).expect("step");
+        }
+        let mut frames = 0;
+        let until = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < until {
+            for event in display
+                .dispatch(Some(Duration::from_millis(5)))
+                .expect("dispatch")
+            {
+                frames += usize::from(matches!(event, Event::Output(_, OutputEvent::Present(_))));
+                state.handle(event);
+            }
+            state.frame();
+        }
+        assert_eq!(frames, 0, "an idle screen must not present");
     });
 }
 

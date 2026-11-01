@@ -8,8 +8,9 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::Client;
-use luminaria::backend::{BackendKind, BackendOptions, HeadlessBackend};
+use luminaria::backend::{BackendKind, BackendOptions, HeadlessBackend, Output};
 use luminaria::core::Display;
+use luminaria::gpu::SceneOutcome;
 use luminaria::shell::SceneItem;
 use luminaria::util::{Color, Rect as PixelRect};
 use pastel::app;
@@ -20,11 +21,13 @@ use pastel_layout::{Direction, LayoutOp};
 const WIDTH: i32 = 1280;
 const HEIGHT: i32 = 800;
 const RED: u32 = 0xffd05050;
+const BLUE: u32 = 0xff5070d0;
 const GLASS: u32 = 0x60204060;
 const BG: Color = Color::rgb(0.118, 0.125, 0.157);
 
 struct Shot {
     pixels: Vec<u8>,
+    outcome: SceneOutcome,
 }
 
 impl Shot {
@@ -47,17 +50,64 @@ fn shoot(state: &State<'_>, display: &Display, name: &str, under: &[SceneItem]) 
     renderer.reset(&mut output).expect("reset");
     let mut scene = under.to_vec();
     scene.extend_from_slice(&state.scene);
-    renderer.present(&mut output, &scene, BG).expect("present");
+    let outcome = renderer.present(&mut output, &scene, BG).expect("present");
     let pixels = renderer.read_back(&output).expect("read back");
     if let Ok(dir) = std::env::var("PASTEL_SNAPSHOT_DIR") {
         std::fs::write(format!("{dir}/{name}.rgba"), &pixels).expect("write snapshot");
     }
-    Shot { pixels }
+    Shot { pixels, outcome }
+}
+
+/// One output kept across frames, so what's cached between them is really tested.
+struct Camera<'d> {
+    _backend: HeadlessBackend<'d>,
+    output: Output,
+}
+
+impl<'d> Camera<'d> {
+    fn new(state: &State<'_>, display: &'d Display) -> Self {
+        let mut backend = HeadlessBackend::new(display, 16).expect("backend");
+        let mut output = backend.add_output(WIDTH, HEIGHT).expect("output");
+        state.services.renderer.reset(&mut output).expect("reset");
+        Self {
+            _backend: backend,
+            output,
+        }
+    }
+
+    fn present(&mut self, state: &State<'_>) -> SceneOutcome {
+        state
+            .services
+            .renderer
+            .present(&mut self.output, &state.scene, BG)
+            .expect("present")
+    }
+
+    fn pixels(&mut self, state: &State<'_>) -> Shot {
+        Shot {
+            pixels: state
+                .services
+                .renderer
+                .read_back(&self.output)
+                .expect("read back"),
+            outcome: SceneOutcome::Composited,
+        }
+    }
+}
+
+/// Long enough for a client's commit to have been taken in.
+fn let_commits_arrive(state: &mut State<'_>, display: &Display) {
+    for _ in 0..10 {
+        app::step(state, display, Some(Duration::from_millis(5))).expect("step");
+    }
 }
 
 fn scenario(config: &str, body: impl for<'a> FnOnce(&mut State<'a>, &'a Display, &Client)) {
     let config = Config::parse(config).expect("config");
-    let options = BackendOptions { kind: BackendKind::Headless, ..BackendOptions::default() };
+    let options = BackendOptions {
+        kind: BackendKind::Headless,
+        ..BackendOptions::default()
+    };
     app::run(options, config, None, |state, display| {
         if !state.services.renderer.gpu_enabled() {
             eprintln!("skipped: no GPU");
@@ -99,20 +149,107 @@ fn windows_render_with_rounded_borders_gaps_and_focus() {
         at_rest(state, display, 2);
         let shot = shoot(state, display, "columns", &[]);
         let red = [0xd0, 0x50, 0x50];
-        assert!(shot.near(300, 400, red), "first window: {:?}", shot.at(300, 400));
-        assert!(shot.near(1000, 400, red), "second window: {:?}", shot.at(1000, 400));
+        assert!(
+            shot.near(300, 400, red),
+            "first window: {:?}",
+            shot.at(300, 400)
+        );
+        assert!(
+            shot.near(1000, 400, red),
+            "second window: {:?}",
+            shot.at(1000, 400)
+        );
         // Gaps show the background, darkened by the windows' shadows.
         for x in [640, 1275] {
             let gap = shot.at(x, 400);
-            assert!(gap[0] < 40 && gap[1] < 40 && gap[2] < 50, "gap at {x}: {gap:?}");
+            assert!(
+                gap[0] < 40 && gap[1] < 40 && gap[2] < 50,
+                "gap at {x}: {gap:?}"
+            );
         }
         // Left window's border is the inactive colour; the focused one's is active.
-        assert!(shot.near(11, 400, [0x4a, 0x4f, 0x5c]), "inactive: {:?}", shot.at(11, 400));
-        assert!(shot.near(645, 400, [0xa6, 0xc8, 0xff]), "active: {:?}", shot.at(645, 400));
+        assert!(
+            shot.near(11, 400, [0x4a, 0x4f, 0x5c]),
+            "inactive: {:?}",
+            shot.at(11, 400)
+        );
+        assert!(
+            shot.near(645, 400, [0xa6, 0xc8, 0xff]),
+            "active: {:?}",
+            shot.at(645, 400)
+        );
         // Corners are cut, on the window and on the border around it.
-        assert!(!shot.near(12, 12, red), "square window corner: {:?}", shot.at(12, 12));
+        assert!(
+            !shot.near(12, 12, red),
+            "square window corner: {:?}",
+            shot.at(12, 12)
+        );
         let corner = shot.at(10, 10);
         assert!(corner[0] < 45, "square border corner: {corner:?}");
+    });
+}
+
+#[test]
+fn an_idle_rounded_window_is_not_redrawn_but_new_content_is() {
+    scenario("[overlay]\nat-startup = false", |state, display, client| {
+        client.open("one", RED);
+        at_rest(state, display, 1);
+        let mut camera = Camera::new(state, display);
+        camera.present(state);
+        assert_eq!(
+            camera.present(state),
+            SceneOutcome::Unchanged,
+            "nothing moved"
+        );
+        let shot = camera.pixels(state);
+        assert!(
+            shot.near(300, 400, [0xd0, 0x50, 0x50]),
+            "{:?}",
+            shot.at(300, 400)
+        );
+
+        // The same wl_buffer with new pixels: only the commit says anything changed.
+        client.repaint(0, BLUE);
+        let_commits_arrive(state, display);
+        assert_ne!(camera.present(state), SceneOutcome::Unchanged);
+        let shot = camera.pixels(state);
+        assert!(
+            shot.near(300, 400, [0x50, 0x70, 0xd0]),
+            "stale: {:?}",
+            shot.at(300, 400)
+        );
+        assert_eq!(camera.present(state), SceneOutcome::Unchanged);
+    });
+}
+
+#[test]
+fn a_window_that_only_moves_shows_the_same_pixels_in_the_new_place() {
+    scenario("[overlay]\nat-startup = false", |state, display, client| {
+        client.open("one", RED);
+        at_rest(state, display, 1);
+        let mut camera = Camera::new(state, display);
+        camera.present(state);
+        let mut moved = state.scene.clone();
+        for item in &mut moved {
+            item.rect.x += 300;
+            item.surface_origin.0 += 300;
+        }
+        let renderer = state.services.renderer;
+        let outcome = renderer
+            .present(&mut camera.output, &moved, BG)
+            .expect("present");
+        assert_ne!(outcome, SceneOutcome::Unchanged);
+        let shot = camera.pixels(state);
+        assert!(
+            shot.near(800, 400, [0xd0, 0x50, 0x50]),
+            "{:?}",
+            shot.at(800, 400)
+        );
+        assert!(
+            !shot.near(100, 400, [0xd0, 0x50, 0x50]),
+            "{:?}",
+            shot.at(100, 400)
+        );
     });
 }
 
@@ -139,7 +276,9 @@ fn a_scrolled_layout_moves_what_is_on_screen() {
 #[test]
 fn the_hotkey_overlay_shows_text_on_a_panel() {
     scenario("", |state, display, _client| {
-        settle(state, display, |s| s.timeout().is_none() && !s.scene.is_empty());
+        settle(state, display, |s| {
+            s.timeout().is_none() && !s.scene.is_empty()
+        });
         let shot = shoot(state, display, "overlay", &[]);
         let (cx, cy) = (WIDTH / 2, HEIGHT / 2);
         // Text means a mix of bright and dark in the panel's middle.
@@ -148,7 +287,11 @@ fn the_hotkey_overlay_shows_text_on_a_panel() {
             .flat_map(|x| (0..120).map(move |y| (x, y)))
             .filter(|&(x, y)| shot.at(cx - 250 + x, cy - 60 + y)[0] > 150)
             .count();
-        assert!(bright > 200, "no text on the panel: {bright} bright pixels, {:?}", row[250]);
+        assert!(
+            bright > 200,
+            "no text on the panel: {bright} bright pixels, {:?}",
+            row[250]
+        );
     });
 }
 
@@ -166,17 +309,31 @@ fn blur_softens_what_is_behind_a_translucent_window() {
         row.iter().max().expect("row") - row.iter().min().expect("row")
     };
     let mut sharp = 0;
-    scenario("[overlay]\nat-startup = false\n[window]\nblur = false", |state, display, client| {
-        client.open("glass", GLASS);
-        at_rest(state, display, 1);
-        sharp = contrast(&shoot(state, display, "unblurred", &stripes));
-    });
+    let mut sharp_detail = String::new();
+    scenario(
+        "[overlay]\nat-startup = false\n[window]\nblur = false",
+        |state, display, client| {
+            client.open("glass", GLASS);
+            at_rest(state, display, 1);
+            let shot = shoot(state, display, "unblurred", &stripes);
+            sharp = contrast(&shot);
+            // Seen once in some 500 runs, cause unknown: a frame with no stripes.
+            let sample = (shot.at(110, 400), shot.at(130, 400), shot.at(1000, 400));
+            sharp_detail = format!("{:?}, pixels {sample:?}", shot.outcome);
+        },
+    );
     let mut soft = 0;
     scenario("[overlay]\nat-startup = false", |state, display, client| {
         client.open("glass", GLASS);
         at_rest(state, display, 1);
         soft = contrast(&shoot(state, display, "blurred", &stripes));
     });
-    assert!(sharp > 60, "the stripes should show through unblurred: {sharp}");
-    assert!(soft * 3 < sharp, "blur should flatten the stripes: {soft} vs {sharp}");
+    assert!(
+        sharp > 60,
+        "the stripes should show through unblurred: {sharp} ({sharp_detail})"
+    );
+    assert!(
+        soft * 3 < sharp,
+        "blur should flatten the stripes: {soft} vs {sharp}"
+    );
 }

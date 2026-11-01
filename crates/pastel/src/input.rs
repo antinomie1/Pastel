@@ -61,7 +61,13 @@ impl Keyboard {
                 None => eprintln!("pastel: no such key `{}`", combo.key),
             }
         }
-        Self { binds, swallowed: HashSet::new(), base: None, mods: 0, pan: None }
+        Self {
+            binds,
+            swallowed: HashSet::new(),
+            base: None,
+            mods: 0,
+            pan: None,
+        }
     }
 
     pub fn forget_held(&mut self) {
@@ -82,7 +88,12 @@ impl Keyboard {
 impl State<'_> {
     pub fn input(&mut self, event: InputEvent) {
         match event {
-            InputEvent::Key { key, pressed, keysym, modifiers } => {
+            InputEvent::Key {
+                key,
+                pressed,
+                keysym,
+                modifiers,
+            } => {
                 self.keyboard.mods = modifiers.held();
                 self.key(&event, key, pressed, keysym, modifiers);
                 return;
@@ -117,7 +128,14 @@ impl State<'_> {
         self.keyboard.mods & self.mod_key() != 0
     }
 
-    fn key(&mut self, event: &InputEvent, key: u32, pressed: bool, keysym: Keysym, mods: Modifiers) {
+    fn key(
+        &mut self,
+        event: &InputEvent,
+        key: u32,
+        pressed: bool,
+        keysym: Keysym,
+        mods: Modifiers,
+    ) {
         if !pressed {
             if !self.keyboard.swallowed.remove(&key) {
                 self.services.router.route(event);
@@ -139,7 +157,8 @@ impl State<'_> {
             return;
         }
         if self.keyboard.base.is_none() {
-            self.keyboard.base = KeymapState::from_text(&self.services.globals.seat().keymap()).ok();
+            self.keyboard.base =
+                KeymapState::from_text(&self.services.globals.seat().keymap()).ok();
         }
         match self.keyboard.lookup(mods.held(), keysym, key).cloned() {
             Some(action) => {
@@ -157,11 +176,16 @@ impl State<'_> {
             Action::Quit => self.quit = true,
             Action::Spawn(command) => {
                 // `sh` exits at once, so the program is nobody's child.
-                self.spawn(Command::new("sh").args(["-c", "\"$@\" &", "sh"]).args(&command));
+                self.spawn(
+                    Command::new("sh")
+                        .args(["-c", "\"$@\" &", "sh"])
+                        .args(&command),
+                );
             }
             Action::CloseWindow => {
                 let focused = self.desktop.focused_window();
-                let toplevel = focused.and_then(|id| self.services.shell().toplevel(surface_of(id)));
+                let toplevel =
+                    focused.and_then(|id| self.services.shell().toplevel(surface_of(id)));
                 if let Some(toplevel) = toplevel {
                     toplevel.close();
                 }
@@ -223,7 +247,9 @@ impl State<'_> {
 
     /// Keep the focused monitor under the pointer, and focus following it.
     fn pointer_moved(&mut self) {
-        let Some((x, y)) = self.services.cursor.position() else { return };
+        let Some((x, y)) = self.services.cursor.position() else {
+            return;
+        };
         self.desktop.focus_monitor_at(x, y);
         if !self.config.input.focus_follows_mouse || self.keyboard.pan.is_some() {
             return;

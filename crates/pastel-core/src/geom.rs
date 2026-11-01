@@ -32,7 +32,11 @@ impl Rect {
     }
 
     pub fn translated(&self, dx: f64, dy: f64) -> Self {
-        Self { x: self.x + dx, y: self.y + dy, ..*self }
+        Self {
+            x: self.x + dx,
+            y: self.y + dy,
+            ..*self
+        }
     }
 
     /// Grown by `by` on every side; negative shrinks. Never inverts.

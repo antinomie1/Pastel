@@ -2,9 +2,18 @@ use std::rc::Rc;
 
 use pastel_core::{Anim, AnimRect, Curve, Ease, Easing, Rect, Slowed, Snap, Spring};
 
-const CRITICAL: Spring = Spring { stiffness: 800.0, damping: 1.0 };
-const BOUNCY: Spring = Spring { stiffness: 800.0, damping: 0.5 };
-const SLUGGISH: Spring = Spring { stiffness: 800.0, damping: 2.0 };
+const CRITICAL: Spring = Spring {
+    stiffness: 800.0,
+    damping: 1.0,
+};
+const BOUNCY: Spring = Spring {
+    stiffness: 800.0,
+    damping: 0.5,
+};
+const SLUGGISH: Spring = Spring {
+    stiffness: 800.0,
+    damping: 2.0,
+};
 
 fn settle_time(curve: &dyn Curve) -> f64 {
     (0..20_000)
@@ -39,7 +48,11 @@ fn spring_velocity_is_the_derivative_of_value() {
 
 #[test]
 fn only_an_underdamped_spring_overshoots() {
-    let peak = |s: Spring| (0..1000).map(|i| s.sample(f64::from(i) / 500.0, 0.0).value).fold(0.0, f64::max);
+    let peak = |s: Spring| {
+        (0..1000)
+            .map(|i| s.sample(f64::from(i) / 500.0, 0.0).value)
+            .fold(0.0, f64::max)
+    };
     assert!(peak(BOUNCY) > 1.05);
     assert!(peak(CRITICAL) <= 1.0);
     assert!(peak(SLUGGISH) <= 1.0);
@@ -53,15 +66,24 @@ fn eases_hit_their_endpoints() {
         assert!((easing.apply(1.0) - 1.0).abs() < 1e-3, "{easing:?}");
         assert!(easing.apply(0.25) < easing.apply(0.75), "{easing:?}");
     }
-    let ease = Ease { seconds: 0.2, easing: Linear };
+    let ease = Ease {
+        seconds: 0.2,
+        easing: Linear,
+    };
     assert!((ease.sample(0.1, 0.0).value - 0.5).abs() < 1e-9);
     assert!(ease.sample(0.2, 0.0).done);
 }
 
 #[test]
 fn slowed_stretches_time() {
-    let base = Ease { seconds: 0.2, easing: Easing::Linear };
-    let slow = Slowed { inner: base, factor: 2.0 };
+    let base = Ease {
+        seconds: 0.2,
+        easing: Easing::Linear,
+    };
+    let slow = Slowed {
+        inner: base,
+        factor: 2.0,
+    };
     assert!((slow.sample(0.2, 0.0).value - 0.5).abs() < 1e-9);
     assert!(!slow.sample(0.39, 0.0).done);
     assert!(slow.sample(0.4, 0.0).done);
@@ -69,7 +91,13 @@ fn slowed_stretches_time() {
 
 #[test]
 fn anim_interpolates_between_any_two_values() {
-    let mut a = Anim::new(100.0, Rc::new(Ease { seconds: 1.0, easing: Easing::Linear }));
+    let mut a = Anim::new(
+        100.0,
+        Rc::new(Ease {
+            seconds: 1.0,
+            easing: Easing::Linear,
+        }),
+    );
     a.set(300.0, 10.0);
     assert_eq!(a.value(10.0), 100.0);
     assert_eq!(a.value(10.5), 200.0);
@@ -128,7 +156,13 @@ fn snap_curve_jumps() {
 
 #[test]
 fn shift_moves_the_whole_flight() {
-    let mut a = Anim::new(0.0, Rc::new(Ease { seconds: 1.0, easing: Easing::Linear }));
+    let mut a = Anim::new(
+        0.0,
+        Rc::new(Ease {
+            seconds: 1.0,
+            easing: Easing::Linear,
+        }),
+    );
     a.set(100.0, 0.0);
     a.shift(10.0);
     assert_eq!(a.value(0.5), 60.0);

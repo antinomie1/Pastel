@@ -15,7 +15,10 @@ fn an_empty_config_is_a_working_desktop() {
     let config = Config::parse("").expect("defaults are valid");
     assert_eq!(config.layout.kind, "scrolling");
     let table = config.binds.table(config.input.mod_key);
-    let quit = Combo { mods: LOGO | SHIFT, key: "e".into() };
+    let quit = Combo {
+        mods: LOGO | SHIFT,
+        key: "e".into(),
+    };
     assert_eq!(table.get(&quit), Some(&Action::Quit));
     assert!(table.len() > 50);
 }
@@ -37,7 +40,11 @@ fn every_default_action_with_a_title_has_a_section() {
     let titled = config.binds.iter().filter_map(|(_, a)| a.title());
     let sections: Vec<Section> = titled.map(|(s, _)| s).collect();
     for section in Section::ALL {
-        assert!(sections.contains(&section), "nothing under {}", section.title());
+        assert!(
+            sections.contains(&section),
+            "nothing under {}",
+            section.title()
+        );
     }
 }
 
@@ -75,7 +82,10 @@ fn user_binds_merge_over_the_defaults() {
     )
     .expect("parses");
     let table = config.binds.table(LOGO);
-    let key = |k: &str| Combo { mods: LOGO, key: k.into() };
+    let key = |k: &str| Combo {
+        mods: LOGO,
+        key: k.into(),
+    };
     assert_eq!(table.get(&key("q")), Some(&Action::Quit));
     assert_eq!(table.get(&key("d")), None);
     let spawn = Action::Spawn(vec!["alacritty".into(), "-e".into(), "htop".into()]);
@@ -88,7 +98,10 @@ fn nested_mod_is_separate_from_the_real_one() {
     let config = Config::parse("").expect("defaults are valid");
     assert_eq!(config.input.mod_key, LOGO);
     assert_eq!(config.input.nested_mod_key, ALT);
-    assert!(config.binds.table(ALT).contains_key(&Combo { mods: ALT, key: "q".into() }));
+    assert!(config.binds.table(ALT).contains_key(&Combo {
+        mods: ALT,
+        key: "q".into()
+    }));
 }
 
 #[test]
@@ -99,7 +112,11 @@ fn layout_section_reaches_the_options() {
     .expect("parses");
     assert_eq!(config.layout.gap, 4.0);
     assert_eq!(config.layout.center_focus, CenterFocus::OnOverflow);
-    assert_eq!(config.layout.preset_widths, [0.25, 0.75], "sorted for cycling");
+    assert_eq!(
+        config.layout.preset_widths,
+        [0.25, 0.75],
+        "sorted for cycling"
+    );
 }
 
 #[test]
@@ -113,7 +130,10 @@ fn animations_can_be_tuned_or_turned_off() {
         "#,
     )
     .expect("parses");
-    assert!(!tuned.animation.window_open.sample(0.9, 0.0).done, "slowdown stretches");
+    assert!(
+        !tuned.animation.window_open.sample(0.9, 0.0).done,
+        "slowdown stretches"
+    );
     assert!(tuned.animation.window_open.sample(1.0, 0.0).done);
     let off = Config::parse("[animation]\nenabled = false").expect("parses");
     assert!(off.animation.window_movement.sample(0.0, 0.0).done);
@@ -141,22 +161,52 @@ fn rules_match_by_substring_and_later_ones_win() {
     )
     .expect("parses");
     let foot = config.rule_for("Foot", "shell");
-    assert_eq!(foot.opacity, Some(0.95), "case-sensitive: only the catch-all matched");
-    assert_eq!(config.rule_for("org.foot.Foot", "shell").opacity, Some(0.8), "substring");
+    assert_eq!(
+        foot.opacity,
+        Some(0.95),
+        "case-sensitive: only the catch-all matched"
+    );
+    assert_eq!(
+        config.rule_for("org.foot.Foot", "shell").opacity,
+        Some(0.8),
+        "substring"
+    );
     let foot = config.rule_for("foot", "shell");
     assert_eq!(foot.opacity, Some(0.8));
     assert_eq!(foot.default_width, Some(0.33));
     assert_eq!(config.rule_for("kitty", "x").opacity, Some(0.95));
-    assert_eq!(config.rule_for("firefox", "x").blur, None, "needs both patterns");
+    assert_eq!(
+        config.rule_for("firefox", "x").blur,
+        None,
+        "needs both patterns"
+    );
     assert_eq!(config.rule_for("firefox", "Secret tab").blur, Some(false));
 }
 
 #[test]
 fn combos_parse_modifiers_in_any_case_and_order() {
-    assert_eq!(combo("Ctrl+Alt+Delete"), Combo { mods: CTRL | ALT, key: "Delete".into() });
-    assert_eq!(combo("shift+control+x"), Combo { mods: CTRL | SHIFT, key: "x".into() });
+    assert_eq!(
+        combo("Ctrl+Alt+Delete"),
+        Combo {
+            mods: CTRL | ALT,
+            key: "Delete".into()
+        }
+    );
+    assert_eq!(
+        combo("shift+control+x"),
+        Combo {
+            mods: CTRL | SHIFT,
+            key: "x".into()
+        }
+    );
     assert_eq!(combo("Super+Q"), combo("logo+q"));
-    assert_eq!(combo("F11"), Combo { mods: 0, key: "F11".into() });
+    assert_eq!(
+        combo("F11"),
+        Combo {
+            mods: 0,
+            key: "F11".into()
+        }
+    );
     assert!("Mod+".parse::<Combo>().is_err());
     assert!("".parse::<Combo>().is_err());
     assert!("Meta+Q".parse::<Combo>().is_err());
@@ -164,8 +214,20 @@ fn combos_parse_modifiers_in_any_case_and_order() {
 
 #[test]
 fn only_mod_resolves() {
-    assert_eq!(combo("Mod+Shift+H").resolved(ALT), Combo { mods: ALT | SHIFT, key: "h".into() });
-    assert_eq!(combo("Ctrl+H").resolved(ALT), Combo { mods: CTRL, key: "h".into() });
+    assert_eq!(
+        combo("Mod+Shift+H").resolved(ALT),
+        Combo {
+            mods: ALT | SHIFT,
+            key: "h".into()
+        }
+    );
+    assert_eq!(
+        combo("Ctrl+H").resolved(ALT),
+        Combo {
+            mods: CTRL,
+            key: "h".into()
+        }
+    );
 }
 
 #[test]
@@ -196,9 +258,18 @@ fn modifier_names() {
 #[test]
 fn actions_parse_with_and_without_arguments() {
     assert_eq!(action("quit"), Action::Quit);
-    assert_eq!(action("  focus-column-left "), Action::Layout(LayoutOp::Focus(Direction::Left)));
-    assert_eq!(action("focus-workspace 3"), Action::FocusWorkspace(WorkspaceTarget::Index(2)));
-    assert_eq!(action("move-to-workspace 1"), Action::MoveToWorkspace(WorkspaceTarget::Index(0)));
+    assert_eq!(
+        action("  focus-column-left "),
+        Action::Layout(LayoutOp::Focus(Direction::Left))
+    );
+    assert_eq!(
+        action("focus-workspace 3"),
+        Action::FocusWorkspace(WorkspaceTarget::Index(2))
+    );
+    assert_eq!(
+        action("move-to-workspace 1"),
+        Action::MoveToWorkspace(WorkspaceTarget::Index(0))
+    );
     assert_eq!(action("spawn foot"), Action::Spawn(vec!["foot".into()]));
     assert!("spawn".parse::<Action>().is_err());
     assert!("quit now".parse::<Action>().is_err());
@@ -231,9 +302,16 @@ fn overlay_rows_fold_keys_that_share_a_title() {
     binds.set(combo("Ctrl+Left"), action("focus-column-left"));
     let rows = binds.overlay_rows(LOGO);
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].section, Section::Windows, "section order, not bind order");
+    assert_eq!(
+        rows[0].section,
+        Section::Windows,
+        "section order, not bind order"
+    );
     assert_eq!(rows[0].title, "Focus column");
-    assert_eq!(rows[0].keys, "Mod + H / Mod + L / Ctrl + LEFT".replace("LEFT", "Left"));
+    assert_eq!(
+        rows[0].keys,
+        "Mod + H / Mod + L / Ctrl + LEFT".replace("LEFT", "Left")
+    );
     assert_eq!(rows[1].keys, "Mod + Q");
 }
 
@@ -241,9 +319,15 @@ fn overlay_rows_fold_keys_that_share_a_title() {
 fn overlay_rows_shorten_a_shared_prefix_and_truncate() {
     let config = Config::parse("").expect("defaults are valid");
     let rows = config.binds.overlay_rows(LOGO);
-    let row = rows.iter().find(|r| r.title == "Go to workspace").expect("row");
+    let row = rows
+        .iter()
+        .find(|r| r.title == "Go to workspace")
+        .expect("row");
     assert_eq!(row.keys, "Mod + 1 / 2 / 3 / 4 …");
-    let row = rows.iter().find(|r| r.title == "Focus column").expect("row");
+    let row = rows
+        .iter()
+        .find(|r| r.title == "Focus column")
+        .expect("row");
     assert_eq!(row.keys, "Mod + H / L / Left / Right");
     assert!(rows.iter().any(|r| r.title == "Run foot"));
 }

@@ -36,7 +36,10 @@ fn places(d: &Desktop) -> Vec<Placement> {
 
 #[test]
 fn unknown_layouts_are_refused() {
-    let options = LayoutOptions { kind: "spiral".into(), ..LayoutOptions::default() };
+    let options = LayoutOptions {
+        kind: "spiral".into(),
+        ..LayoutOptions::default()
+    };
     assert!(create(&options).is_none());
     assert!(Desktop::new(options).is_none());
 }
@@ -193,7 +196,11 @@ fn panels_shrink_every_workspace() {
     assert_eq!(places(&d)[0].rect.y, 42.0);
     d.focus_workspace(Down);
     add(&mut d, B);
-    assert_eq!(places(&d)[0].rect.y, 42.0, "new workspaces inherit the usable area");
+    assert_eq!(
+        places(&d)[0].rect.y,
+        42.0,
+        "new workspaces inherit the usable area"
+    );
 }
 
 #[test]
@@ -217,7 +224,13 @@ fn moving_to_a_monitor_follows_the_window() {
     assert_eq!(d.focused_monitor().expect("monitor").id, 2);
     assert_eq!(d.focused_window(), Some(A));
     assert!(places(&d)[0].rect.x >= 1000.0);
-    assert!(d.monitor(1).expect("monitor").active_workspace().layout.is_empty());
+    assert!(
+        d.monitor(1)
+            .expect("monitor")
+            .active_workspace()
+            .layout
+            .is_empty()
+    );
 }
 
 #[test]
@@ -227,7 +240,11 @@ fn the_pointer_can_change_the_focused_monitor() {
     d.focus_monitor_at(1500.0, 300.0);
     assert_eq!(d.focused_monitor().expect("monitor").id, 2);
     d.focus_monitor_at(-5.0, -5.0);
-    assert_eq!(d.focused_monitor().expect("monitor").id, 2, "nowhere keeps the old one");
+    assert_eq!(
+        d.focused_monitor().expect("monitor").id,
+        2,
+        "nowhere keeps the old one"
+    );
 }
 
 #[test]
@@ -251,7 +268,7 @@ fn unplugging_everything_parks_windows_until_a_monitor_returns() {
     d.remove_monitor(1);
     assert!(d.monitors().is_empty());
     assert_eq!(d.focused_window(), None);
-    assert!(d.remove_window(WindowId(9)) == false);
+    assert!(!d.remove_window(WindowId(9)));
     d.add_monitor(3, RIGHT);
     assert_eq!(d.focused_window(), Some(A));
     assert!(places(&d)[0].rect.x >= 1000.0);
@@ -267,7 +284,10 @@ fn workspace_ids_survive_reordering() {
     d.focus_workspace(Index(0));
     d.remove_window(A);
     d.focus_workspace(Down);
-    assert_eq!(d.focused_monitor().expect("monitor").active_workspace().id, id);
+    assert_eq!(
+        d.focused_monitor().expect("monitor").active_workspace().id,
+        id
+    );
 }
 
 #[test]

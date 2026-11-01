@@ -84,7 +84,10 @@ impl Composer {
                 focus: a.focus_ring.clone(),
             },
             pipeline: Pipeline::from_config(&config.window),
-            ghost_tint: color(Rgba { a: GHOST_ALPHA, ..config.window.inactive_color }),
+            ghost_tint: color(Rgba {
+                a: GHOST_ALPHA,
+                ..config.window.inactive_color
+            }),
             visuals: HashMap::new(),
             views: HashMap::new(),
             ghosts: Vec::new(),
@@ -110,13 +113,20 @@ impl Composer {
 
     /// A window is gone. If it was on screen, it leaves a ghost to fade out.
     pub fn close(&mut self, id: WindowId, rule: ResolvedRule, now: f64) {
-        let Some(visual) = self.visuals.remove(&id) else { return };
+        let Some(visual) = self.visuals.remove(&id) else {
+            return;
+        };
         if !visual.shown {
             return;
         }
         let mut fade = Anim::new(0.0, self.curves.close.clone());
         fade.set(1.0, now);
-        self.ghosts.push(Ghost { id, rect: visual.rect.value(now), fade, rule });
+        self.ghosts.push(Ghost {
+            id,
+            rect: visual.rect.value(now),
+            fade,
+            rule,
+        });
     }
 
     /// Forget a monitor that left.
@@ -134,6 +144,9 @@ impl Composer {
         items: &mut Vec<SceneItem>,
     ) -> bool {
         items.clear();
+        // Before drawing: a finished ghost must not get one more frame, which
+        // would be the last one and stay on screen.
+        self.ghosts.retain(|ghost| !ghost.fade.is_done(now));
         let mut animating = false;
         for monitor in desktop.monitors_mut() {
             let curve = &self.curves.workspace;
@@ -172,7 +185,6 @@ impl Composer {
             }
             host.layers(monitor.id, Layer::Overlay, items);
         }
-        self.ghosts.retain(|ghost| !ghost.fade.is_done(now));
         host.popups(items);
         animating
     }
@@ -211,7 +223,10 @@ impl Composer {
                 continue;
             }
             let open = visual.open.value(now).clamp(0.0, 1.0);
-            let rect = visual.rect.value(now).translated(0.0, dy + (1.0 - open) * OPEN_SLIDE);
+            let rect = visual
+                .rect
+                .value(now)
+                .translated(0.0, dy + (1.0 - open) * OPEN_SLIDE);
             let frame = WindowFrame {
                 id: placement.id,
                 rect: from_pixels(to_pixels(rect)),
@@ -253,11 +268,15 @@ impl Composer {
             return;
         }
         let bounds = to_pixels(frame.rect);
-        let Some(mut item) = host.window(frame.id, bounds.x, bounds.y) else { return };
+        let Some(mut item) = host.window(frame.id, bounds.x, bounds.y) else {
+            return;
+        };
         let visible = to_pixels(clip_to(frame.rect, clip));
         // Clip to the animated box: mid-resize the client's buffer is still the
         // old size, and must not stick out past its border.
-        let Some(shown) = item.rect.intersection(&visible) else { return };
+        let Some(shown) = item.rect.intersection(&visible) else {
+            return;
+        };
         item.rect = shown;
         item.alpha = frame.alpha;
         let start = items.len();
@@ -320,7 +339,12 @@ fn clip_of(monitors: &[Monitor], monitor: &Monitor) -> Rect {
     let r = monitor.rect;
     let beside = |o: &Rect| o.y < r.bottom() && o.bottom() > r.y;
     let stacked = |o: &Rect| o.x < r.right() && o.right() > r.x;
-    let others = || monitors.iter().filter(|m| m.id != monitor.id).map(|m| &m.rect);
+    let others = || {
+        monitors
+            .iter()
+            .filter(|m| m.id != monitor.id)
+            .map(|m| &m.rect)
+    };
     let left = others().any(|o| beside(o) && o.right() <= r.x);
     let right = others().any(|o| beside(o) && o.x >= r.right());
     let up = others().any(|o| stacked(o) && o.bottom() <= r.y);

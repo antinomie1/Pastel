@@ -38,7 +38,9 @@ fn run_on<'d, R>(
 ) -> Result<R, Error> {
     options.title = "Pastel".into();
     let globals = CoreGlobals::new(display)?.forward_window_requests();
-    globals.decoration().set_default_mode(DecorationMode::ServerSide);
+    globals
+        .decoration()
+        .set_default_mode(DecorationMode::ServerSide);
     let (shell, seat) = (globals.shell(), globals.seat());
     let layer_shell = LayerShell::new(display)?;
     let layout = OutputLayout::new()?;
@@ -48,7 +50,10 @@ fn run_on<'d, R>(
 
     let renderer = SceneRenderer::new(&backend.vulkan_options())?;
     if !renderer.gpu_enabled() {
-        eprintln!("pastel: no GPU ({}): no rounding, shadows or blur", renderer.gpu_error());
+        eprintln!(
+            "pastel: no GPU ({}): no rounding, shadows or blur",
+            renderer.gpu_error()
+        );
     }
     renderer.set_presentation(Some(globals.presentation()));
     let _dmabuf = renderer.linux_dmabuf(display);
@@ -113,7 +118,11 @@ pub fn main_loop(
     deadline: Option<Instant>,
 ) -> Result<(), Error> {
     while !state.quit && deadline.is_none_or(|d| Instant::now() < d) {
-        step(state, display, deadline.map(|d| d.saturating_duration_since(Instant::now())))?;
+        step(
+            state,
+            display,
+            deadline.map(|d| d.saturating_duration_since(Instant::now())),
+        )?;
     }
     Ok(())
 }

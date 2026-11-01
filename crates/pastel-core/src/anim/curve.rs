@@ -26,7 +26,11 @@ pub struct Snap;
 
 impl Curve for Snap {
     fn sample(&self, _t: f64, _v0: f64) -> Sample {
-        Sample { value: 1.0, velocity: 0.0, done: true }
+        Sample {
+            value: 1.0,
+            velocity: 0.0,
+            done: true,
+        }
     }
 }
 
@@ -71,9 +75,17 @@ impl Curve for Spring {
         };
         let done = d.abs() < REST_DISTANCE && v.abs() < REST_VELOCITY;
         if done {
-            Sample { value: 1.0, velocity: 0.0, done }
+            Sample {
+                value: 1.0,
+                velocity: 0.0,
+                done,
+            }
         } else {
-            Sample { value: 1.0 + d, velocity: v, done }
+            Sample {
+                value: 1.0 + d,
+                velocity: v,
+                done,
+            }
         }
     }
 }
@@ -114,13 +126,21 @@ pub struct Ease {
 impl Curve for Ease {
     fn sample(&self, t: f64, _v0: f64) -> Sample {
         if self.seconds <= 0.0 || t >= self.seconds {
-            return Sample { value: 1.0, velocity: 0.0, done: true };
+            return Sample {
+                value: 1.0,
+                velocity: 0.0,
+                done: true,
+            };
         }
         let x = t / self.seconds;
         let step = 1e-4;
-        let velocity = (self.easing.apply((x + step).min(1.0)) - self.easing.apply(x)) / step
-            / self.seconds;
-        Sample { value: self.easing.apply(x), velocity, done: false }
+        let velocity =
+            (self.easing.apply((x + step).min(1.0)) - self.easing.apply(x)) / step / self.seconds;
+        Sample {
+            value: self.easing.apply(x),
+            velocity,
+            done: false,
+        }
     }
 }
 
@@ -134,6 +154,9 @@ impl<C: Curve> Curve for Slowed<C> {
     fn sample(&self, t: f64, v0: f64) -> Sample {
         let f = self.factor.max(1e-3);
         let s = self.inner.sample(t / f, v0 * f);
-        Sample { velocity: s.velocity / f, ..s }
+        Sample {
+            velocity: s.velocity / f,
+            ..s
+        }
     }
 }

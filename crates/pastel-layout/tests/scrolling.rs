@@ -10,7 +10,11 @@ fn area() -> Rect {
 }
 
 fn options(center_focus: CenterFocus) -> LayoutOptions {
-    LayoutOptions { gap: 10.0, center_focus, ..LayoutOptions::default() }
+    LayoutOptions {
+        gap: 10.0,
+        center_focus,
+        ..LayoutOptions::default()
+    }
 }
 
 fn layout_with(count: u64, center: CenterFocus) -> Scrolling {
@@ -29,7 +33,11 @@ fn places(layout: &Scrolling) -> Vec<Placement> {
 }
 
 fn rect_of(layout: &Scrolling, id: u64) -> Rect {
-    places(layout).iter().find(|p| p.id == WindowId(id)).expect("placed").rect
+    places(layout)
+        .iter()
+        .find(|p| p.id == WindowId(id))
+        .expect("placed")
+        .rect
 }
 
 fn order(layout: &Scrolling) -> Vec<u64> {
@@ -90,7 +98,10 @@ fn the_view_scrolls_the_minimum_to_show_the_focused_column() {
     let layout = layout_with(3, CenterFocus::Never);
     let focused = rect_of(&layout, 3);
     assert_eq!(focused.right(), 990.0, "right-aligned inside the gap");
-    assert!(rect_of(&layout, 1).right() <= 0.0, "first column is off screen");
+    assert!(
+        rect_of(&layout, 1).right() <= 0.0,
+        "first column is off screen"
+    );
 }
 
 #[test]

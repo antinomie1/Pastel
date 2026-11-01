@@ -55,6 +55,8 @@ there.
   reading a clock, so tests are deterministic.
 - **Idle means idle.** With nothing animating the loop blocks in `dispatch(None)`:
   no timers, no polling, no frames. Animations are paced by `Present` events.
+  Measure it with a real client after touching the render path: 0 CPU ticks, 0
+  context switches.
 - **Reuse what luminaria gives you.** `SceneItem`, `PopupTree`, `LayerManager`,
   `ScreenManager`, `InputRouter::route`. Don't re-implement protocol logic.
 - **Don't retain `Surface` anything.** Hold `SurfaceId`s and look up on use; stale
@@ -84,27 +86,25 @@ there.
   on with `InputRouter::route`. That is what lets the overlay grab the keyboard and
   Mod+drag steal a click. The cost: `seat.follow`, VT switching and session
   handling are ours (`crates/pastel/src/input.rs`).
-- `SceneKind::Rect` and `Border` honour `corner_radius` (a local luminaria change;
-  a rounded `Border` stays hollow). Never draw anything solid behind a window: it
+- `SceneKind::Rect` and `Border` honour `corner_radius`; a rounded `Border` stays
+  hollow. Never draw anything solid behind a window: it
   shows through translucency and gets sampled into its blur.
 - An image's pixel count must equal its box in logical pixels: it can't be stretched
   or clipped, so overlays are 1:1 and blurry on HiDPI.
 - `Toplevel::set_*` state setters each send a configure on change. Call
   `configure(size)` first, so no configure pairs new state with an old size.
+- A rounded or translucent window is an offscreen group; luminaria only re-renders
+  one when a member commits or moves within it. If frames ever stop being
+  `unchanged` at rest, `e2e.rs` should say so.
 - There is no way to keep a dead client's pixels, so the close animation draws a
   frosted pane rather than the window itself.
 - `ScreencopyManager` isn't wired to outputs in the Rust binding, so `grim` can't
   capture yet. `crates/pastel/tests/snapshot.rs` reads real pixels another way: it
   presents `State::scene` to a second headless output and calls `read_back`. Set
   `PASTEL_SNAPSHOT_DIR` to keep the frames.
-- Pastel depends on the sibling checkout `../luminaria`, not GitHub: rounded solids
-  and the blur backdrop fix are local changes there. Point the dependency in the
-  root `Cargo.toml` back at `git` once they're pushed.
-
-## Commits
-
-Conventional-ish, one logical change per commit, not too granular. End with:
-
-```
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-```
+- luminaria comes from GitHub, pinned by `rev` in the root `Cargo.toml`. To change
+  both projects together, add this to that file and don't commit it:
+  ```toml
+  [patch."https://github.com/antinomie1/luminaria"]
+  luminaria = { path = "../luminaria/bindings/rust" }
+  ```

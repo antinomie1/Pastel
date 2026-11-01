@@ -29,7 +29,10 @@ impl Rgba {
     /// `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`.
     pub fn parse(text: &str) -> Result<Self, String> {
         let bad = || format!("invalid colour `{text}`, expected #rrggbb or #rrggbbaa");
-        let hex = text.strip_prefix('#').filter(|h| h.is_ascii()).ok_or_else(bad)?;
+        let hex = text
+            .strip_prefix('#')
+            .filter(|h| h.is_ascii())
+            .ok_or_else(bad)?;
         let (step, scale) = match hex.len() {
             3 | 4 => (1, 15.0),
             6 | 8 => (2, 255.0),
@@ -80,9 +83,10 @@ impl CurveSpec {
     /// The extension point for new kinds of curve.
     fn build(self, slowdown: f64) -> Rc<dyn Curve> {
         match self {
-            Self::Spring { stiffness, damping } => {
-                Rc::new(Slowed { inner: Spring { stiffness, damping }, factor: slowdown })
-            }
+            Self::Spring { stiffness, damping } => Rc::new(Slowed {
+                inner: Spring { stiffness, damping },
+                factor: slowdown,
+            }),
             Self::Ease { ms, easing } => {
                 let easing = match easing {
                     EasingName::Linear => Easing::Linear,
@@ -92,7 +96,13 @@ impl CurveSpec {
                     EasingName::OutExpo => Easing::OutExpo,
                     EasingName::InOutCubic => Easing::InOutCubic,
                 };
-                Rc::new(Slowed { inner: Ease { seconds: ms / 1000.0, easing }, factor: slowdown })
+                Rc::new(Slowed {
+                    inner: Ease {
+                        seconds: ms / 1000.0,
+                        easing,
+                    },
+                    factor: slowdown,
+                })
             }
         }
     }
@@ -122,7 +132,11 @@ struct RawInput {
 
 impl Default for RawInput {
     fn default() -> Self {
-        Self { r#mod: "super".into(), nested_mod: "alt".into(), focus_follows_mouse: false }
+        Self {
+            r#mod: "super".into(),
+            nested_mod: "alt".into(),
+            focus_follows_mouse: false,
+        }
     }
 }
 
@@ -198,10 +212,16 @@ impl Default for RawAnimation {
         Self {
             enabled: true,
             slowdown: 1.0,
-            window_movement: CurveSpec::Spring { stiffness: 800.0, damping: 1.0 },
+            window_movement: CurveSpec::Spring {
+                stiffness: 800.0,
+                damping: 1.0,
+            },
             window_open: ease(180.0, EasingName::OutCubic),
             window_close: ease(160.0, EasingName::OutQuad),
-            workspace_switch: CurveSpec::Spring { stiffness: 900.0, damping: 1.0 },
+            workspace_switch: CurveSpec::Spring {
+                stiffness: 900.0,
+                damping: 1.0,
+            },
             focus_ring: ease(120.0, EasingName::OutCubic),
             overlay: ease(140.0, EasingName::OutCubic),
         }
@@ -217,7 +237,10 @@ struct RawOverlay {
 
 impl Default for RawOverlay {
     fn default() -> Self {
-        Self { at_startup: true, font: "sans-serif".into() }
+        Self {
+            at_startup: true,
+            font: "sans-serif".into(),
+        }
     }
 }
 
@@ -343,7 +366,10 @@ impl RawConfig {
         };
         if !LAYOUTS.contains(&self.layout.r#type.as_str()) {
             let known = LAYOUTS.join(", ");
-            return Err(format!("layout type `{}` is not one of: {known}", self.layout.r#type));
+            return Err(format!(
+                "layout type `{}` is not one of: {known}",
+                self.layout.r#type
+            ));
         }
         if self.layout.gap < 0.0 {
             return Err("gap can't be negative".into());
@@ -358,7 +384,9 @@ impl RawConfig {
         let mut binds = defaults::binds();
         for (combo, action) in &self.binds {
             let parsed: Combo = combo.parse()?;
-            let action: Action = action.parse().map_err(|e| format!("binds.\"{combo}\": {e}"))?;
+            let action: Action = action
+                .parse()
+                .map_err(|e| format!("binds.\"{combo}\": {e}"))?;
             binds.set(parsed, action);
         }
 
@@ -368,7 +396,11 @@ impl RawConfig {
             return Err("slowdown must be above 0".into());
         }
         let curve = |spec: CurveSpec| -> Rc<dyn Curve> {
-            if a.enabled { spec.build(a.slowdown) } else { Rc::new(Snap) }
+            if a.enabled {
+                spec.build(a.slowdown)
+            } else {
+                Rc::new(Snap)
+            }
         };
         let rules = self.window_rule.into_iter().map(|r| WindowRule {
             app_id: r.app_id,
@@ -409,7 +441,10 @@ impl RawConfig {
                 focus_ring: curve(a.focus_ring),
                 overlay: curve(a.overlay),
             },
-            overlay: OverlayConfig { at_startup: self.overlay.at_startup, font: self.overlay.font },
+            overlay: OverlayConfig {
+                at_startup: self.overlay.at_startup,
+                font: self.overlay.font,
+            },
             background: Rgba::parse(self.background.as_deref().unwrap_or("#1e2028"))?,
             autostart: self.autostart,
             binds,

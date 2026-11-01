@@ -3,6 +3,7 @@ name = "pastel-config"
 description = "Configuration, actions and key bindings for Pastel"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 pastel-core.workspace = true

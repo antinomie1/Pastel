@@ -54,7 +54,10 @@ impl HotkeyOverlay {
     pub fn new(config: &Config, mod_key: u32) -> Self {
         let curve: Rc<dyn Curve> = config.animation.overlay.clone();
         Self {
-            style: Style { font: config.overlay.font.clone(), accent: config.window.active_color },
+            style: Style {
+                font: config.overlay.font.clone(),
+                accent: config.window.active_color,
+            },
             rows: config.binds.overlay_rows(mod_key),
             raster: None,
             failed: false,
@@ -64,8 +67,10 @@ impl HotkeyOverlay {
     }
 
     pub fn reconfigure(&mut self, config: &Config, mod_key: u32) {
-        self.style =
-            Style { font: config.overlay.font.clone(), accent: config.window.active_color };
+        self.style = Style {
+            font: config.overlay.font.clone(),
+            accent: config.window.active_color,
+        };
         self.rows = config.binds.overlay_rows(mod_key);
         self.raster = None;
         self.failed = false;
@@ -96,15 +101,27 @@ impl HotkeyOverlay {
             let text = column.iter().flat_map(|(_, rows)| *rows);
             text_widths.push(text.map(|r| body.measure(&r.title)).max().unwrap_or(0));
         }
-        let inner: i32 = key_widths.iter().zip(&text_widths).map(|(k, t)| k + KEY_GAP + t).sum();
+        let inner: i32 = key_widths
+            .iter()
+            .zip(&text_widths)
+            .map(|(k, t)| k + KEY_GAP + t)
+            .sum();
         let gaps = COLUMN_GAP * (columns.len() as i32 - 1).max(0);
         let width = inner + gaps + 2 * PADDING;
         let header = heading.height() + SECTION_GAP;
-        let tallest = columns.iter().map(|c| column_height(c, line)).max().unwrap_or(0);
+        let tallest = columns
+            .iter()
+            .map(|c| column_height(c, line))
+            .max()
+            .unwrap_or(0);
         let height = header + tallest + 2 * PADDING;
 
-        let mut canvas: Vec<u8> =
-            PANEL.iter().copied().cycle().take(width as usize * height as usize * 4).collect();
+        let mut canvas: Vec<u8> = PANEL
+            .iter()
+            .copied()
+            .cycle()
+            .take(width as usize * height as usize * 4)
+            .collect();
         let (w, h) = (width, height);
         let mut title_pen = |font: &mut Font, x, y, text: &str, ink| {
             let _ = font.draw(&mut canvas, w, h, x, y, text, ink, w - PADDING);
@@ -141,7 +158,10 @@ fn columns(rows: &[OverlayRow]) -> Vec<Vec<Group<'_>>> {
         .iter()
         .filter_map(|&section| {
             let start = rows.iter().position(|r| r.section == section)?;
-            let len = rows[start..].iter().take_while(|r| r.section == section).count();
+            let len = rows[start..]
+                .iter()
+                .take_while(|r| r.section == section)
+                .count();
             Some((section, &rows[start..start + len]))
         })
         .collect();
@@ -202,7 +222,9 @@ impl Overlay for HotkeyOverlay {
                 }
             }
         }
-        let Some(raster) = &self.raster else { return animating };
+        let Some(raster) = &self.raster else {
+            return animating;
+        };
         let (w, h) = (f64::from(raster.width), f64::from(raster.height));
         let (cx, cy) = context.monitor.center();
         let y = cy - h / 2.0 + (1.0 - alpha) * SLIDE;
@@ -212,6 +234,7 @@ impl Overlay for HotkeyOverlay {
             .with_corner_radius(RADIUS)
             .with_alpha(alpha)
             .with_blur(false)
+            .with_blur_opacity(alpha)
             .with_shadow(Color::rgba(0.0, 0.0, 0.0, 0.5 * alpha), 32.0)
             .with_accepts_input(false);
         items.push(panel);

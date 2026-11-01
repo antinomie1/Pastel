@@ -94,7 +94,13 @@ impl Desktop {
     /// `None` if `options` names no known layout.
     pub fn new(options: LayoutOptions) -> Option<Self> {
         create(&options)?;
-        Some(Self { options, monitors: Vec::new(), focused: 0, next_workspace: 0, parked: Vec::new() })
+        Some(Self {
+            options,
+            monitors: Vec::new(),
+            focused: 0,
+            next_workspace: 0,
+            parked: Vec::new(),
+        })
     }
 
     /// Takes effect for workspaces created from now on.
@@ -110,11 +116,20 @@ impl Desktop {
         let mut layout = create(options).expect("options were validated");
         layout.set_area(area);
         *next += 1;
-        Workspace { id: *next, layout, fullscreen: None }
+        Workspace {
+            id: *next,
+            layout,
+            fullscreen: None,
+        }
     }
 
     fn normalize(&mut self, index: usize) {
-        let Self { options, monitors, next_workspace, .. } = self;
+        let Self {
+            options,
+            monitors,
+            next_workspace,
+            ..
+        } = self;
         let monitor = &mut monitors[index];
         let area = monitor.usable;
         monitor.normalize(&mut || Self::new_workspace(options, next_workspace, area));
@@ -142,15 +157,27 @@ impl Desktop {
         for workspace in &mut workspaces {
             workspace.layout.set_area(rect);
         }
-        self.monitors.push(Monitor { id, rect, usable: rect, workspaces, active: 0, view_shift: 0.0 });
+        self.monitors.push(Monitor {
+            id,
+            rect,
+            usable: rect,
+            workspaces,
+            active: 0,
+            view_shift: 0.0,
+        });
         self.normalize(self.monitors.len() - 1);
     }
 
     /// An output left. Its windows move to the first remaining monitor.
     pub fn remove_monitor(&mut self, id: u64) {
-        let Some(index) = self.monitors.iter().position(|m| m.id == id) else { return };
+        let Some(index) = self.monitors.iter().position(|m| m.id == id) else {
+            return;
+        };
         let monitor = self.monitors.remove(index);
-        let occupied = monitor.workspaces.into_iter().filter(|w| !w.layout.is_empty());
+        let occupied = monitor
+            .workspaces
+            .into_iter()
+            .filter(|w| !w.layout.is_empty());
         match self.monitors.first_mut() {
             Some(first) => {
                 let at = first.workspaces.len() - 1; // above the empty one
@@ -168,7 +195,9 @@ impl Desktop {
 
     /// The output moved or resized, or panels changed what is left of it.
     pub fn set_monitor_geometry(&mut self, id: u64, rect: Rect, usable: Rect) {
-        let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) else { return };
+        let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) else {
+            return;
+        };
         monitor.rect = rect;
         monitor.usable = usable;
         for workspace in &mut monitor.workspaces {
@@ -177,7 +206,9 @@ impl Desktop {
     }
 
     fn active_workspace_mut(&mut self) -> Option<&mut Workspace> {
-        self.monitors.get_mut(self.focused).map(Monitor::active_workspace_mut)
+        self.monitors
+            .get_mut(self.focused)
+            .map(Monitor::active_workspace_mut)
     }
 
     /// The window with the keyboard, as far as layouts are concerned.
@@ -196,7 +227,8 @@ impl Desktop {
             return;
         }
         if self.parked.is_empty() {
-            let workspace = Self::new_workspace(&self.options, &mut self.next_workspace, Rect::default());
+            let workspace =
+                Self::new_workspace(&self.options, &mut self.next_workspace, Rect::default());
             self.parked.push(workspace);
         }
         self.parked[0].layout.add(id, hint);
@@ -225,7 +257,10 @@ impl Desktop {
     /// Focus a window wherever it is, switching monitor and workspace to it.
     pub fn focus_window(&mut self, id: WindowId) -> bool {
         for (m, monitor) in self.monitors.iter_mut().enumerate() {
-            let found = monitor.workspaces.iter().position(|w| w.layout.contains(id));
+            let found = monitor
+                .workspaces
+                .iter()
+                .position(|w| w.layout.contains(id));
             let Some(w) = found else { continue };
             monitor.active = w;
             let workspace = monitor.active_workspace_mut();
@@ -242,7 +277,9 @@ impl Desktop {
 
     /// Run a layout command on the focused workspace.
     pub fn apply(&mut self, op: LayoutOp) -> bool {
-        let Some(workspace) = self.active_workspace_mut() else { return false };
+        let Some(workspace) = self.active_workspace_mut() else {
+            return false;
+        };
         let changed = workspace.layout.apply(op);
         if workspace.fullscreen.is_some() && workspace.fullscreen != workspace.layout.focused() {
             workspace.fullscreen = None;
@@ -257,7 +294,10 @@ impl Desktop {
 
     pub fn set_fullscreen(&mut self, id: WindowId, on: bool) {
         let spaces = self.monitors.iter_mut().flat_map(|m| &mut m.workspaces);
-        if let Some(workspace) = spaces.chain(&mut self.parked).find(|w| w.layout.contains(id)) {
+        if let Some(workspace) = spaces
+            .chain(&mut self.parked)
+            .find(|w| w.layout.contains(id))
+        {
             match (on, workspace.fullscreen) {
                 (true, _) => workspace.fullscreen = Some(id),
                 (false, Some(current)) if current == id => workspace.fullscreen = None,
@@ -267,7 +307,9 @@ impl Desktop {
     }
 
     pub fn toggle_fullscreen(&mut self) -> bool {
-        let Some(id) = self.focused_window() else { return false };
+        let Some(id) = self.focused_window() else {
+            return false;
+        };
         let on = !self.is_fullscreen(id);
         self.set_fullscreen(id, on);
         true
@@ -283,7 +325,9 @@ impl Desktop {
     }
 
     pub fn focus_workspace(&mut self, target: WorkspaceTarget) -> bool {
-        let Some(monitor) = self.monitors.get_mut(self.focused) else { return false };
+        let Some(monitor) = self.monitors.get_mut(self.focused) else {
+            return false;
+        };
         let index = Self::resolve(monitor, target);
         if index == monitor.active {
             return false;
@@ -295,7 +339,9 @@ impl Desktop {
 
     /// Send the focused window to a workspace and go with it.
     pub fn move_to_workspace(&mut self, target: WorkspaceTarget) -> bool {
-        let Some(id) = self.focused_window() else { return false };
+        let Some(id) = self.focused_window() else {
+            return false;
+        };
         let monitor = &mut self.monitors[self.focused];
         let index = Self::resolve(monitor, target);
         if index == monitor.active {
@@ -305,7 +351,10 @@ impl Desktop {
         workspace.layout.remove(id);
         workspace.fullscreen = None;
         monitor.active = index;
-        monitor.active_workspace_mut().layout.add(id, WindowHint::default());
+        monitor
+            .active_workspace_mut()
+            .layout
+            .add(id, WindowHint::default());
         self.normalize(self.focused);
         true
     }
@@ -332,22 +381,31 @@ impl Desktop {
     }
 
     pub fn focus_monitor(&mut self, direction: Direction) -> bool {
-        let Some(index) = self.neighbour(direction) else { return false };
+        let Some(index) = self.neighbour(direction) else {
+            return false;
+        };
         self.focused = index;
         true
     }
 
     /// Send the focused window to the neighbouring monitor and go with it.
     pub fn move_to_monitor(&mut self, direction: Direction) -> bool {
-        let Some(index) = self.neighbour(direction) else { return false };
-        let Some(id) = self.focused_window() else { return false };
+        let Some(index) = self.neighbour(direction) else {
+            return false;
+        };
+        let Some(id) = self.focused_window() else {
+            return false;
+        };
         let from = self.focused;
         let workspace = self.monitors[from].active_workspace_mut();
         workspace.layout.remove(id);
         workspace.fullscreen = None;
         self.normalize(from);
         self.focused = index;
-        self.monitors[index].active_workspace_mut().layout.add(id, WindowHint::default());
+        self.monitors[index]
+            .active_workspace_mut()
+            .layout
+            .add(id, WindowHint::default());
         self.normalize(index);
         true
     }
@@ -363,7 +421,9 @@ impl Desktop {
     pub fn place(monitor: &Monitor, workspace: &Workspace, out: &mut Vec<Placement>) {
         let start = out.len();
         workspace.layout.place(out);
-        let Some(fullscreen) = workspace.fullscreen else { return };
+        let Some(fullscreen) = workspace.fullscreen else {
+            return;
+        };
         if let Some(p) = out[start..].iter_mut().find(|p| p.id == fullscreen) {
             p.rect = monitor.rect;
             p.fullscreen = true;

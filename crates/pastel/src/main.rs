@@ -25,7 +25,10 @@ struct Args {
 
 /// `None` when the arguments already said everything there was to do.
 fn parse_args() -> Result<Option<Args>, String> {
-    let mut args = Args { config: None, check: false };
+    let mut args = Args {
+        config: None,
+        check: false,
+    };
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
         match arg.as_str() {

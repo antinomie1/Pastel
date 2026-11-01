@@ -3,3 +3,4 @@ name = "pastel-core"
 description = "Geometry and animation primitives for Pastel"
 version.workspace = true
 edition.workspace = true
+license.workspace = true

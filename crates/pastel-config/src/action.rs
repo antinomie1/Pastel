@@ -32,7 +32,12 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [Self::Windows, Self::Columns, Self::Workspaces, Self::Session];
+    pub const ALL: [Section; 4] = [
+        Self::Windows,
+        Self::Columns,
+        Self::Workspaces,
+        Self::Session,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -79,9 +84,15 @@ const SIMPLE: &[(&str, Action)] = {
         ("maximize-column", Layout(Op::ToggleMaximize)),
         ("center-column", Layout(Op::Center)),
         ("focus-workspace-up", FocusWorkspace(WorkspaceTarget::Up)),
-        ("focus-workspace-down", FocusWorkspace(WorkspaceTarget::Down)),
+        (
+            "focus-workspace-down",
+            FocusWorkspace(WorkspaceTarget::Down),
+        ),
         ("move-to-workspace-up", MoveToWorkspace(WorkspaceTarget::Up)),
-        ("move-to-workspace-down", MoveToWorkspace(WorkspaceTarget::Down)),
+        (
+            "move-to-workspace-down",
+            MoveToWorkspace(WorkspaceTarget::Down),
+        ),
         ("focus-monitor-left", FocusMonitor(Left)),
         ("focus-monitor-right", FocusMonitor(Right)),
         ("focus-monitor-up", FocusMonitor(Up)),
@@ -97,7 +108,9 @@ const SIMPLE: &[(&str, Action)] = {
 fn workspace_index(argument: &str) -> Result<WorkspaceTarget, String> {
     match argument.parse::<usize>() {
         Ok(n) if n >= 1 => Ok(WorkspaceTarget::Index(n - 1)),
-        _ => Err(format!("workspace must be a number from 1, got `{argument}`")),
+        _ => Err(format!(
+            "workspace must be a number from 1, got `{argument}`"
+        )),
     }
 }
 
@@ -110,14 +123,18 @@ impl FromStr for Action {
         let argument = argument.trim();
         match name {
             "spawn" if argument.is_empty() => Err("spawn needs a command".into()),
-            "spawn" => Ok(Action::Spawn(argument.split_whitespace().map(String::from).collect())),
+            "spawn" => Ok(Action::Spawn(
+                argument.split_whitespace().map(String::from).collect(),
+            )),
             "focus-workspace" => workspace_index(argument).map(Action::FocusWorkspace),
             "move-to-workspace" => workspace_index(argument).map(Action::MoveToWorkspace),
             _ => {
-                let found = SIMPLE.iter().find(|(n, _)| *n == name && argument.is_empty());
-                found.map(|(_, action)| action.clone()).ok_or_else(|| {
-                    format!("unknown action `{text}`; see `pastel --list-actions`")
-                })
+                let found = SIMPLE
+                    .iter()
+                    .find(|(n, _)| *n == name && argument.is_empty());
+                found
+                    .map(|(_, action)| action.clone())
+                    .ok_or_else(|| format!("unknown action `{text}`; see `pastel --list-actions`"))
             }
         }
     }
@@ -126,7 +143,11 @@ impl FromStr for Action {
 impl Action {
     /// Every argument-less action name, plus the ones that take one.
     pub fn names() -> impl Iterator<Item = &'static str> {
-        let with_argument = ["spawn <command>", "focus-workspace <n>", "move-to-workspace <n>"];
+        let with_argument = [
+            "spawn <command>",
+            "focus-workspace <n>",
+            "move-to-workspace <n>",
+        ];
         SIMPLE.iter().map(|(name, _)| *name).chain(with_argument)
     }
 

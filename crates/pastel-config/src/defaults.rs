@@ -52,7 +52,10 @@ pub fn binds() -> Binds {
     let mut binds = Binds::default();
     let mut bind = |combo: &str, action: &str| {
         let combo: Combo = combo.parse().expect("default combos parse");
-        binds.set(combo, action.parse::<Action>().expect("default actions parse"));
+        binds.set(
+            combo,
+            action.parse::<Action>().expect("default actions parse"),
+        );
     };
     for (combo, action) in FIXED {
         bind(combo, action);
