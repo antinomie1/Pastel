@@ -10,3 +10,7 @@ pastel-layout.workspace = true
 pastel-config.workspace = true
 pastel-render.workspace = true
 luminaria.workspace = true
+
+[dev-dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }

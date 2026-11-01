@@ -21,4 +21,5 @@
 - [ ] Per-output config (scale, mode, position)
 - [ ] Config hot reload via inotify (Mod+Shift+R works today)
 - [ ] Close animation from real pixels; needs luminaria to retain a texture
+- [ ] Sharp overlay text on HiDPI; luminaria images are 1:1 with their logical box
 - [ ] Predict the animation clock from `PresentEvent` instead of `Instant::now()`

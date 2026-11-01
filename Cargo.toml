@@ -11,8 +11,8 @@ pastel-core = { path = "crates/pastel-core" }
 pastel-layout = { path = "crates/pastel-layout" }
 pastel-config = { path = "crates/pastel-config" }
 pastel-render = { path = "crates/pastel-render" }
-# Pinned by Cargo.lock. To hack on luminaria alongside Pastel, see AGENTS.md.
-luminaria = { git = "https://github.com/antinomie1/luminaria", features = ["text"] }
+# A sibling checkout: Pastel needs changes that aren't on GitHub yet (AGENTS.md).
+luminaria = { path = "../luminaria/bindings/rust", features = ["text"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 

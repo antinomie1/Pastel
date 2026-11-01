@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use crate::action::Action;
+use crate::action::{Action, Section};
 
 pub const SHIFT: u32 = 1 << 0;
 pub const CTRL: u32 = 1 << 2;
@@ -130,4 +130,61 @@ impl Binds {
         let resolved = self.list.iter().map(|(c, a)| (c.resolved(mod_key), a.clone()));
         resolved.collect()
     }
+}
+
+/// One line of the hotkey overlay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayRow {
+    pub section: Section,
+    pub keys: String,
+    pub title: String,
+}
+
+/// More keys than this for one line would only make it unreadable.
+const KEYS_PER_ROW: usize = 4;
+
+impl Binds {
+    /// What the hotkey overlay lists: one line per title, in section order, with
+    /// the keys that share a title folded together (`Mod + H / L / Left / Right`).
+    pub fn overlay_rows(&self, mod_key: u32) -> Vec<OverlayRow> {
+        let mut rows: Vec<(Section, String, Vec<String>)> = Vec::new();
+        for (combo, action) in &self.list {
+            let Some((section, title)) = action.title() else { continue };
+            let label = combo.label(mod_key);
+            match rows.iter_mut().find(|(_, t, _)| *t == title) {
+                Some((_, _, labels)) => labels.push(label),
+                None => rows.push((section, title, vec![label])),
+            }
+        }
+        let by_section = Section::ALL.iter().flat_map(|&section| {
+            let rows = rows.iter().filter(move |(s, _, _)| *s == section);
+            rows.map(move |(_, title, labels)| OverlayRow {
+                section,
+                keys: fold_labels(labels),
+                title: title.clone(),
+            })
+        });
+        by_section.collect()
+    }
+}
+
+/// `["Mod + H", "Mod + L"]` to `Mod + H / L`, keeping only what differs when the
+/// modifiers are the same.
+fn fold_labels(labels: &[String]) -> String {
+    fn split(label: &str) -> (&str, &str) {
+        label.rsplit_once(" + ").unwrap_or(("", label))
+    }
+    let (prefix, _) = split(&labels[0]);
+    let same_prefix = labels.iter().all(|l| split(l).0 == prefix);
+    let shown = &labels[..labels.len().min(KEYS_PER_ROW)];
+    let mut text = if same_prefix && !prefix.is_empty() {
+        let keys: Vec<&str> = shown.iter().map(|l| split(l).1).collect();
+        format!("{prefix} + {}", keys.join(" / "))
+    } else {
+        shown.join(" / ")
+    };
+    if labels.len() > KEYS_PER_ROW {
+        text.push_str(" …");
+    }
+    text
 }

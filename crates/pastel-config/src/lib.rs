@@ -11,7 +11,7 @@ mod schema;
 use std::path::{Path, PathBuf};
 
 pub use action::{Action, Section};
-pub use keys::{Binds, Combo};
+pub use keys::{Binds, Combo, OverlayRow};
 pub use schema::*;
 
 impl Config {

@@ -223,6 +223,32 @@ fn overlay_titles_are_curated() {
 }
 
 #[test]
+fn overlay_rows_fold_keys_that_share_a_title() {
+    let mut binds = pastel_config::Binds::default();
+    binds.set(combo("Mod+Q"), Action::Quit);
+    binds.set(combo("Mod+H"), action("focus-column-left"));
+    binds.set(combo("Mod+L"), action("focus-column-right"));
+    binds.set(combo("Ctrl+Left"), action("focus-column-left"));
+    let rows = binds.overlay_rows(LOGO);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].section, Section::Windows, "section order, not bind order");
+    assert_eq!(rows[0].title, "Focus column");
+    assert_eq!(rows[0].keys, "Mod + H / Mod + L / Ctrl + LEFT".replace("LEFT", "Left"));
+    assert_eq!(rows[1].keys, "Mod + Q");
+}
+
+#[test]
+fn overlay_rows_shorten_a_shared_prefix_and_truncate() {
+    let config = Config::parse("").expect("defaults are valid");
+    let rows = config.binds.overlay_rows(LOGO);
+    let row = rows.iter().find(|r| r.title == "Go to workspace").expect("row");
+    assert_eq!(row.keys, "Mod + 1 / 2 / 3 / 4 …");
+    let row = rows.iter().find(|r| r.title == "Focus column").expect("row");
+    assert_eq!(row.keys, "Mod + H / L / Left / Right");
+    assert!(rows.iter().any(|r| r.title == "Run foot"));
+}
+
+#[test]
 fn colours_parse_in_every_form() {
     assert_eq!(Rgba::parse("#ffffff"), Ok(Rgba::new(1.0, 1.0, 1.0, 1.0)));
     assert_eq!(Rgba::parse("#000"), Ok(Rgba::new(0.0, 0.0, 0.0, 1.0)));
