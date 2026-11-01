@@ -1,0 +1,12 @@
+[package]
+name = "pastel"
+description = "A modular scrolling Wayland compositor built on luminaria"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pastel-core.workspace = true
+pastel-layout.workspace = true
+pastel-config.workspace = true
+pastel-render.workspace = true
+luminaria.workspace = true

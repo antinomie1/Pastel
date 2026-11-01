@@ -1,0 +1,11 @@
+[package]
+name = "pastel-render"
+description = "Animated window state, effects and overlays, as luminaria scene items"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pastel-core.workspace = true
+pastel-layout.workspace = true
+pastel-config.workspace = true
+luminaria.workspace = true

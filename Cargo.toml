@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+pastel-core = { path = "crates/pastel-core" }
+pastel-layout = { path = "crates/pastel-layout" }
+pastel-config = { path = "crates/pastel-config" }
+pastel-render = { path = "crates/pastel-render" }
+# Pinned by Cargo.lock. To hack on luminaria alongside Pastel, see AGENTS.md.
+luminaria = { git = "https://github.com/antinomie1/luminaria", features = ["text"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,8 @@
+[package]
+name = "pastel-layout"
+description = "Layout trait, scrolling columns and the desktop model for Pastel"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pastel-core.workspace = true

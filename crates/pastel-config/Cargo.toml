@@ -1,0 +1,11 @@
+[package]
+name = "pastel-config"
+description = "Configuration, actions and key bindings for Pastel"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pastel-core.workspace = true
+pastel-layout.workspace = true
+serde.workspace = true
+toml.workspace = true
