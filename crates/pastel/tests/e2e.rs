@@ -114,6 +114,27 @@ fn a_window_gets_half_the_screen_and_the_keyboard() {
     });
 }
 
+/// Without fifo-v1 SDL3 prefers X11 whenever there is one, and a client that only
+/// draws to Wayland surfaces then can't start at all.
+#[test]
+fn the_protocols_sdl_needs_to_prefer_wayland_are_offered() {
+    scenario("", |state, display, client| {
+        client.open("one", RED);
+        wait_for_windows(state, display, 1);
+        let globals = client.report.lock().expect("report").globals.clone();
+        for wanted in [
+            "wp_fifo_manager_v1",
+            "wp_cursor_shape_manager_v1",
+            "wp_commit_timing_manager_v1",
+        ] {
+            assert!(
+                globals.iter().any(|g| g == wanted),
+                "{wanted} not in {globals:?}"
+            );
+        }
+    });
+}
+
 #[test]
 fn a_second_window_takes_focus_without_resizing_the_first() {
     scenario("", |state, display, client| {
@@ -236,7 +257,7 @@ fn nothing_moving_means_no_timer_at_all() {
 /// producing frames when nothing changes, or the screen never idles.
 #[test]
 fn a_still_screen_presents_nothing_even_with_rounded_translucent_windows() {
-    let config = "[overlay]\nat-startup = false\n[window]\nopacity = 0.8";
+    let config = "[overlay]\nat-startup = false\n[window]\nopacity = 0.8\ncorner-radius = 12.0";
     scenario(config, |state, display, client| {
         client.open("one", RED);
         client.open("two", BLUE);

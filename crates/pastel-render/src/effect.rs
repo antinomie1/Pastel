@@ -69,7 +69,7 @@ struct Border {
     active: Rgba,
     inactive: Rgba,
     width: f64,
-    radius: f32,
+    outer_radius: f32,
 }
 
 impl Effect for Border {
@@ -80,7 +80,7 @@ impl Effect for Border {
         let tint = self.inactive.lerp(self.active, window.focus);
         let outer = to_pixels(window.rect.inflated(self.width));
         let item = SceneItem::border(outer, self.width.round() as i32, color(tint))
-            .with_corner_radius(self.radius + self.width as f32)
+            .with_corner_radius(self.outer_radius)
             .with_alpha(window.alpha)
             .with_tag(window.id.0);
         items.push(item);
@@ -131,18 +131,25 @@ impl Pipeline {
 
     pub fn from_config(config: &WindowConfig) -> Self {
         let radius = config.corner_radius;
+        // Around a rounded window, wider by the border. Around a square one, square:
+        // adding the width would round a corner nothing asked to round.
+        let outer_radius = if radius > 0.0 {
+            radius + config.border_width as f32
+        } else {
+            0.0
+        };
         Self::new(vec![
             Box::new(Shadow {
                 color: config.shadow_color,
                 size: config.shadow_size,
-                radius: radius + config.border_width as f32,
+                radius: outer_radius,
                 grow: config.border_width,
             }),
             Box::new(Border {
                 active: config.active_color,
                 inactive: config.inactive_color,
                 width: config.border_width,
-                radius,
+                outer_radius,
             }),
             Box::new(Rounding(radius)),
             Box::new(Opacity(config.opacity)),

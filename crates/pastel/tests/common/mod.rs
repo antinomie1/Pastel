@@ -5,8 +5,10 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
+use std::net::Shutdown;
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -21,6 +23,8 @@ use wayland_client::{
     Connection, Dispatch, QueueHandle, WEnum, delegate_noop, event_created_child,
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+
+static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
 
 pub enum Command {
     Open {
@@ -48,11 +52,14 @@ pub struct Seen {
 pub struct Report {
     pub windows: Vec<Seen>,
     pub keys: Vec<u32>,
+    /// The interface of every global the compositor offers.
+    pub globals: Vec<String>,
 }
 
 pub struct Client {
     commands: Sender<Command>,
     pub report: Arc<Mutex<Report>>,
+    socket: UnixStream,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -63,10 +70,12 @@ impl Client {
         let report = Arc::new(Mutex::new(Report::default()));
         let (commands, inbox) = channel();
         let shared = report.clone();
+        let socket = stream.try_clone().expect("clone socket");
         let thread = std::thread::spawn(move || run(stream, inbox, shared));
         Self {
             commands,
             report,
+            socket,
             thread: Some(thread),
         }
     }
@@ -109,6 +118,9 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         let _ = self.commands.send(Command::Quit);
+        // The thread may still be blocked on a compositor that has stopped
+        // dispatching; without this, joining it would wait for ever.
+        let _ = self.socket.shutdown(Shutdown::Both);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -183,7 +195,10 @@ impl App {
         let (w, h) = window.pending;
         let (w, h) = (if w > 0 { w } else { 300 }, if h > 0 { h } else { 200 });
         let dir = std::env::var("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
-        let path = format!("{dir}/pastel-test-{}-{index}-{w}x{h}", std::process::id());
+        // Unique across the process: tests run in parallel, and two that shared a
+        // name would share a file, each drawing into the other's window.
+        let unique = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+        let path = format!("{dir}/pastel-test-{}-{unique}", std::process::id());
         let mut file = File::options()
             .create(true)
             .read(true)
@@ -235,8 +250,12 @@ impl App {
 fn run(stream: UnixStream, commands: Receiver<Command>, report: Arc<Mutex<Report>>) {
     stream.set_nonblocking(true).expect("nonblocking");
     let connection = Connection::from_socket(stream).expect("connection");
-    let (globals, mut queue) = registry_queue_init::<App>(&connection).expect("registry");
+    let Ok((globals, mut queue)) = registry_queue_init::<App>(&connection) else {
+        return; // hung up on before it got started
+    };
     let qh = queue.handle();
+    let offered = globals.contents().clone_list();
+    report.lock().expect("report").globals = offered.into_iter().map(|g| g.interface).collect();
     let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=9, ()).expect("wl_seat");
     let _keyboard = seat.get_keyboard(&qh, ());
     let mut app = App {

@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use luminaria::backend::{AutoBackend, BackendKind, BackendOptions};
 use luminaria::core::Display;
 use luminaria::gpu::{Cursor, SceneRenderer};
-use luminaria::protocol::{CoreGlobals, DecorationMode, LayerShell};
+use luminaria::protocol::{
+    CommitTimingManager, CoreGlobals, DecorationMode, FifoManager, LayerShell,
+};
 use luminaria::shell::{InputRouter, OutputLayout, PopupTree, ScreenManager, ScreenOptions};
 use pastel_config::Config;
 use pastel_render::color;
@@ -43,6 +45,10 @@ fn run_on<'d, R>(
         .set_default_mode(DecorationMode::ServerSide);
     let (shell, seat) = (globals.shell(), globals.seat());
     let layer_shell = LayerShell::new(display)?;
+    // SDL3 falls back to X11 on a compositor without fifo-v1, and any Vulkan client
+    // paces better with it.
+    let _fifo = FifoManager::new(display)?;
+    let _commit_timing = CommitTimingManager::new(display)?;
     let layout = OutputLayout::new()?;
     let popups = PopupTree::new(shell)?;
     let backend = AutoBackend::new(display, &options)?;

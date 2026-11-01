@@ -18,6 +18,8 @@ use pastel::state::State;
 use pastel_config::Config;
 use pastel_layout::{Direction, LayoutOp};
 
+/// Corners are square by default; these tests are about the rounded path.
+const ROUNDED: &str = "[overlay]\nat-startup = false\n[window]\ncorner-radius = 12.0";
 const WIDTH: i32 = 1280;
 const HEIGHT: i32 = 800;
 const RED: u32 = 0xffd05050;
@@ -95,13 +97,6 @@ impl<'d> Camera<'d> {
     }
 }
 
-/// Long enough for a client's commit to have been taken in.
-fn let_commits_arrive(state: &mut State<'_>, display: &Display) {
-    for _ in 0..10 {
-        app::step(state, display, Some(Duration::from_millis(5))).expect("step");
-    }
-}
-
 fn scenario(config: &str, body: impl for<'a> FnOnce(&mut State<'a>, &'a Display, &Client)) {
     let config = Config::parse(config).expect("config");
     let options = BackendOptions {
@@ -143,7 +138,7 @@ fn at_rest(state: &mut State<'_>, display: &Display, count: usize) {
 
 #[test]
 fn windows_render_with_rounded_borders_gaps_and_focus() {
-    scenario("[overlay]\nat-startup = false", |state, display, client| {
+    scenario(ROUNDED, |state, display, client| {
         client.open("one", RED);
         client.open("two", RED);
         at_rest(state, display, 2);
@@ -190,8 +185,27 @@ fn windows_render_with_rounded_borders_gaps_and_focus() {
 }
 
 #[test]
-fn an_idle_rounded_window_is_not_redrawn_but_new_content_is() {
+fn corners_are_square_by_default() {
     scenario("[overlay]\nat-startup = false", |state, display, client| {
+        client.open("one", RED);
+        at_rest(state, display, 1);
+        let shot = shoot(state, display, "square", &[]);
+        assert!(
+            shot.near(12, 12, [0xd0, 0x50, 0x50]),
+            "the window fills its corner: {:?}",
+            shot.at(12, 12)
+        );
+        assert!(
+            shot.near(10, 10, [0xa6, 0xc8, 0xff]),
+            "the border fills its corner: {:?}",
+            shot.at(10, 10)
+        );
+    });
+}
+
+#[test]
+fn an_idle_rounded_window_is_not_redrawn_but_new_content_is() {
+    scenario(ROUNDED, |state, display, client| {
         client.open("one", RED);
         at_rest(state, display, 1);
         let mut camera = Camera::new(state, display);
@@ -210,8 +224,15 @@ fn an_idle_rounded_window_is_not_redrawn_but_new_content_is() {
 
         // The same wl_buffer with new pixels: only the commit says anything changed.
         client.repaint(0, BLUE);
-        let_commits_arrive(state, display);
-        assert_ne!(camera.present(state), SceneOutcome::Unchanged);
+        // A client gets to it when it gets to it; only never would be a bug.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while camera.present(state) == SceneOutcome::Unchanged {
+            assert!(
+                Instant::now() < deadline,
+                "new pixels never reached the screen"
+            );
+            app::step(state, display, Some(Duration::from_millis(5))).expect("step");
+        }
         let shot = camera.pixels(state);
         assert!(
             shot.near(300, 400, [0x50, 0x70, 0xd0]),
@@ -224,7 +245,7 @@ fn an_idle_rounded_window_is_not_redrawn_but_new_content_is() {
 
 #[test]
 fn a_window_that_only_moves_shows_the_same_pixels_in_the_new_place() {
-    scenario("[overlay]\nat-startup = false", |state, display, client| {
+    scenario(ROUNDED, |state, display, client| {
         client.open("one", RED);
         at_rest(state, display, 1);
         let mut camera = Camera::new(state, display);
@@ -275,24 +296,56 @@ fn a_scrolled_layout_moves_what_is_on_screen() {
 
 #[test]
 fn the_hotkey_overlay_shows_text_on_a_panel() {
-    scenario("", |state, display, _client| {
-        settle(state, display, |s| {
-            s.timeout().is_none() && !s.scene.is_empty()
-        });
+    scenario("", |state, display, client| {
+        client.open("one", RED);
+        at_rest(state, display, 1);
         let shot = shoot(state, display, "overlay", &[]);
         let (cx, cy) = (WIDTH / 2, HEIGHT / 2);
-        // Text means a mix of bright and dark in the panel's middle.
-        let row: Vec<[u8; 4]> = (0..500).map(|x| shot.at(cx - 250 + x, cy - 60)).collect();
+        // Text means bright pixels in the panel's middle.
         let bright = (0..500)
             .flat_map(|x| (0..120).map(move |y| (x, y)))
             .filter(|&(x, y)| shot.at(cx - 250 + x, cy - 60 + y)[0] > 150)
             .count();
+        assert!(bright > 200, "no text on the panel: {bright} bright pixels");
+    });
+}
+
+/// Left to right along a row: the first pixel of the panel's border.
+fn panel_border(shot: &Shot, y: i32) -> Option<i32> {
+    (200..WIDTH / 2).find(|&x| shot.near(x, y, [0xa6, 0xc8, 0xff]))
+}
+
+#[test]
+fn the_hotkey_overlay_is_framed_like_a_window() {
+    scenario("", |state, display, _client| {
+        settle(state, display, |s| {
+            s.timeout().is_none() && !s.scene.is_empty()
+        });
+        let shot = shoot(state, display, "overlay-square", &[]);
+        let edge = panel_border(&shot, HEIGHT / 2).expect("a border");
+        let top = (0..HEIGHT / 2).find(|&y| shot.near(WIDTH / 2, y, [0xa6, 0xc8, 0xff]));
+        let top = top.expect("a border along the top");
         assert!(
-            bright > 200,
-            "no text on the panel: {bright} bright pixels, {:?}",
-            row[250]
+            shot.near(edge, top, [0xa6, 0xc8, 0xff]),
+            "square by default"
         );
     });
+    scenario(
+        "[window]\ncorner-radius = 12.0",
+        |state, display, _client| {
+            settle(state, display, |s| {
+                s.timeout().is_none() && !s.scene.is_empty()
+            });
+            let shot = shoot(state, display, "overlay-rounded", &[]);
+            let edge = panel_border(&shot, HEIGHT / 2).expect("a border");
+            let top = (0..HEIGHT / 2).find(|&y| shot.near(WIDTH / 2, y, [0xa6, 0xc8, 0xff]));
+            let top = top.expect("a border along the top");
+            assert!(
+                !shot.near(edge, top, [0xa6, 0xc8, 0xff]),
+                "follows corner-radius"
+            );
+        },
+    );
 }
 
 #[test]

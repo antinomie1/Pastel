@@ -180,7 +180,7 @@ struct RawWindow {
 impl Default for RawWindow {
     fn default() -> Self {
         Self {
-            corner_radius: 12.0,
+            corner_radius: 0.0,
             border_width: 2.0,
             active_color: "#a6c8ff".into(),
             inactive_color: "#4a4f5c".into(),

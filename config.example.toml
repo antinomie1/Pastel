@@ -22,7 +22,7 @@ preset-widths = [0.3333333333333333, 0.5, 0.6666666666666666]    # what Mod+R cy
 center-focus = "never"                                 # "always", "on-overflow"
 
 [window]
-corner-radius = 12.0
+corner-radius = 0.0
 border-width = 2.0
 active-color = "#a6c8ff"
 inactive-color = "#4a4f5c"

@@ -12,12 +12,6 @@
 - [x] End-to-end test with a real client on the headless backend
 - [x] README and example config
 
-## Known issues
-
-- [ ] `blur_softens_...` failed once in ~500 runs with a frame showing no stripes
-      at all (`sharp = 0`). Not reproduced under load. Its assertion now prints the
-      present outcome and sample pixels for the next time.
-
 ## Later
 
 - [ ] Floating windows; dialogs currently become columns

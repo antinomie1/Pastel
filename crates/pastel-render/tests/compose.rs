@@ -155,8 +155,22 @@ fn the_animation_is_the_same_whatever_the_frame_rate() {
 }
 
 #[test]
-fn every_item_of_a_window_fades_with_it() {
+fn corners_are_square_unless_asked_for() {
     let mut world = World::new("");
+    world.add(A);
+    world.compose(0.0);
+    let border = world
+        .items
+        .iter()
+        .find(|i| i.kind == SceneKind::Border)
+        .expect("border");
+    assert_eq!(border.corner_radius, 0.0);
+    assert_eq!(world.window(A).expect("drawn").corner_radius, 0.0);
+}
+
+#[test]
+fn every_item_of_a_window_fades_with_it() {
+    let mut world = World::new("[window]\ncorner-radius = 12.0");
     world.add(A);
     world.compose(0.0);
     world.compose(0.08);

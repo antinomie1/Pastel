@@ -6,10 +6,11 @@ use std::rc::Rc;
 use luminaria::shell::SceneItem;
 use luminaria::text::Font;
 use luminaria::util::{Color, Keysym};
-use pastel_config::{Config, OverlayRow, Rgba, Section};
+use pastel_config::{Config, OverlayRow, ResolvedRule, Rgba, Section};
 use pastel_core::{Anim, Curve, Rect};
+use pastel_layout::WindowId;
 
-use crate::effect::color;
+use crate::effect::{Pipeline, WindowFrame, color};
 use crate::overlay::{Overlay, OverlayContext};
 use crate::to_pixels;
 
@@ -20,7 +21,6 @@ const COLUMN_GAP: i32 = 44;
 const KEY_GAP: i32 = 20;
 const SECTION_GAP: i32 = 14;
 const LINE_GAP: i32 = 5;
-const RADIUS: f32 = 16.0;
 const SLIDE: f64 = 12.0;
 /// Premultiplied RGBA8 of the panel, baked into the image with the text so the two
 /// are one item.
@@ -42,6 +42,9 @@ struct Style {
 
 pub struct HotkeyOverlay {
     style: Style,
+    /// The same one windows go through: border, corners, shadow and blur all
+    /// follow `[window]`, so the panel looks like it belongs.
+    pipeline: Pipeline,
     rows: Vec<OverlayRow>,
     raster: Option<Raster>,
     /// Text can't be drawn at all; say so once rather than every frame.
@@ -58,6 +61,7 @@ impl HotkeyOverlay {
                 font: config.overlay.font.clone(),
                 accent: config.window.active_color,
             },
+            pipeline: Pipeline::from_config(&config.window),
             rows: config.binds.overlay_rows(mod_key),
             raster: None,
             failed: false,
@@ -71,6 +75,7 @@ impl HotkeyOverlay {
             font: config.overlay.font.clone(),
             accent: config.window.active_color,
         };
+        self.pipeline = Pipeline::from_config(&config.window);
         self.rows = config.binds.overlay_rows(mod_key);
         self.raster = None;
         self.failed = false;
@@ -227,17 +232,29 @@ impl Overlay for HotkeyOverlay {
         };
         let (w, h) = (f64::from(raster.width), f64::from(raster.height));
         let (cx, cy) = context.monitor.center();
-        let y = cy - h / 2.0 + (1.0 - alpha) * SLIDE;
-        let rect = to_pixels(Rect::new(cx - w / 2.0, y, w, h));
-        let alpha = alpha as f32;
-        let panel = SceneItem::image(rect, IMAGE_SERIAL)
-            .with_corner_radius(RADIUS)
-            .with_alpha(alpha)
-            .with_blur(false)
-            .with_blur_opacity(alpha)
-            .with_shadow(Color::rgba(0.0, 0.0, 0.0, 0.5 * alpha), 32.0)
-            .with_accepts_input(false);
+        let x = (cx - w / 2.0).round();
+        let y = (cy - h / 2.0 + (1.0 - alpha) * SLIDE).round();
+        let frame = WindowFrame {
+            id: WindowId(0),
+            rect: Rect::new(x, y, w, h),
+            alpha: alpha as f32,
+            focus: 1.0,
+            // Whatever opacity windows have, the text has to stay readable.
+            rule: ResolvedRule {
+                opacity: Some(1.0),
+                ..ResolvedRule::default()
+            },
+            fullscreen: false,
+        };
+        let start = items.len();
+        self.pipeline.below(&frame, items);
+        let mut panel =
+            SceneItem::image(to_pixels(frame.rect), IMAGE_SERIAL).with_alpha(frame.alpha);
+        self.pipeline.style(&frame, &mut panel);
         items.push(panel);
+        for item in &mut items[start..] {
+            item.accepts_input = false;
+        }
         animating
     }
 }
