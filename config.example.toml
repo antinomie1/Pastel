@@ -16,11 +16,11 @@ enabled = true
 path = "xwayland-satellite"
 
 # Any number of these; what `wlr-randr` lists goes in `name`. Anything left out
-# stays as the monitor came up. Scale is a whole number for now.
+# stays as the monitor came up.
 # [[output]]
 # name = "DP-1"
 # mode = "2560x1440@144"
-# scale = 2
+# scale = 1.5
 # position = [0, 0]
 # transform = "normal"     # 90, 180, 270, flipped, flipped-90, ...
 # enabled = true
@@ -29,6 +29,7 @@ path = "xwayland-satellite"
 mod = "super"              # what `Mod` means in [binds]
 nested-mod = "alt"         # ...when running inside another compositor
 focus-follows-mouse = false
+# touch-output = "DP-2"    # the monitor a touchscreen sits on; default: the built-in panel
 layout = ""                # xkb: "us", "us,ru"; empty follows XKB_DEFAULT_LAYOUT
 variant = ""               # "dvorak", "," for each extra layout
 options = ""               # "ctrl:nocaps,grp:alt_shift_toggle"

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use luminaria::backend::{GestureEvent, GestureKind, GesturePhase, InputEvent};
+use luminaria::backend::{GestureEvent, GestureKind, GesturePhase, InputEvent, Output};
 use luminaria::protocol::SurfaceId;
 use pastel_layout::Swipe;
 
@@ -10,6 +10,8 @@ use crate::state::State;
 
 /// How many fingers swipe at the desktop, leaving others to the client.
 const DESKTOP_FINGERS: u32 = 3;
+/// Connectors of a laptop's own panel, the likeliest home of a touchscreen.
+const BUILT_IN: [&str; 3] = ["eDP", "LVDS", "DSI"];
 
 #[derive(Default)]
 pub struct TouchState {
@@ -22,11 +24,28 @@ pub struct TouchState {
 }
 
 impl State<'_> {
-    /// From the panel's 0 to 1 onto the monitor it's in front of. Which one that
-    /// is isn't known here, so it's the focused one; one screen is the usual case.
+    /// The monitor the panel is in front of, which the event doesn't say.
+    fn touch_output(&self) -> Option<&Output> {
+        let screens = self.services.screens;
+        let on_desktop = |o: &&Output| self.desktop.monitor(o.id().0).is_some();
+        let named = |wanted: &dyn Fn(&str) -> bool| {
+            let mut enabled = self.outputs.iter().filter(on_desktop);
+            enabled.find(|o| wanted(&screens.output_name(o)))
+        };
+        let configured = self.config.input.touch_output.as_deref();
+        let focused = self.desktop.focused_monitor().map(|m| m.id);
+        configured
+            .and_then(|want| named(&|name| name == want))
+            .or_else(|| named(&|name| BUILT_IN.iter().any(|p| name.starts_with(p))))
+            .or_else(|| self.outputs.iter().find(|o| Some(o.id().0) == focused))
+    }
+
+    /// From the panel's 0 to 1, which rotate with it, onto the monitor.
     fn touch_point(&self, x: f64, y: f64) -> Option<(f64, f64)> {
-        let rect = self.desktop.focused_monitor()?.rect;
+        let output = self.touch_output()?;
+        let rect = self.desktop.monitor(output.id().0)?.rect;
         let (x, y) = (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
+        let (x, y) = output.transform().unit_point(x, y);
         Some((rect.x + x * rect.w, rect.y + y * rect.h))
     }
 

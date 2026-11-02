@@ -424,6 +424,45 @@ fn a_client_can_capture_what_is_on_the_output() {
     );
 }
 
+/// 1.5 turns 1280x800 into a desktop of 854x534 on the same pixels. A window lands
+/// where its logical place times the scale says, and the desktop reaches the edge.
+#[test]
+fn a_fractional_scale_lays_out_in_logical_pixels_and_draws_in_device_ones() {
+    scenario(
+        "[overlay]\nat-startup = false\n[window]\nblur = false\nborder-width = 0.0\n\
+         [[output]]\nname = \"pastel-1\"\nscale = 1.5\n",
+        |state, display, client| {
+            client.open("shown", RED);
+            at_rest(state, display, 1);
+            client.capture();
+            settle(state, display, |_| client.captured().is_some());
+            let captured = client.captured().expect("a capture");
+            assert_eq!(
+                (captured.width, captured.height),
+                (WIDTH as u32, HEIGHT as u32)
+            );
+            let rect = state.scene.iter().rfind(|i| i.kind == SceneKind::Surface);
+            let rect = rect.expect("the window").rect;
+            assert!(
+                rect.x + rect.width <= 854 && rect.y + rect.height <= 534,
+                "{rect:?}"
+            );
+            let device = |logical: i32| (f64::from(logical) * 1.5).round() as u32;
+            let [r, g, b] = [(RED >> 16) as u8, (RED >> 8) as u8, RED as u8];
+            let is_red =
+                |p: &[u8]| p[0].abs_diff(r) <= 3 && p[1].abs_diff(g) <= 3 && p[2].abs_diff(b) <= 3;
+            let (left, right) = (device(rect.x), device(rect.x + rect.width));
+            let (top, bottom) = (device(rect.y), device(rect.y + rect.height));
+            let middle = (top + bottom) / 2;
+            assert!(is_red(&captured.at(left, middle)));
+            assert!(is_red(&captured.at(right - 1, middle)));
+            assert!(is_red(&captured.at((left + right) / 2, bottom - 1)));
+            assert!(!is_red(&captured.at(right, middle)));
+            assert!(!is_red(&captured.at((left + right) / 2, bottom)));
+        },
+    );
+}
+
 /// A window that's gone still has its colour on the way out, with nothing of the
 /// client left to ask.
 #[test]

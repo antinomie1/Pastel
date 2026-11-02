@@ -203,7 +203,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 [[package]]
 name = "luminaria"
 version = "0.0.1"
-source = "git+https://github.com/antinomie1/luminaria?rev=4c80a32edbf9fe98bffd7f2453766c3a66b6a77d#4c80a32edbf9fe98bffd7f2453766c3a66b6a77d"
+source = "git+https://github.com/antinomie1/luminaria?rev=a45830a1e6729655af7102a0a37d8309a0f1df98#a45830a1e6729655af7102a0a37d8309a0f1df98"
 dependencies = [
  "cxx",
  "cxx-build",

@@ -14,13 +14,21 @@ pub struct Randr {
     manager: Option<manager::ZwlrOutputManagerV1>,
     head: Option<head::ZwlrOutputHeadV1>,
     serial: u32,
-    /// A scale to ask for once the state has arrived, and whether just to test it.
-    queued: Option<(f64, bool)>,
+    /// What to ask for once the state has arrived.
+    queued: Option<Ask>,
+}
+
+/// Something to ask of the only output.
+#[derive(Debug, Clone, Copy)]
+pub enum Ask {
+    /// This scale, and whether just to test it.
+    Scale(f64, bool),
+    Off,
 }
 
 impl App {
-    pub(super) fn randr(&mut self, scale: f64, test: bool) {
-        self.randr.queued = Some((scale, test));
+    pub(super) fn randr(&mut self, ask: Ask) {
+        self.randr.queued = Some(ask);
         if self.randr.manager.is_none() {
             let qh = self.qh.clone();
             self.randr.manager = Some(self.globals.bind(&qh, 1..=4, ()).expect("output manager"));
@@ -34,16 +42,24 @@ impl App {
         let (Some(manager), Some(head)) = (&self.randr.manager, &self.randr.head) else {
             return;
         };
-        let Some((scale, test)) = self.randr.queued.take() else {
+        let Some(ask) = self.randr.queued.take() else {
             return;
         };
         let config = manager.create_configuration(self.randr.serial, &qh, ());
-        let wanted = config.enable_head(head, &qh, ());
-        wanted.set_scale(scale);
-        if test {
-            config.test();
-        } else {
-            config.apply();
+        match ask {
+            Ask::Scale(scale, test) => {
+                let wanted = config.enable_head(head, &qh, ());
+                wanted.set_scale(scale);
+                if test {
+                    config.test();
+                } else {
+                    config.apply();
+                }
+            }
+            Ask::Off => {
+                config.disable_head(head);
+                config.apply();
+            }
         }
     }
 }

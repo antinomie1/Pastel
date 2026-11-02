@@ -13,7 +13,7 @@ pastel-layout = { path = "crates/pastel-layout" }
 pastel-config = { path = "crates/pastel-config" }
 pastel-render = { path = "crates/pastel-render" }
 # Pinned to a commit; bump `rev` to update. To hack on both, see AGENTS.md.
-luminaria = { git = "https://github.com/antinomie1/luminaria", rev = "4c80a32edbf9fe98bffd7f2453766c3a66b6a77d", features = ["text"] }
+luminaria = { git = "https://github.com/antinomie1/luminaria", rev = "a45830a1e6729655af7102a0a37d8309a0f1df98", features = ["text"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 

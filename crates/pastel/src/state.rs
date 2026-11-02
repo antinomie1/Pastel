@@ -15,7 +15,7 @@ use luminaria::gpu::{Cursor, SceneRenderer};
 use luminaria::protocol::{
     ActivationEvent, CompositorEvent, CoreGlobals, IdleInhibitEvent, IdleInhibitManager,
     IdleInhibitorId, IdleNotifier, KeyboardInteractivity, LayerShell, LayerSurfaceEvent,
-    PointerGestures, SurfaceId, Toplevel, ToplevelEvent, XdgShell,
+    PointerGestures, PopupEvent, SurfaceId, Toplevel, ToplevelEvent, XdgShell,
 };
 use luminaria::shell::{
     InputRouter, LayerManager, OutputLayout, PopupTree, SceneHit, SceneItem, SceneKind,
@@ -359,7 +359,12 @@ impl<'a> State<'a> {
                     self.reload_config();
                 }
             }
-            Event::Popup(..) => self.dirty = true,
+            Event::Popup(surface, event) => {
+                if let PopupEvent::Created { .. } = event {
+                    self.tell_scale(surface);
+                }
+                self.dirty = true;
+            }
             // A commit can change a window's size or geometry, which are in the scene.
             Event::Compositor(CompositorEvent::Commit(_)) => self.dirty = true,
             Event::SessionActive(active) => self.session_changed(active),
@@ -411,7 +416,8 @@ impl<'a> State<'a> {
     fn update_inhibitors(&self) {
         let manager = self.services.inhibitors;
         for id in &self.inhibitors {
-            let surface = manager.inhibitor_surface(*id);
+            // The scene holds root surfaces; a video is often a subsurface.
+            let surface = manager.inhibitor_surface(*id).map(|s| s.root());
             let shown = |item: &SceneItem| Some(item.surface) == surface;
             manager.set_visible(*id, self.scene.iter().any(shown));
         }
@@ -601,6 +607,7 @@ impl<'a> State<'a> {
         match output {
             Some(id) => {
                 self.layers.add(shell, surface, id as u32);
+                self.tell_output_scales();
             }
             // Its monitor left while the request was on its way, or there is none.
             None => layer.close(),
@@ -630,8 +637,33 @@ impl<'a> State<'a> {
             self.services.shell().set_bounds((w, h));
         }
         self.size_lock_surfaces();
+        self.tell_output_scales();
         self.services.output_manager.update();
         self.dirty = true;
+    }
+
+    /// A popup draws for the screen its parent's on, nearly always the focused one.
+    fn tell_scale(&self, surface: SurfaceId) {
+        let focused = self.desktop.focused_monitor().map(|m| m.id);
+        if let Some(output) = self.outputs.iter().find(|o| Some(o.id().0) == focused) {
+            let fractional = self.services.globals.fractional_scale();
+            fractional.set_scale(surface, output.scale());
+        }
+    }
+
+    /// Everything that stays on one output, whatever else moves. Windows move
+    /// between them, so `configure_windows` does those.
+    pub(crate) fn tell_output_scales(&self) {
+        let fractional = self.services.globals.fractional_scale();
+        for output in &self.outputs {
+            let scale = output.scale();
+            for surface in self.layers.surfaces_on(output.id().0 as u32) {
+                fractional.set_scale(surface, scale);
+            }
+            for (surface, _) in self.lock.surfaces.iter().filter(|s| s.1 == output.id().0) {
+                fractional.set_scale(*surface, scale);
+            }
+        }
     }
 
     /// Clicks give focus; a layer surface only if it can take it.
@@ -665,7 +697,7 @@ impl<'a> State<'a> {
             let scale = outputs
                 .iter()
                 .find(|o| o.id().0 == monitor.id)
-                .map_or(1, Output::scale);
+                .map_or(1.0, Output::scale);
             for workspace in &monitor.workspaces {
                 placements.clear();
                 Desktop::place(monitor, workspace, placements);
@@ -683,7 +715,7 @@ impl<'a> State<'a> {
                     if window.scale != scale {
                         window.scale = scale;
                         let surface = surface_of(placement.id);
-                        fractional.set_scale(surface, f64::from(scale));
+                        fractional.set_scale(surface, scale);
                     }
                     if window.configured == Some(wanted) {
                         continue;
@@ -771,11 +803,12 @@ impl<'a> State<'a> {
             let context = OverlayContext {
                 renderer: self.services.renderer,
                 monitor: monitor.rect,
+                // Text is rastered whole and stretched down, never up.
                 scale: self
                     .outputs
                     .iter()
                     .find(|o| o.id().0 == monitor.id)
-                    .map_or(1, Output::scale),
+                    .map_or(1, |o| o.scale().ceil() as i32),
                 now,
             };
             animating |= self.hotkeys.draw(&context, &mut self.scene);

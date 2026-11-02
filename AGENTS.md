@@ -92,8 +92,14 @@ there.
 - `SceneKind::Rect` and `Border` honour `corner_radius`; a rounded `Border` stays
   hollow. Never draw anything solid behind a window: it
   shows through translucency and gets sampled into its blur.
-- An image's pixel count must equal its box in logical pixels: it can't be stretched
-  or clipped, so overlays are 1:1 and blurry on HiDPI.
+- `Output::scale` is an `f64`; `wl_output.scale` is it rounded up. Boxes stay whole
+  logical pixels and round to device pixels edge by edge, so a window that doesn't
+  fall on a whole device pixel is a pixel off, never a gap. Overlay text is rastered
+  at the rounded-up scale and stretched down.
+- `Surface` windows are told their scale by `configure_windows`; popups, layer
+  surfaces and lock surfaces by `tell_scale` and `tell_output_scales`.
+- Touch events don't name their device, so every panel maps to one monitor:
+  `touch-output`, a built-in panel, or the focused one, in that order.
 - `Toplevel::set_*` state setters each send a configure on change. Call
   `configure(size)` first, so no configure pairs new state with an old size.
 - A rounded or translucent window is an offscreen group; luminaria only re-renders

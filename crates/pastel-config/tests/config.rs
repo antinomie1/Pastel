@@ -353,7 +353,7 @@ fn colours_interpolate() {
 #[test]
 fn output_sections_are_read() {
     let config = Config::parse(
-        "[[output]]\nname = \"DP-1\"\nmode = \"2560x1440@143.91\"\nscale = 2\n\
+        "[[output]]\nname = \"DP-1\"\nmode = \"2560x1440@143.91\"\nscale = 1.5\n\
          position = [100, -20]\ntransform = \"flipped-90\"\n\
          [[output]]\nname = \"HDMI-A-1\"\nenabled = false\nmode = \"1920x1080\"",
     )
@@ -362,7 +362,7 @@ fn output_sections_are_read() {
         panic!("two outputs");
     };
     assert_eq!(first.mode, Some((2560, 1440, 143910)));
-    assert_eq!(first.scale, Some(2));
+    assert_eq!(first.scale, Some(1.5));
     assert_eq!(first.position, Some((100, -20)));
     assert_eq!(first.transform, Some(5));
     assert!(first.enabled);
@@ -375,6 +375,7 @@ fn a_bad_output_section_is_an_error() {
     for text in [
         "[[output]]\nname = \"a\"\nmode = \"big\"",
         "[[output]]\nname = \"a\"\nscale = 0",
+        "[[output]]\nname = \"a\"\nscale = -1.5",
         "[[output]]\nname = \"a\"\ntransform = \"sideways\"",
         "[[output]]\nscale = 2",
     ] {

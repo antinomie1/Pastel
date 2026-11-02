@@ -204,6 +204,26 @@ fn idle_is_reported_and_input_ends_it() {
 }
 
 #[test]
+fn a_video_in_a_subsurface_keeps_the_session_awake_while_its_window_is_shown() {
+    scenario("[overlay]\nat-startup = false", |state, display, client| {
+        client.open("player", RED);
+        settle(state, display, "mapped", |s| s.windows_mapped() == 1);
+        client.inhibit_idle_in_subsurface(0);
+        let rest = |state: &mut State<'_>| {
+            for _ in 0..30 {
+                app::step(state, display, Some(Duration::from_millis(5))).expect("step");
+            }
+        };
+        rest(state);
+        client.watch_idle(30);
+        rest(state);
+        assert_eq!(client.idle(), [] as [bool; 0]);
+        client.close(0);
+        settle(state, display, "idled", |_| client.idle() == [true]);
+    });
+}
+
+#[test]
 fn a_taskbar_can_see_focus_and_close_windows() {
     scenario("[overlay]\nat-startup = false", |state, display, client| {
         client.watch_windows();
@@ -497,11 +517,28 @@ fn an_output_client_tests_and_applies_a_scale() {
 #[test]
 fn an_output_client_is_told_what_cant_be_done() {
     scenario("[overlay]\nat-startup = false", |state, display, client| {
-        client.randr(1.5, false);
+        client.randr_off(); // the only one
         settle(state, display, "the refusal", |_| {
             client.randr_answers() == [false]
         });
         assert_eq!(screen(state), (1280.0, 800.0));
+    });
+}
+
+#[test]
+fn an_output_scaled_to_a_fraction_tells_its_windows_so() {
+    scenario("[overlay]\nat-startup = false", |state, display, client| {
+        client.open("sharp", RED);
+        settle(state, display, "mapped", |s| s.windows_mapped() == 1);
+        client.watch_scale(0);
+        client.randr(1.5, false);
+        settle(state, display, "the answer", |_| {
+            client.randr_answers() == [true]
+        });
+        assert_eq!(screen(state), (854.0, 534.0));
+        settle(state, display, "the scale", |_| {
+            client.preferred_scale() == Some(180)
+        });
     });
 }
 

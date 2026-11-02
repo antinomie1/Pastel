@@ -14,9 +14,21 @@
 
 ## Later
 
-- [ ] Fractional output scale; `Output::scale` is an integer in luminaria
-- [ ] Touch on a rotated or second screen: points map linearly onto the focused monitor
-- [ ] Window capture of a tiled dmabuf; `ScreencopyManager::set_renderer` wants the
-      `VulkanRenderer` inside `SceneRenderer`, which the binding doesn't expose
-- [ ] A cursor on a hardware plane is missing from captures: `set_cursor_source`
-- [ ] An idle inhibitor on a subsurface counts as hidden; only root surfaces are in the scene
+- [x] Fractional output scale
+- [x] Touch on a rotated or second screen
+- [x] Window capture of a tiled dmabuf
+- [x] A cursor on a hardware plane in captures
+- [x] An idle inhibitor on a subsurface
+- [ ] Two touchscreens at once: touch events don't name their device, so both land
+      on one monitor
+- [ ] A popup is told the focused monitor's scale, not its parent's; only mixed-scale
+      monitors can tell
+- [ ] A rounded or translucent window at a fractional scale is an offscreen group
+      whose size can differ from its place on screen by a pixel, and is resampled
+
+## Needs real hardware
+
+Headless can't reach these; they pass everything short of them.
+
+- [ ] Fractional scale, and a captured cursor, on a real KMS plane
+- [ ] `touch-output` with two monitors

@@ -27,7 +27,7 @@ pub struct LockState {
     owed: HashMap<OutputId, u8>,
     deadline: Option<Instant>,
     /// Each lock surface and the monitor it's for.
-    surfaces: Vec<(SurfaceId, u64)>,
+    pub(crate) surfaces: Vec<(SurfaceId, u64)>,
     focus: Option<SurfaceId>,
 }
 
@@ -71,6 +71,7 @@ impl State<'_> {
         if let Some(output) = screens.output_with(identity, &self.outputs) {
             self.lock.surfaces.push((surface, output.id().0));
             self.size_lock_surfaces();
+            self.tell_output_scales();
         }
     }
 

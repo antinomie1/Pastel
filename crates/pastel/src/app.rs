@@ -65,8 +65,6 @@ fn run_on<'d, R>(
     _taskbars.track(shell);
     let mut _window_list = ForeignToplevelList::new(display)?;
     _window_list.track(shell);
-    let mut capture = ScreencopyManager::new(display)?;
-    capture.enable_toplevel_capture(display, &_window_list)?;
     let layout = OutputLayout::new()?;
     let popups = PopupTree::new(shell)?;
     let backend = AutoBackend::new(display, &options)?;
@@ -81,7 +79,11 @@ fn run_on<'d, R>(
     }
     renderer.set_presentation(Some(globals.presentation()));
     let _dmabuf = renderer.linux_dmabuf(display);
-    let cursor = Cursor::new_with_shapes(&renderer, &layout, seat, globals.cursor_shape())?;
+    let mut capture = ScreencopyManager::new(display)?;
+    capture.enable_toplevel_capture(display, &_window_list)?;
+    capture.set_scene_renderer(&renderer);
+    let cursor =
+        Cursor::new_with_capture(&renderer, &layout, seat, globals.cursor_shape(), &capture)?;
 
     let screen_options = ScreenOptions {
         background: color(config.background),
@@ -91,6 +93,7 @@ fn run_on<'d, R>(
     let screens = ScreenManager::new(display, &backend, &renderer, &layout, &screen_options)?;
     screens.follow_popups(&popups);
     screens.follow_capture(&capture);
+    screens.follow_cursor(&cursor);
     let output_manager = OutputManager::new(display, &layout)?;
     output_manager.set_deferred(true);
     let router = InputRouter::new(seat, &cursor, &screens, shell, &popups)?;

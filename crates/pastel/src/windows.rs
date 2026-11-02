@@ -23,7 +23,7 @@ pub struct Window {
     /// What was last asked of the client, to send only changes.
     pub configured: Option<(i32, i32, bool, bool)>,
     /// What it was last told about its monitor's scale; 0 until then.
-    pub scale: i32,
+    pub scale: f64,
 }
 
 #[derive(Default)]
@@ -39,7 +39,7 @@ impl Windows {
                 rule,
                 mapped: false,
                 configured: None,
-                scale: 0,
+                scale: 0.0,
             },
         );
     }

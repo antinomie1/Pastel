@@ -109,13 +109,14 @@ impl CurveSpec {
 }
 
 /// One monitor, by the name `wlr-randr` shows. Unset fields stay as they are.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OutputConfig {
     pub name: String,
     pub enabled: bool,
     /// Width, height and millihertz; 0 for the highest refresh at that size.
     pub mode: Option<(i32, i32, i32)>,
-    pub scale: Option<i32>,
+    /// Device pixels per logical pixel; 1.5 is fine.
+    pub scale: Option<f64>,
     pub position: Option<(i32, i32)>,
     /// A `wl_output.transform` value.
     pub transform: Option<u32>,
@@ -155,8 +156,8 @@ fn parse_transform(text: &str) -> Result<u32, String> {
 
 impl RawOutput {
     fn resolve(self) -> Result<OutputConfig, String> {
-        if self.scale.is_some_and(|scale| scale < 1) {
-            return Err(format!("output {}: scale must be 1 or more", self.name));
+        if self.scale.is_some_and(|scale| scale <= 0.0) {
+            return Err(format!("output {}: scale must be above 0", self.name));
         }
         Ok(OutputConfig {
             mode: self.mode.as_deref().map(parse_mode).transpose()?,
@@ -208,7 +209,7 @@ struct RawOutput {
     #[serde(default = "enabled_by_default")]
     enabled: bool,
     mode: Option<String>,
-    scale: Option<i32>,
+    scale: Option<f64>,
     position: Option<[i32; 2]>,
     transform: Option<String>,
 }
@@ -239,6 +240,7 @@ struct RawInput {
     r#mod: String,
     nested_mod: String,
     focus_follows_mouse: bool,
+    touch_output: Option<String>,
     layout: String,
     variant: String,
     options: String,
@@ -250,6 +252,7 @@ impl Default for RawInput {
             r#mod: "super".into(),
             nested_mod: "alt".into(),
             focus_follows_mouse: false,
+            touch_output: None,
             layout: String::new(),
             variant: String::new(),
             options: String::new(),
@@ -378,6 +381,9 @@ pub struct InputConfig {
     pub mod_key: u32,
     pub nested_mod_key: u32,
     pub focus_follows_mouse: bool,
+    /// The monitor a touchscreen is glued to. Unset is a laptop's own panel if
+    /// there is one, or else the focused monitor.
+    pub touch_output: Option<String>,
     pub keymap: KeymapNames,
 }
 
@@ -541,6 +547,7 @@ impl RawConfig {
                 mod_key: keys::parse_modifier(&self.input.r#mod)?,
                 nested_mod_key: keys::parse_modifier(&self.input.nested_mod)?,
                 focus_follows_mouse: self.input.focus_follows_mouse,
+                touch_output: self.input.touch_output,
                 keymap: KeymapNames {
                     layout: self.input.layout,
                     variant: self.input.variant,

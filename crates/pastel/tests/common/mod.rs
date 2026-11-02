@@ -24,10 +24,16 @@ use std::time::Duration;
 use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
     wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_region, wl_registry, wl_seat,
-    wl_shm, wl_shm_pool, wl_surface, wl_touch,
+    wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
 };
 use wayland_client::{
     Connection, Dispatch, QueueHandle, WEnum, delegate_noop, event_created_child,
+};
+use wayland_protocols::wp::fractional_scale::v1::client::{
+    wp_fractional_scale_manager_v1, wp_fractional_scale_v1,
+};
+use wayland_protocols::wp::idle_inhibit::zv1::client::{
+    zwp_idle_inhibit_manager_v1, zwp_idle_inhibitor_v1,
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1;
@@ -61,12 +67,16 @@ pub enum Command {
     Wallpaper(Pattern),
     /// Quit the wallpaper client.
     NoWallpaper,
-    /// Ask for a scale on the only output, as wlr-randr does; `true` only tests it.
-    Randr(f64, bool),
+    /// Ask something of the only output, as wlr-randr does.
+    Randr(outputs::Ask),
+    /// Listen for the fractional scale this window is meant to draw at.
+    WatchScale(usize),
     /// Copy the first output, as grim does.
     Capture,
     /// Ask to hear when the seat has been idle this long, in milliseconds.
     WatchIdle(u32),
+    /// Keep the session awake from a subsurface of this window, as a video does.
+    InhibitIdleInSubsurface(usize),
     /// Follow the window list, as a taskbar does.
     WatchWindows,
     /// Ask from the taskbar to focus the nth window it heard about.
@@ -104,6 +114,7 @@ pub struct Report {
     pub locked: bool,
     /// Every size a lock surface has been configured to.
     pub lock_sizes: Vec<(u32, u32)>,
+    pub preferred_scale: Option<u32>,
     /// `idled` and `resumed` as they came: true for idled.
     pub idle: Vec<bool>,
     /// The app id of each window the taskbar was told about.
@@ -211,8 +222,25 @@ impl Client {
 
     pub fn randr(&self, scale: f64, test: bool) {
         self.commands
-            .send(Command::Randr(scale, test))
+            .send(Command::Randr(outputs::Ask::Scale(scale, test)))
             .expect("client alive");
+    }
+
+    pub fn randr_off(&self) {
+        self.commands
+            .send(Command::Randr(outputs::Ask::Off))
+            .expect("client alive");
+    }
+
+    pub fn watch_scale(&self, index: usize) {
+        self.commands
+            .send(Command::WatchScale(index))
+            .expect("client alive");
+    }
+
+    /// The scale each window was last told, in 120ths.
+    pub fn preferred_scale(&self) -> Option<u32> {
+        self.report.lock().expect("report").preferred_scale
     }
 
     /// Every verdict so far: true for `succeeded`.
@@ -242,6 +270,12 @@ impl Client {
     pub fn watch_idle(&self, ms: u32) {
         self.commands
             .send(Command::WatchIdle(ms))
+            .expect("client alive");
+    }
+
+    pub fn inhibit_idle_in_subsurface(&self, index: usize) {
+        self.commands
+            .send(Command::InhibitIdleInSubsurface(index))
             .expect("client alive");
     }
 
@@ -418,6 +452,32 @@ impl App {
         file
     }
 
+    fn watch_scale(&mut self, index: usize) {
+        let qh = self.qh.clone();
+        let Some(window) = self.windows.get(&index) else {
+            return;
+        };
+        let manager: wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1 =
+            self.globals.bind(&qh, 1..=1, ()).expect("fractional scale");
+        let _ = manager.get_fractional_scale(&window.surface, &qh, ());
+    }
+
+    fn inhibit_idle_in_subsurface(&mut self, index: usize) {
+        let qh = self.qh.clone();
+        let Some(window) = self.windows.get(&index) else {
+            return;
+        };
+        let child = self.compositor.create_surface(&qh, ());
+        let subcompositor: wl_subcompositor::WlSubcompositor =
+            self.globals.bind(&qh, 1..=1, ()).expect("subcompositor");
+        let _ = subcompositor.get_subsurface(&child, &window.surface, &qh, ());
+        let manager: zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1 =
+            self.globals.bind(&qh, 1..=1, ()).expect("idle inhibit");
+        let _ = manager.create_inhibitor(&child, &qh, ());
+        child.commit();
+        window.surface.commit();
+    }
+
     fn close(&mut self, index: usize) {
         if let Some(window) = self.windows.remove(&index) {
             window.toplevel.destroy();
@@ -528,9 +588,11 @@ fn run(stream: UnixStream, commands: Receiver<Command>, report: Arc<Mutex<Report
                 Command::Wallpaper(pattern) => app.start_wallpaper(pattern),
                 Command::NoWallpaper => app.stop_wallpaper(),
                 Command::Activate(from, target) => app.activate(from, target),
-                Command::Randr(scale, test) => app.randr(scale, test),
+                Command::Randr(ask) => app.randr(ask),
                 Command::Capture => app.capture(),
                 Command::WatchIdle(ms) => app.watch_idle(ms),
+                Command::WatchScale(index) => app.watch_scale(index),
+                Command::InhibitIdleInSubsurface(index) => app.inhibit_idle_in_subsurface(index),
                 Command::WatchWindows => app.watch_windows(),
                 Command::TaskbarActivate(index) => app.taskbar_activate(index),
                 Command::TaskbarClose(index) => app.taskbar_close(index),
@@ -647,6 +709,21 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for App {
     }
 }
 
+impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &wp_fractional_scale_v1::WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            app.report.lock().expect("report").preferred_scale = Some(scale);
+        }
+    }
+}
+
 impl Dispatch<wl_touch::WlTouch, ()> for App {
     fn event(
         app: &mut Self,
@@ -699,5 +776,10 @@ delegate_noop!(App: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(App: ignore wl_buffer::WlBuffer);
 delegate_noop!(App: ignore wl_seat::WlSeat);
 delegate_noop!(App: ignore wl_region::WlRegion);
+delegate_noop!(App: ignore wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
+delegate_noop!(App: ignore wl_subcompositor::WlSubcompositor);
+delegate_noop!(App: ignore wl_subsurface::WlSubsurface);
+delegate_noop!(App: ignore zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1);
+delegate_noop!(App: ignore zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1);
 delegate_noop!(App: ignore wl_output::WlOutput);
 delegate_noop!(App: ignore zwlr_layer_shell_v1::ZwlrLayerShellV1);

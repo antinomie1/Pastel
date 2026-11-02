@@ -13,7 +13,7 @@ use crate::state::{State, logical};
 struct Wanted {
     enabled: Option<bool>,
     mode: Option<(i32, i32, i32)>,
-    scale: Option<i32>,
+    scale: Option<f64>,
     transform: Option<Transform>,
     position: Option<(i32, i32)>,
 }
@@ -30,21 +30,16 @@ impl From<&OutputConfig> for Wanted {
     }
 }
 
-/// `None` for what an output can't do. Scale is whole numbers until luminaria's
-/// `Output` is: its logical size is an integer division of the mode.
-fn wanted(head: &OutputHeadRequest) -> Option<Wanted> {
-    let scale = match head.scale {
-        Some(scale) if scale >= 1.0 && scale.fract() == 0.0 => Some(scale as i32),
-        Some(_) => return None,
-        None => None,
-    };
-    Some(Wanted {
-        enabled: Some(head.enabled),
-        mode: head.mode,
-        scale,
-        transform: head.transform,
-        position: head.position,
-    })
+impl From<&OutputHeadRequest> for Wanted {
+    fn from(head: &OutputHeadRequest) -> Self {
+        Self {
+            enabled: Some(head.enabled),
+            mode: head.mode,
+            scale: head.scale,
+            transform: head.transform,
+            position: head.position,
+        }
+    }
 }
 
 impl State<'_> {
@@ -159,7 +154,7 @@ impl State<'_> {
         let mut wants = Vec::new();
         for head in heads {
             let output = named(&head.name)?;
-            let want = wanted(head)?;
+            let want = Wanted::from(head);
             let can_show = |&(w, h, _): &(i32, i32, i32)| {
                 (w, h) == (output.width(), output.height())
                     || output.modes().iter().any(|m| (m.width, m.height) == (w, h))

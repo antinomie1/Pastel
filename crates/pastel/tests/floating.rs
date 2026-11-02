@@ -341,6 +341,36 @@ fn a_touch_lands_on_the_window_under_it_and_gives_it_focus() {
     });
 }
 
+#[test]
+fn a_touch_follows_the_panel_when_the_output_is_rotated() {
+    let config = format!("{NO_OVERLAY}[[output]]\nname = \"pastel-1\"\ntransform = \"90\"\n");
+    scenario(&config, |state, display, client| {
+        client.open("one", RED);
+        settle(state, display, |s| s.windows_mapped() == 1);
+        rest(state, display);
+        state
+            .services
+            .globals
+            .seat()
+            .set_capabilities(true, true, true);
+        rest(state, display);
+        let screen = state.desktop.monitors()[0].rect;
+        assert_eq!((screen.w, screen.h), (800.0, 1280.0));
+        let target = surface_rect(state, 0);
+        let (x, y) = target.center();
+        // Turned a quarter, so the panel's y runs along the screen's x.
+        state.input(InputEvent::TouchDown {
+            id: 1,
+            x: 1.0 - y / screen.h,
+            y: x / screen.w,
+        });
+        state.input(InputEvent::TouchFrame);
+        settle(state, display, |_| !client.touches().0.is_empty());
+        let (dx, dy) = client.touches().0[0];
+        assert!((dx - (x - target.x)).abs() < 0.01 && (dy - (y - target.y)).abs() < 0.01);
+    });
+}
+
 fn surface_rect(state: &State<'_>, index: usize) -> Rect {
     let surfaces = state.scene.iter().filter(|i| i.kind == SceneKind::Surface);
     let mut rects: Vec<_> = surfaces.map(|i| i.rect).collect();
