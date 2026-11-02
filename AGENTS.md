@@ -6,7 +6,7 @@ Guidance for AI coding agents working in Pastel.
 
 Pastel is a scrolling-tiling Wayland compositor (niri-style) written in Rust 2024
 on top of [luminaria](https://github.com/antinomie1/luminaria). Luminaria owns
-protocols, backends and rendering; Pastel owns policy: where windows go, what a
+protocols, backends and rendering (native Vulkan 1.3 via vulkan-hpp); Pastel owns policy: where windows go, what a
 key does, how things move.
 
 ## Commands

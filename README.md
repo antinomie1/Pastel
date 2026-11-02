@@ -1,57 +1,60 @@
 # Pastel
 
-一个滚动平铺的 Wayland 窗口管理器，基于 [luminaria](https://github.com/antinomie1/luminaria)，用 Rust 2024 编写。
+English | [简体中文](README.zh-CN.md)
 
-- **滚动平铺**：列、列内堆叠、预设宽度、最大化、居中、动态工作区、多显示器
-- **动画**：弹簧与缓动两种曲线，可在飞行中改目标并保留速度；窗口开关、移动、工作区切换、焦点色、overlay 全部覆盖
-- **视觉效果**：可选圆角（默认关闭）、空心边框、阴影、磨砂模糊、窗口规则
-- **浮动窗口**：对话框自动浮动，也可手动切换或用窗口规则指定；标题栏拖动、`Mod+左键` 移动、`Mod+右键` 缩放
-- **桌面协议**：锁屏（swaylock）、截屏（grim、wf-recorder）、空闲通知（swayidle）、任务栏、输出管理（wlr-randr、kanshi）、xdg-activation
-- **X11 应用**：通过 [xwayland-satellite](https://github.com/Supreeeme/xwayland-satellite)，第一个 X 客户端连接时才启动，`[xwayland] enabled` 可关闭
-- **显示**：小数缩放（`scale = 1.5`）、旋转、多屏，客户端按真实缩放绘制
-- **输入**：触摸屏（随屏幕旋转，`touch-output` 指定所在显示器）；触控板三指左右平移、上下切工作区，其余手势交给应用
-- **快捷键菜单**：启动时显示，`Mod+Shift+/` 再次打开，任意键关闭
-- **配置热重载**：保存配置文件即生效；键盘布局、背景色、显示器（`[[output]]`）都不用重启
-- **静止时零开销**：没有动画就没有定时器、没有帧
+A scrolling-tiling Wayland compositor (niri-style) built on [luminaria](https://github.com/antinomie1/luminaria), written in Rust 2024.
 
-## 构建
+- **Native Vulkan 1.3 backend**: Built on luminaria's native Vulkan 1.3 backend
+- **Scrolling tiling**: Columns, stacking within columns, preset widths, maximize, center, dynamic workspaces, and multi-monitor support
+- **Animations**: Spring and ease curves with in-flight retargeting preserving momentum; covers window open/close, movement, workspace switching, focus color transitions, and overlay
+- **Visual effects**: Optional rounded corners (disabled by default), hollow borders, shadows, frosted glass blur, and window rules
+- **Floating windows**: Dialogs float automatically, toggled manually or assigned via window rules; drag by titlebar, `Mod+Left Click` to move, `Mod+Right Click` to resize
+- **Desktop protocols**: Screen lock (swaylock), screenshot/screen recording (grim, wf-recorder), idle notification (swayidle), status bars/panels, output management (wlr-randr, kanshi), and xdg-activation
+- **X11 applications**: Via [xwayland-satellite](https://github.com/Supreeeme/xwayland-satellite), starts on demand when the first X client connects; can be disabled with `[xwayland] enabled`
+- **Displays**: Fractional scaling (`scale = 1.5`), rotation, multi-output; clients render at their true scale
+- **Input**: Touchscreens (rotates with display, `touch-output` binds to a specific display); touchpad 3-finger horizontal swipe to pan, vertical swipe to switch workspaces, passes other gestures through to applications
+- **Hotkey overlay**: Shown on startup, reopened with `Mod+Shift+/`, dismissed by any key
+- **Live config reload**: Takes effect immediately upon saving; keyboard layouts, background color, and monitors (`[[output]]`) require no restarts
+- **Zero idle overhead**: No timers and no frame renders when no animations are running
 
-需要 Rust ≥ 1.88、xmake、clang ≥ 22，以及 wayland、wayland-protocols、vulkan-headers、libinput、seatd、libdrm、gbm、fcft、glslang。
+## Building
 
-luminaria 由 cargo 从 GitHub 拉取，版本固定在根 `Cargo.toml` 的 `rev`：
+Requires Rust ≥ 1.88, xmake, clang ≥ 22, and wayland, wayland-protocols, vulkan-headers, libinput, seatd, libdrm, gbm, fcft, glslang.
 
-```sh
-cargo build --release -j4      # 首次要编译 C++，请限制并行度
-```
-
-## 运行
+luminaria is fetched from GitHub by Cargo, pinned to a specific revision in the root `Cargo.toml`:
 
 ```sh
-cargo run --release            # 在当前 Wayland 会话里以窗口方式运行（Mod = Alt）
-LUMINARIA_BACKEND=drm cargo run --release   # 在空闲 VT 上裸机运行（Mod = Super）
+cargo build --release -j4      # First build compiles C++; please limit parallelism
 ```
 
-默认终端是 `foot`，启动器是 `fuzzel`。
+## Running
 
-| 按键 | 动作 |
+```sh
+cargo run --release            # Run nested in the current Wayland session (Mod = Alt)
+LUMINARIA_BACKEND=drm cargo run --release   # Bare metal on a free VT (Mod = Super)
+```
+
+Default terminal is `foot`, and default application launcher is `fuzzel`.
+
+| Key | Action |
 |---|---|
-| `Mod+Shift+/` | 快捷键菜单 |
-| `Mod+Return` / `Mod+D` | 终端 / 启动器 |
-| `Mod+Q` | 关闭窗口 |
-| `Mod+H/L`、`Mod+J/K` | 切换列、列内切换焦点 |
-| `Mod+Shift+H/J/K/L` | 移动 |
-| `Mod+[` / `Mod+]` | 并入相邻列 / 独立成列 |
-| `Mod+R`、`Mod+F`、`Mod+C` | 循环宽度、最大化、居中 |
-| `Mod+Shift+F` | 全屏 |
-| `Mod+V` / `Mod+Shift+V` | 切换浮动 / 在浮动与平铺间切换焦点 |
-| `Mod+U/I`、`Mod+1..9` | 切换工作区 |
-| `Mod+Shift+R` / `Mod+Shift+E` | 重载配置 / 退出 |
-| `Mod+滚轮`、`Mod+左键拖动` | 切换列、平移视图（在浮动窗口上是移动它） |
-| `Mod+右键拖动` | 缩放窗口 |
+| `Mod+Shift+/` | Hotkey overlay |
+| `Mod+Return` / `Mod+D` | Terminal / Launcher |
+| `Mod+Q` | Close window |
+| `Mod+H/L`, `Mod+J/K` | Focus column, focus within column |
+| `Mod+Shift+H/J/K/L` | Move window |
+| `Mod+[` / `Mod+]` | Join into adjacent column / expel to new column |
+| `Mod+R`, `Mod+F`, `Mod+C` | Cycle width, maximize, center |
+| `Mod+Shift+F` | Fullscreen |
+| `Mod+V` / `Mod+Shift+V` | Toggle floating / switch focus between floating and tiled |
+| `Mod+U/I`, `Mod+1..9` | Switch workspace |
+| `Mod+Shift+R` / `Mod+Shift+E` | Reload config / quit |
+| `Mod+Scroll`, `Mod+Left Click Drag` | Switch column, pan view (moves window if floating) |
+| `Mod+Right Click Drag` | Resize window |
 
-## 配置
+## Configuration
 
-`~/.config/pastel/config.toml`。空文件就是完整可用的桌面，只写想改的项；所有选项见 [config.example.toml](config.example.toml)。
+`~/.config/pastel/config.toml`. An empty file provides a fully working desktop, so only specify options you want to change; see [config.example.toml](config.example.toml) for all available options.
 
 ```toml
 [layout]
@@ -63,29 +66,29 @@ slowdown = 1.5
 
 [binds]
 "Mod+B" = "spawn firefox"
-"Mod+D" = "none"             # 取消默认绑定
+"Mod+D" = "none"             # Remove default binding
 
-[[window-rule]]              # 模糊要透过半透明窗口才看得到
+[[window-rule]]              # Blur is visible through translucent windows
 app-id = "foot"
 opacity = 0.85
 ```
 
-`pastel --check` 校验配置，`pastel --list-actions` 列出所有动作。
+Run `pastel --check` to validate your configuration, or `pastel --list-actions` to list all available actions.
 
-## 扩展
+## Extending
 
-代码按 crate 分层，依赖只向下：
+Code is organized into layered crates, with dependencies pointing strictly downward:
 
-| crate | 职责 | 扩展点 |
+| Crate | Responsibility | Extension Points |
 |---|---|---|
-| `pastel-core` | 几何、动画 | `Curve` |
-| `pastel-layout` | 布局、桌面模型 | `Layout` |
-| `pastel-config` | 配置、动作、按键 | `Action` |
-| `pastel-render` | 动画状态、效果、overlay | `Effect`、`Overlay` |
-| `pastel` | 事件循环、客户端、输入 | — |
+| `pastel-core` | Geometry, animation | `Curve` |
+| `pastel-layout` | Layouts, desktop model | `Layout` |
+| `pastel-config` | Configuration, actions, keybindings | `Action` |
+| `pastel-render` | Animation state, effects, overlays | `Effect`, `Overlay` |
+| `pastel` | Event loop, clients, input | — |
 
-布局只回答“窗口应该在哪”，不接触时间，所以新布局自动获得全部动画。开发约定见 [AGENTS.md](AGENTS.md)，待办见 [TODO.md](TODO.md)。
+Layouts only answer "where should windows be" and know nothing about time, so any new layout automatically gets all animations for free. See [AGENTS.md](AGENTS.md) for development guidelines, and [TODO.md](TODO.md) for the roadmap.
 
-## 许可证
+## License
 
-BSD 2-Clause，见 [LICENSE](LICENSE)。
+BSD 2-Clause, see [LICENSE](LICENSE).

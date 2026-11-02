@@ -1,7 +1,8 @@
 //! The `pastel` command line.
 
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
 use luminaria::backend::BackendOptions;
@@ -48,6 +49,23 @@ fn parse_args() -> Result<Option<Args>, String> {
     Ok(Some(args))
 }
 
+/// fastfetch and the like name the WM after argv[0] of whoever owns the Wayland
+/// socket, and only prettify the compositors they know. The command stays lowercase;
+/// the name it shows is the proper one. Rust can't rewrite argv, so exec once with it.
+fn present_as_pastel() {
+    const NAME: &str = "Pastel";
+    let mut argv = std::env::args_os();
+    if argv.next().is_some_and(|arg0| arg0 == NAME) {
+        return;
+    }
+    // The real path, not /proc/self/exe: comm comes from it, and `pkill pastel` reads comm.
+    let e = match std::env::current_exe() {
+        Ok(exe) => Command::new(exe).arg0(NAME).args(argv).exec(),
+        Err(e) => e,
+    };
+    eprintln!("pastel: keeping the lowercase process name: {e}");
+}
+
 fn main() -> ExitCode {
     let args = match parse_args() {
         Ok(Some(args)) => args,
@@ -57,6 +75,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if !args.check {
+        present_as_pastel();
+    }
     let path = args.config.or_else(Config::default_path);
     let loaded = match &path {
         Some(path) => Config::load(path),
