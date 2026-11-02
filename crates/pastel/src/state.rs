@@ -29,6 +29,7 @@ use pastel_render::{Composer, HotkeyOverlay, Overlay, OverlayContext, color};
 
 use crate::grab::Held;
 use crate::input::Keyboard;
+use crate::ipc::{self, Ipc};
 use crate::lock::LockState;
 use crate::touch::TouchState;
 use crate::watch::{CONFIG_TAG, ConfigWatch};
@@ -69,6 +70,7 @@ pub struct State<'a> {
     pub services: Services<'a>,
     pub(crate) config: Config,
     pub(crate) config_watch: Option<ConfigWatch<'a>>,
+    pub(crate) ipc: Option<Ipc<'a>>,
     xwayland: Option<Xwayland<'a>>,
     pub(crate) lock: LockState,
     pub(crate) held: Option<Held>,
@@ -94,7 +96,7 @@ pub struct State<'a> {
     /// Surfaces that asked for an activation token while holding the keyboard.
     activators: Vec<SurfaceId>,
     /// The layer surface with the keyboard, over any window.
-    layer_focus: Option<SurfaceId>,
+    pub(crate) layer_focus: Option<SurfaceId>,
     focus: Option<SurfaceId>,
 
     epoch: Instant,
@@ -132,6 +134,7 @@ impl<'a> State<'a> {
             hotkeys,
             config,
             config_watch: None,
+            ipc: None,
             xwayland: None,
             lock: LockState::default(),
             held: None,
@@ -354,6 +357,7 @@ impl<'a> State<'a> {
                     }
                 }
             }
+            Event::FdReady(tag) if ipc::owns(tag) => self.ipc_ready(tag),
             Event::FdReady(CONFIG_TAG) => {
                 if self.config_watch.as_mut().is_some_and(|w| w.changed()) {
                     self.reload_config();
@@ -772,6 +776,7 @@ impl<'a> State<'a> {
         if !self.dirty && !(self.animating && (self.presented || timed_out)) {
             return;
         }
+        let changed = self.dirty;
         if self.dirty {
             self.configure_windows();
             self.sync_focus();
@@ -785,6 +790,9 @@ impl<'a> State<'a> {
             self.lock_scene();
             self.services.screens.set_scene(&self.scene);
             self.update_inhibitors();
+            if changed {
+                self.publish_ipc();
+            }
             return;
         }
         // Where things should be when this frame is seen, not when it's drawn.
@@ -816,6 +824,9 @@ impl<'a> State<'a> {
         self.animating = animating;
         self.services.screens.set_scene(&self.scene);
         self.update_inhibitors();
+        if changed {
+            self.publish_ipc();
+        }
     }
 }
 

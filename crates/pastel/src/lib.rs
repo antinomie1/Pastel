@@ -4,6 +4,7 @@
 pub mod app;
 pub mod grab;
 pub mod input;
+pub mod ipc;
 pub mod lock;
 pub mod outputs;
 pub mod state;

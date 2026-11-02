@@ -15,6 +15,7 @@ A scrolling-tiling Wayland compositor (niri-style) built on [luminaria](https://
 - **Input**: Touchscreens (rotates with display, `touch-output` binds to a specific display); touchpad 3-finger horizontal swipe to pan, vertical swipe to switch workspaces, passes other gestures through to applications
 - **Hotkey overlay**: Shown on startup, reopened with `Mod+Shift+/`, dismissed by any key
 - **Live config reload**: Takes effect immediately upon saving; keyboard layouts, background color, and monitors (`[[output]]`) require no restarts
+- **IPC**: `pastel msg focus-workspace 2`, `pastel msg --state`, `pastel msg --subscribe`; JSON lines over a Unix socket (`pastel-ipc` crate) for bars and shells such as [Palettes](https://github.com/antinomie1/Palettes)
 - **Zero idle overhead**: No timers and no frame renders when no animations are running
 
 ## Building
@@ -85,7 +86,8 @@ Code is organized into layered crates, with dependencies pointing strictly downw
 | `pastel-layout` | Layouts, desktop model | `Layout` |
 | `pastel-config` | Configuration, actions, keybindings | `Action` |
 | `pastel-render` | Animation state, effects, overlays | `Effect`, `Overlay` |
-| `pastel` | Event loop, clients, input | — |
+| `pastel-ipc` | IPC protocol, socket path, client | `Request` |
+| `pastel` | Event loop, clients, input, IPC | — |
 
 Layouts only answer "where should windows be" and know nothing about time, so any new layout automatically gets all animations for free. See [AGENTS.md](AGENTS.md) for development guidelines, and [TODO.md](TODO.md) for the roadmap.
 

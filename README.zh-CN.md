@@ -15,6 +15,7 @@
 - **输入**：触摸屏（随屏幕旋转，`touch-output` 指定所在显示器）；触控板三指左右平移、上下切工作区，其余手势交给应用
 - **快捷键菜单**：启动时显示，`Mod+Shift+/` 再次打开，任意键关闭
 - **配置热重载**：保存配置文件即生效；键盘布局、背景色、显示器（`[[output]]`）都不用重启
+- **IPC**：`pastel msg focus-workspace 2`、`pastel msg --state`、`pastel msg --subscribe`；Unix socket 上的 JSON 行协议（`pastel-ipc` crate），供状态栏与 [Palettes](https://github.com/antinomie1/Palettes) 等 shell 使用
 - **静止时零开销**：没有动画就没有定时器、没有帧
 
 ## 构建
@@ -85,7 +86,8 @@ opacity = 0.85
 | `pastel-layout` | 布局、桌面模型 | `Layout` |
 | `pastel-config` | 配置、动作、按键 | `Action` |
 | `pastel-render` | 动画状态、效果、overlay | `Effect`、`Overlay` |
-| `pastel` | 事件循环、客户端、输入 | — |
+| `pastel-ipc` | IPC 协议、socket 路径、客户端 | `Request` |
+| `pastel` | 事件循环、客户端、输入、IPC | — |
 
 布局只回答“窗口应该在哪”，不接触时间，所以新布局自动获得全部动画。开发约定见 [AGENTS.md](AGENTS.md)，待办见 [TODO.md](TODO.md)。
 

@@ -35,7 +35,9 @@ crates/
   pastel-config/   TOML schema and defaults; Action; key combos and the bind table.
   pastel-render/   Animated window state, Effect pipeline, Overlay trait and the
                    hotkey overlay; turns all of it into luminaria SceneItems.
-  pastel/          The binary: event loop, clients, input, layer shell, popups.
+  pastel-ipc/      IPC wire types (serde, JSON lines), socket path, blocking client.
+                   Pure: shells such as Palettes depend on it.
+  pastel/          The binary: event loop, clients, input, layer shell, popups, IPC.
 ```
 
 `pastel-core`, `pastel-layout` and `pastel-config` do not depend on luminaria, so
@@ -76,6 +78,16 @@ there.
 | a window effect | `pastel_render::Effect` | `pastel_render::Pipeline::from_config` |
 | a screen overlay | `pastel_render::Overlay` | `pastel::State` |
 | a keybinding action | variant of `pastel_config::Action` | `Action::from_str`, `Action::title` |
+| an IPC request or state field | `pastel_ipc::Request` / `pastel_ipc::State` | `State::answer` / `State::snapshot` in `crates/pastel/src/ipc.rs` |
+
+## IPC
+
+`$XDG_RUNTIME_DIR/pastel.$WAYLAND_DISPLAY.sock`, exported to children as
+`PASTEL_SOCKET`. One JSON line per message. `Subscribe` streams the whole
+`State` whenever it changes; it is published from `State::frame` only on frames
+that were dirty, and only to subscribers, so an idle desktop sends nothing.
+Changing the wire types changes the protocol for Palettes too: update both.
+`crates/pastel/tests/ipc.rs`.
 
 ## Luminaria notes
 

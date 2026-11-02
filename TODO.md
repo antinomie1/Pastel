@@ -11,6 +11,7 @@
 - [x] Hotkey overlay
 - [x] End-to-end test with a real client on the headless backend
 - [x] README and example config
+- [x] IPC socket (`pastel-ipc`, `pastel msg`) for shells and bars
 
 ## Later
 

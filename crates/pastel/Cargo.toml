@@ -10,6 +10,7 @@ pastel-core.workspace = true
 pastel-layout.workspace = true
 pastel-config.workspace = true
 pastel-render.workspace = true
+pastel-ipc.workspace = true
 luminaria.workspace = true
 libc = "0.2"
 

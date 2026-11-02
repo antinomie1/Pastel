@@ -19,6 +19,8 @@ use luminaria::protocol::{
 use luminaria::render::ScreencopyManager;
 use luminaria::shell::{InputRouter, OutputLayout, PopupTree, ScreenManager, ScreenOptions};
 use pastel_config::{Config, KeymapNames};
+
+use crate::ipc::Ipc;
 use pastel_render::color;
 
 use crate::state::{Services, State};
@@ -133,6 +135,7 @@ fn run_on<'d, R>(
         .flatten();
     let mut state = State::new(services, config, config_path, socket, nested)?;
     state.config_watch = watch;
+    state.ipc = Ipc::new(display, state.socket());
     state.start_xwayland(); // before autostart, whose programs want its DISPLAY
     if keymap_named {
         state.apply_keymap();
