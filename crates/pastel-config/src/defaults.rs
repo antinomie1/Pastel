@@ -43,6 +43,8 @@ const FIXED: &[(&str, &str)] = &[
     ("Mod+Ctrl+L", "focus-monitor-right"),
     ("Mod+Ctrl+Shift+H", "move-to-monitor-left"),
     ("Mod+Ctrl+Shift+L", "move-to-monitor-right"),
+    ("Mod+V", "toggle-floating"),
+    ("Mod+Shift+V", "focus-floating"),
     ("Mod+Shift+slash", "toggle-overlay"),
     ("Mod+Shift+R", "reload-config"),
     ("Mod+Shift+E", "quit"),

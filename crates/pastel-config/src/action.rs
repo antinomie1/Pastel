@@ -13,6 +13,9 @@ pub enum Action {
     Spawn(Vec<String>),
     CloseWindow,
     ToggleFullscreen,
+    ToggleFloating,
+    /// Between the floating windows and the layout.
+    FocusFloating,
     ToggleOverlay,
     ReloadConfig,
     Layout(LayoutOp),
@@ -62,6 +65,8 @@ const SIMPLE: &[(&str, Action)] = {
         ("quit", Quit),
         ("close-window", CloseWindow),
         ("toggle-fullscreen", ToggleFullscreen),
+        ("toggle-floating", ToggleFloating),
+        ("focus-floating", FocusFloating),
         ("toggle-overlay", ToggleOverlay),
         ("reload-config", ReloadConfig),
         ("focus-column-left", Layout(Op::Focus(Left))),
@@ -166,6 +171,8 @@ impl Action {
             }
             A::CloseWindow => (Windows, "Close window".into()),
             A::ToggleFullscreen => (Windows, "Fullscreen".into()),
+            A::ToggleFloating => (Windows, "Float window".into()),
+            A::FocusFloating => (Windows, "Focus floating or tiled".into()),
             A::Layout(Op::Focus(Left | Right)) => (Windows, "Focus column".into()),
             A::Layout(Op::Move(Left | Right)) => (Windows, "Move column".into()),
             A::Layout(Op::Focus(_)) => (Windows, "Focus in column".into()),

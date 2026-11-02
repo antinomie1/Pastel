@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use luminaria::backend::Output;
 use luminaria::protocol::{Layer, SurfaceId, XdgShell};
 use luminaria::shell::{LayerManager, PopupTree, SceneItem};
 use pastel_config::ResolvedRule;
@@ -20,7 +21,9 @@ pub struct Window {
     pub rule: ResolvedRule,
     pub mapped: bool,
     /// What was last asked of the client, to send only changes.
-    pub configured: Option<(i32, i32, bool)>,
+    pub configured: Option<(i32, i32, bool, bool)>,
+    /// What it was last told about its monitor's scale; 0 until then.
+    pub scale: i32,
 }
 
 #[derive(Default)]
@@ -36,6 +39,7 @@ impl Windows {
                 rule,
                 mapped: false,
                 configured: None,
+                scale: 0,
             },
         );
     }
@@ -67,6 +71,7 @@ pub struct SceneHost<'a, 's> {
     pub shell: &'a XdgShell<'s>,
     pub layers: &'a LayerManager,
     pub popups: &'a PopupTree,
+    pub outputs: &'a [Output],
 }
 
 impl Host for SceneHost<'_, '_> {
@@ -78,6 +83,30 @@ impl Host for SceneHost<'_, '_> {
         self.shell
             .toplevel(surface_of(id))
             .map(|t| SceneItem::toplevel(&t, x, y))
+    }
+
+    fn crop(&self, id: WindowId) -> (f32, f32, f32, f32) {
+        let Some(toplevel) = self.shell.toplevel(surface_of(id)) else {
+            return (0.0, 0.0, 1.0, 1.0);
+        };
+        let window = toplevel.geometry();
+        let surface = toplevel.surface();
+        let (width, height) = (surface.surface_width(), surface.surface_height());
+        if window.width <= 0 || window.height <= 0 || width <= 0 || height <= 0 {
+            return (0.0, 0.0, 1.0, 1.0);
+        }
+        let (w, h) = (width as f32, height as f32);
+        (
+            window.x as f32 / w,
+            window.y as f32 / h,
+            window.width as f32 / w,
+            window.height as f32 / h,
+        )
+    }
+
+    fn output_key(&self, monitor: u64) -> u64 {
+        let output = self.outputs.iter().find(|o| o.id().0 == monitor);
+        output.map_or(0, Output::key)
     }
 
     fn rule(&self, id: WindowId) -> ResolvedRule {

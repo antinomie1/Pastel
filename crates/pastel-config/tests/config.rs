@@ -349,3 +349,49 @@ fn colours_interpolate() {
     let (a, b) = (Rgba::new(0.0, 0.0, 0.0, 1.0), Rgba::new(1.0, 0.5, 0.0, 0.0));
     assert_eq!(a.lerp(b, 0.5), Rgba::new(0.5, 0.25, 0.0, 0.5));
 }
+
+#[test]
+fn output_sections_are_read() {
+    let config = Config::parse(
+        "[[output]]\nname = \"DP-1\"\nmode = \"2560x1440@143.91\"\nscale = 2\n\
+         position = [100, -20]\ntransform = \"flipped-90\"\n\
+         [[output]]\nname = \"HDMI-A-1\"\nenabled = false\nmode = \"1920x1080\"",
+    )
+    .expect("parses");
+    let [first, second] = config.outputs.as_slice() else {
+        panic!("two outputs");
+    };
+    assert_eq!(first.mode, Some((2560, 1440, 143910)));
+    assert_eq!(first.scale, Some(2));
+    assert_eq!(first.position, Some((100, -20)));
+    assert_eq!(first.transform, Some(5));
+    assert!(first.enabled);
+    assert_eq!(second.mode, Some((1920, 1080, 0)));
+    assert!(!second.enabled);
+}
+
+#[test]
+fn a_bad_output_section_is_an_error() {
+    for text in [
+        "[[output]]\nname = \"a\"\nmode = \"big\"",
+        "[[output]]\nname = \"a\"\nscale = 0",
+        "[[output]]\nname = \"a\"\ntransform = \"sideways\"",
+        "[[output]]\nscale = 2",
+    ] {
+        assert!(Config::parse(text).is_err(), "{text}");
+    }
+}
+
+#[test]
+fn keyboard_and_xwayland_have_defaults_and_can_be_set() {
+    let empty = Config::parse("").expect("parses");
+    assert_eq!(empty.input.keymap.layout, "");
+    assert!(empty.xwayland.enabled);
+    let config = Config::parse(
+        "[input]\nlayout = \"us,ru\"\noptions = \"ctrl:nocaps\"\n[xwayland]\nenabled = false",
+    )
+    .expect("parses");
+    assert_eq!(config.input.keymap.layout, "us,ru");
+    assert_eq!(config.input.keymap.options, "ctrl:nocaps");
+    assert!(!config.xwayland.enabled);
+}

@@ -8,13 +8,14 @@ use std::process::Command;
 use luminaria::backend::{InputEvent, Modifiers};
 use luminaria::util::{KeymapState, Keysym};
 use pastel_config::{Action, Config};
-use pastel_layout::{Direction, LayoutOp};
+use pastel_layout::{Direction, Edges, LayoutOp, WindowId};
 use pastel_render::Overlay;
 
 use crate::state::{State, mod_key};
 use crate::windows::surface_of;
 
 const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
 /// Pixels of view per pixel of touchpad scroll with Mod held.
 const SCROLL_SPEED: f64 = 2.0;
 
@@ -48,6 +49,10 @@ pub struct Keyboard {
     mods: u32,
     /// Mod+drag is panning, from this pointer position.
     pan: Option<f64>,
+    /// Mouse buttons down right now.
+    buttons: u32,
+    /// The press that started a drag was ours, so its release is too.
+    drag_button: Option<u32>,
 }
 
 impl Keyboard {
@@ -67,13 +72,26 @@ impl Keyboard {
             base: None,
             mods: 0,
             pan: None,
+            buttons: 0,
+            drag_button: None,
         }
+    }
+
+    pub fn buttons_held(&self) -> u32 {
+        self.buttons
+    }
+
+    /// The keymap changed: the unshifted symbols come from the new one.
+    pub fn forget_base(&mut self) {
+        self.base = None;
     }
 
     pub fn forget_held(&mut self) {
         self.swallowed.clear();
         self.mods = 0;
         self.pan = None;
+        self.buttons = 0;
+        self.drag_button = None;
     }
 
     fn lookup(&self, held: u32, keysym: Keysym, key: u32) -> Option<&Action> {
@@ -87,7 +105,23 @@ impl Keyboard {
 
 impl State<'_> {
     pub fn input(&mut self, event: InputEvent) {
+        self.services.idle.notify_activity();
+        if let InputEvent::Button { pressed, .. } = event {
+            let held = &mut self.keyboard.buttons;
+            *held = if pressed {
+                *held + 1
+            } else {
+                held.saturating_sub(1)
+            };
+        }
+        if self.touch(&event) {
+            return;
+        }
         match event {
+            InputEvent::Gesture(gesture) => {
+                self.gesture(gesture);
+                return;
+            }
             InputEvent::Key {
                 key,
                 pressed,
@@ -107,10 +141,13 @@ impl State<'_> {
                     self.keyboard.pan = Some(x);
                 }
             }
-            InputEvent::Button { button, pressed } if self.pointer_binding(button, pressed) => {
+            InputEvent::Button { button, pressed }
+                if !self.is_locked() && self.pointer_binding(button, pressed) =>
+            {
+                self.end_grab_with_last_button();
                 return;
             }
-            InputEvent::Axis(axis) if self.mod_held() => {
+            InputEvent::Axis(axis) if self.mod_held() && !self.is_locked() => {
                 self.mod_scroll(axis.dy_steps + axis.dx_steps, axis.dx + axis.dy);
                 return;
             }
@@ -118,6 +155,13 @@ impl State<'_> {
         }
         self.services.router.route(&event);
         self.pointer_moved();
+        self.end_grab_with_last_button();
+    }
+
+    fn end_grab_with_last_button(&mut self) {
+        if self.keyboard.buttons == 0 && self.held.is_some() {
+            self.grab_ended();
+        }
     }
 
     fn mod_key(&self) -> u32 {
@@ -147,6 +191,11 @@ impl State<'_> {
         {
             self.services.globals.seat().release_keys();
             self.keyboard.forget_held();
+            return;
+        }
+        // What's typed here is a password. Nothing but the lock reads it.
+        if self.is_locked() {
+            self.services.router.route(event);
             return;
         }
         if self.hotkeys.is_modal() && !is_modifier(keysym) {
@@ -193,6 +242,12 @@ impl State<'_> {
             Action::ToggleFullscreen => {
                 self.desktop.toggle_fullscreen();
             }
+            Action::ToggleFloating => {
+                self.desktop.toggle_floating();
+            }
+            Action::FocusFloating => {
+                self.desktop.switch_floating_focus();
+            }
             Action::ToggleOverlay => self.hotkeys.toggle(now),
             Action::ReloadConfig => self.reload_config(),
             Action::Layout(op) => {
@@ -214,17 +269,41 @@ impl State<'_> {
         self.dirty = true;
     }
 
-    /// Mod+left-drag pans the view. True when the button is ours.
+    /// With Mod: left drags a floating window or pans the view, right resizes a
+    /// window by the corner nearest the pointer. True when the button is ours.
     fn pointer_binding(&mut self, button: u32, pressed: bool) -> bool {
-        if button != BTN_LEFT {
+        if !pressed {
+            let pan = button == BTN_LEFT && self.keyboard.pan.take().is_some();
+            return pan
+                || self
+                    .keyboard
+                    .drag_button
+                    .take_if(|b| *b == button)
+                    .is_some();
+        }
+        if !self.mod_held() || (button != BTN_LEFT && button != BTN_RIGHT) {
             return false;
         }
-        if pressed && self.mod_held() {
-            let x = self.services.cursor.position().map_or(0.0, |p| p.0);
-            self.keyboard.pan = Some(x);
-            return true;
+        let Some((x, y)) = self.services.cursor.position() else {
+            return false;
+        };
+        let hit = self.hit_at(x, y);
+        let window = Some(WindowId(hit.tag)).filter(|id| self.windows.contains(*id));
+        match (button, window) {
+            (BTN_LEFT, Some(id)) if self.desktop.floating(id).is_some() => {
+                self.keyboard.drag_button = Some(button);
+                self.begin_move(id);
+            }
+            (BTN_LEFT, _) => self.keyboard.pan = Some(x),
+            (_, Some(id)) => {
+                self.keyboard.drag_button = Some(button);
+                if let Some(rect) = self.desktop.rect_of(id) {
+                    self.begin_resize_at(id, Edges::nearest(rect, x, y));
+                }
+            }
+            _ => return false,
         }
-        !pressed && self.keyboard.pan.take().is_some()
+        true
     }
 
     fn pan_by(&mut self, dx: f64) {
@@ -247,14 +326,17 @@ impl State<'_> {
 
     /// Keep the focused monitor under the pointer, and focus following it.
     fn pointer_moved(&mut self) {
+        self.grab_moved();
         let Some((x, y)) = self.services.cursor.position() else {
             return;
         };
         self.desktop.focus_monitor_at(x, y);
-        if !self.config.input.focus_follows_mouse || self.keyboard.pan.is_some() {
+        let no_follow =
+            !self.config.input.focus_follows_mouse || self.is_locked() || self.held.is_some();
+        if no_follow || self.keyboard.pan.is_some() {
             return;
         }
-        let hit = luminaria::shell::scene_hit_test(&self.scene, x, y);
+        let hit = self.hit_at(x, y);
         let id = pastel_layout::WindowId(hit.tag);
         if hit.hit && self.windows.contains(id) && self.desktop.focused_window() != Some(id) {
             self.desktop.focus_window(id);

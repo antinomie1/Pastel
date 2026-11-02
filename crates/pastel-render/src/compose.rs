@@ -4,8 +4,8 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use luminaria::protocol::Layer;
-use luminaria::shell::{SceneItem, SceneKind};
+use luminaria::protocol::{Layer, SurfaceId};
+use luminaria::shell::SceneItem;
 use luminaria::util::{Color, Rect as PixelRect};
 use pastel_config::{Config, ResolvedRule, Rgba};
 use pastel_core::{Anim, AnimRect, Curve, Rect};
@@ -30,6 +30,12 @@ pub trait Host {
 
     fn rule(&self, id: WindowId) -> ResolvedRule;
 
+    /// The window's geometry within its surface, from 0 to 1.
+    fn crop(&self, id: WindowId) -> (f32, f32, f32, f32);
+
+    /// What `SceneItem::only_on` calls this monitor.
+    fn output_key(&self, monitor: u64) -> u64;
+
     /// Push one monitor's layer surfaces of one layer.
     fn layers(&self, monitor: u64, layer: Layer, items: &mut Vec<SceneItem>);
 
@@ -43,14 +49,18 @@ struct Visual {
     focus: Anim,
     /// Drawn last frame, so it's somewhere a close animation makes sense.
     shown: bool,
+    /// The window's part of its surface, for when the surface has gone.
+    crop: (f32, f32, f32, f32),
 }
 
-/// A frosted pane standing in for a closed window: its pixels are gone with it.
+/// A closed window on its way out: its last pixels, if luminaria kept them, and a
+/// frosted pane if it couldn't.
 struct Ghost {
     id: WindowId,
     rect: Rect,
     fade: Anim,
     rule: ResolvedRule,
+    crop: Option<(f32, f32, f32, f32)>,
 }
 
 struct Curves {
@@ -111,8 +121,9 @@ impl Composer {
         }
     }
 
-    /// A window is gone. If it was on screen, it leaves a ghost to fade out.
-    pub fn close(&mut self, id: WindowId, rule: ResolvedRule, now: f64) {
+    /// A window is gone. If it was on screen, it leaves a ghost to fade out, showing
+    /// what it last drew if there are `pixels` left to.
+    pub fn close(&mut self, id: WindowId, rule: ResolvedRule, pixels: bool, now: f64) {
         let Some(visual) = self.visuals.remove(&id) else {
             return;
         };
@@ -126,6 +137,7 @@ impl Composer {
             rect: visual.rect.value(now),
             fade,
             rule,
+            crop: pixels.then_some(visual.crop),
         });
     }
 
@@ -161,7 +173,7 @@ impl Composer {
         let focused = desktop.focused_window();
         let monitors = desktop.monitors();
         for monitor in monitors {
-            let clip = clip_of(monitors, monitor);
+            let only_on = host.output_key(monitor.id);
             let view = self.views[&monitor.id].value(now);
             host.layers(monitor.id, Layer::Background, items);
             host.layers(monitor.id, Layer::Bottom, items);
@@ -171,13 +183,13 @@ impl Composer {
                     (monitor, workspace),
                     offset,
                     focused,
-                    clip,
+                    only_on,
                     host,
                     now,
                     items,
                 );
             }
-            animating |= self.draw_ghosts(monitor, clip, now, items);
+            animating |= self.draw_ghosts(monitor, only_on, now, items);
             // A fullscreen window at rest covers the bar; while sliding it can't.
             let covered = monitor.active_workspace().fullscreen.is_some() && view.fract() == 0.0;
             if !covered {
@@ -196,7 +208,7 @@ impl Composer {
         (monitor, workspace): (&Monitor, &Workspace),
         offset: f64,
         focused: Option<WindowId>,
-        clip: Rect,
+        only_on: u64,
         host: &dyn Host,
         now: f64,
         items: &mut Vec<SceneItem>,
@@ -204,8 +216,13 @@ impl Composer {
         let mut placements = std::mem::take(&mut self.placements);
         placements.clear();
         Desktop::place(monitor, workspace, &mut placements);
-        // Keep the focused window, and any fullscreen one, above its neighbours.
-        placements.sort_by_key(|p| (p.fullscreen, Some(p.id) == focused));
+        // Keep the focused window above its neighbours, floating ones above the
+        // layout, and any fullscreen one above it all. The sort is stable, so
+        // floating windows stay in their own stacking order.
+        placements.sort_by_key(|p| {
+            let on_top = Some(p.id) == focused && !p.floating;
+            (p.fullscreen, p.floating, on_top)
+        });
         let dy = offset * monitor.rect.h;
         let visible = offset.abs() < 1.0;
         let mut animating = false;
@@ -215,10 +232,15 @@ impl Composer {
             }
             let is_focused = Some(placement.id) == focused;
             let visual = self.visual(placement, is_focused, now);
-            visual.rect.set(placement.rect, now);
+            if placement.interactive {
+                visual.rect.snap(placement.rect);
+            } else {
+                visual.rect.set(placement.rect, now);
+            }
             visual.focus.set(f64::from(u8::from(is_focused)), now);
             animating |= visual.rect.tick(now) | visual.open.tick(now) | visual.focus.tick(now);
             visual.shown = visible;
+            visual.crop = host.crop(placement.id);
             if !visible {
                 continue;
             }
@@ -235,7 +257,7 @@ impl Composer {
                 rule: host.rule(placement.id),
                 fullscreen: placement.fullscreen,
             };
-            self.draw_window(&frame, monitor, clip, host, items);
+            self.draw_window(&frame, monitor, only_on, host, items);
         }
         self.placements = placements;
         animating
@@ -252,6 +274,7 @@ impl Composer {
                 open,
                 focus: Anim::new(focus, curves.focus.clone()),
                 shown: false,
+                crop: (0.0, 0.0, 1.0, 1.0),
             }
         })
     }
@@ -260,7 +283,7 @@ impl Composer {
         &self,
         frame: &WindowFrame,
         monitor: &Monitor,
-        clip: Rect,
+        only_on: u64,
         host: &dyn Host,
         items: &mut Vec<SceneItem>,
     ) {
@@ -271,25 +294,28 @@ impl Composer {
         let Some(mut item) = host.window(frame.id, bounds.x, bounds.y) else {
             return;
         };
-        let visible = to_pixels(clip_to(frame.rect, clip));
         // Clip to the animated box: mid-resize the client's buffer is still the
-        // old size, and must not stick out past its border.
-        let Some(shown) = item.rect.intersection(&visible) else {
+        // old size, and must not stick out past its border. What reaches past a
+        // monitor stays uncut, with `only_on` keeping it off the one next door:
+        // a cut box would get rounded corners where it was cut.
+        let Some(shown) = item.rect.intersection(&bounds) else {
             return;
         };
         item.rect = shown;
         item.alpha = frame.alpha;
         let start = items.len();
         self.pipeline.below(frame, items);
-        clip_items(&mut items[start..], clip);
         self.pipeline.style(frame, &mut item);
         items.push(item);
+        for item in &mut items[start..] {
+            item.only_on = only_on;
+        }
     }
 
     fn draw_ghosts(
         &self,
         monitor: &Monitor,
-        clip: Rect,
+        only_on: u64,
         now: f64,
         items: &mut Vec<SceneItem>,
     ) -> bool {
@@ -311,12 +337,17 @@ impl Composer {
             };
             let start = items.len();
             self.pipeline.below(&frame, items);
-            let mut body = SceneItem::rect(to_pixels(rect), self.ghost_tint)
-                .with_alpha(frame.alpha)
-                .with_accepts_input(false);
+            let mut body = match ghost.crop {
+                Some(crop) => SceneItem::retained(SurfaceId(ghost.id.0), to_pixels(rect), crop),
+                None => SceneItem::rect(to_pixels(rect), self.ghost_tint),
+            }
+            .with_alpha(frame.alpha)
+            .with_accepts_input(false);
             self.pipeline.style(&frame, &mut body);
             items.push(body);
-            clip_items(&mut items[start..], clip);
+            for item in &mut items[start..] {
+                item.only_on = only_on;
+            }
         }
         animating
     }
@@ -329,43 +360,4 @@ fn from_pixels(rect: PixelRect) -> Rect {
         f64::from(rect.width),
         f64::from(rect.height),
     )
-}
-
-/// A monitor's scene is one list shared with every output, so what spills over an
-/// edge shared with another monitor must be cut there. Edges facing nothing stay
-/// open: cutting them would round a window's corners at the edge of the screen.
-fn clip_of(monitors: &[Monitor], monitor: &Monitor) -> Rect {
-    const FAR: f64 = 1e7;
-    let r = monitor.rect;
-    let beside = |o: &Rect| o.y < r.bottom() && o.bottom() > r.y;
-    let stacked = |o: &Rect| o.x < r.right() && o.right() > r.x;
-    let others = || {
-        monitors
-            .iter()
-            .filter(|m| m.id != monitor.id)
-            .map(|m| &m.rect)
-    };
-    let left = others().any(|o| beside(o) && o.right() <= r.x);
-    let right = others().any(|o| beside(o) && o.x >= r.right());
-    let up = others().any(|o| stacked(o) && o.bottom() <= r.y);
-    let down = others().any(|o| stacked(o) && o.y >= r.bottom());
-    let x0 = if left { r.x } else { -FAR };
-    let y0 = if up { r.y } else { -FAR };
-    let x1 = if right { r.right() } else { FAR };
-    let y1 = if down { r.bottom() } else { FAR };
-    Rect::new(x0, y0, x1 - x0, y1 - y0)
-}
-
-fn clip_to(rect: Rect, clip: Rect) -> Rect {
-    rect.intersection(&clip).unwrap_or_default()
-}
-
-fn clip_items(items: &mut [SceneItem], clip: Rect) {
-    let clip = to_pixels(clip);
-    for item in items {
-        let cut = item.rect.intersection(&clip).unwrap_or_default();
-        // An image's pixels are 1:1 with its box: cut, it couldn't be drawn at all.
-        let whole = item.kind != SceneKind::Image || cut == item.rect;
-        item.rect = if whole { cut } else { PixelRect::default() };
-    }
 }

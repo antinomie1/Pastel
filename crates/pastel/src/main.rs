@@ -88,7 +88,6 @@ fn main() -> ExitCode {
         }
     };
     let ran = app::run(options, config, path, |state, display| {
-        state.autostart();
         app::main_loop(state, display, deadline)
     });
     match ran {

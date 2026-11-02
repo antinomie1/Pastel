@@ -108,6 +108,83 @@ impl CurveSpec {
     }
 }
 
+/// One monitor, by the name `wlr-randr` shows. Unset fields stay as they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputConfig {
+    pub name: String,
+    pub enabled: bool,
+    /// Width, height and millihertz; 0 for the highest refresh at that size.
+    pub mode: Option<(i32, i32, i32)>,
+    pub scale: Option<i32>,
+    pub position: Option<(i32, i32)>,
+    /// A `wl_output.transform` value.
+    pub transform: Option<u32>,
+}
+
+fn parse_mode(text: &str) -> Result<(i32, i32, i32), String> {
+    let bad = || format!("mode `{text}` isn't WIDTHxHEIGHT or WIDTHxHEIGHT@HZ");
+    let (size, hz) = text
+        .split_once('@')
+        .map_or((text, None), |(s, r)| (s, Some(r)));
+    let (w, h) = size.split_once('x').ok_or_else(bad)?;
+    let refresh: f64 = hz.map_or(Ok(0.0), str::parse).map_err(|_| bad())?;
+    Ok((
+        w.parse().map_err(|_| bad())?,
+        h.parse().map_err(|_| bad())?,
+        (refresh * 1000.0).round() as i32,
+    ))
+}
+
+fn parse_transform(text: &str) -> Result<u32, String> {
+    const NAMES: [&str; 8] = [
+        "normal",
+        "90",
+        "180",
+        "270",
+        "flipped",
+        "flipped-90",
+        "flipped-180",
+        "flipped-270",
+    ];
+    NAMES
+        .iter()
+        .position(|name| *name == text)
+        .map(|index| index as u32)
+        .ok_or_else(|| format!("unknown transform `{text}`"))
+}
+
+impl RawOutput {
+    fn resolve(self) -> Result<OutputConfig, String> {
+        if self.scale.is_some_and(|scale| scale < 1) {
+            return Err(format!("output {}: scale must be 1 or more", self.name));
+        }
+        Ok(OutputConfig {
+            mode: self.mode.as_deref().map(parse_mode).transpose()?,
+            transform: self.transform.as_deref().map(parse_transform).transpose()?,
+            position: self.position.map(|[x, y]| (x, y)),
+            scale: self.scale,
+            enabled: self.enabled,
+            name: self.name,
+        })
+    }
+}
+
+/// X11 through xwayland-satellite, started by the first X client that connects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XwaylandConfig {
+    pub enabled: bool,
+    pub path: String,
+}
+
+/// An xkb keymap by name. Empty fields follow `XKB_DEFAULT_*`, so an empty config
+/// keeps the keyboard the session already has.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeymapNames {
+    pub layout: String,
+    pub variant: String,
+    pub options: String,
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) struct RawConfig {
@@ -116,10 +193,44 @@ pub(crate) struct RawConfig {
     window: RawWindow,
     animation: RawAnimation,
     overlay: RawOverlay,
+    xwayland: RawXwayland,
+    output: Vec<RawOutput>,
     background: Option<String>,
     autostart: Vec<String>,
     binds: BTreeMap<String, String>,
     window_rule: Vec<RawRule>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawOutput {
+    name: String,
+    #[serde(default = "enabled_by_default")]
+    enabled: bool,
+    mode: Option<String>,
+    scale: Option<i32>,
+    position: Option<[i32; 2]>,
+    transform: Option<String>,
+}
+
+fn enabled_by_default() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+struct RawXwayland {
+    enabled: bool,
+    path: String,
+}
+
+impl Default for RawXwayland {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: "xwayland-satellite".into(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -128,6 +239,9 @@ struct RawInput {
     r#mod: String,
     nested_mod: String,
     focus_follows_mouse: bool,
+    layout: String,
+    variant: String,
+    options: String,
 }
 
 impl Default for RawInput {
@@ -136,6 +250,9 @@ impl Default for RawInput {
             r#mod: "super".into(),
             nested_mod: "alt".into(),
             focus_follows_mouse: false,
+            layout: String::new(),
+            variant: String::new(),
+            options: String::new(),
         }
     }
 }
@@ -252,14 +369,16 @@ struct RawRule {
     default_width: Option<f64>,
     opacity: Option<f32>,
     blur: Option<bool>,
+    floating: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InputConfig {
     /// What `Mod` means on bare metal and when nested, as xkb modifier bits.
     pub mod_key: u32,
     pub nested_mod_key: u32,
     pub focus_follows_mouse: bool,
+    pub keymap: KeymapNames,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -303,6 +422,8 @@ pub struct WindowRule {
     pub default_width: Option<f64>,
     pub opacity: Option<f32>,
     pub blur: Option<bool>,
+    /// Out of the layout. Dialogs are, unless this says otherwise.
+    pub floating: Option<bool>,
 }
 
 impl WindowRule {
@@ -320,6 +441,8 @@ pub struct ResolvedRule {
     pub default_width: Option<f64>,
     pub opacity: Option<f32>,
     pub blur: Option<bool>,
+    /// Out of the layout. Dialogs are, unless this says otherwise.
+    pub floating: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -329,6 +452,8 @@ pub struct Config {
     pub window: WindowConfig,
     pub animation: AnimationConfig,
     pub overlay: OverlayConfig,
+    pub xwayland: XwaylandConfig,
+    pub outputs: Vec<OutputConfig>,
     pub background: Rgba,
     /// Shell commands run once, at startup.
     pub autostart: Vec<String>,
@@ -343,6 +468,7 @@ impl Config {
             resolved.default_width = rule.default_width.or(resolved.default_width);
             resolved.opacity = rule.opacity.or(resolved.opacity);
             resolved.blur = rule.blur.or(resolved.blur);
+            resolved.floating = rule.floating.or(resolved.floating);
         }
         resolved
     }
@@ -408,12 +534,18 @@ impl RawConfig {
             default_width: r.default_width,
             opacity: r.opacity,
             blur: r.blur,
+            floating: r.floating,
         });
         Ok(Config {
             input: InputConfig {
                 mod_key: keys::parse_modifier(&self.input.r#mod)?,
                 nested_mod_key: keys::parse_modifier(&self.input.nested_mod)?,
                 focus_follows_mouse: self.input.focus_follows_mouse,
+                keymap: KeymapNames {
+                    layout: self.input.layout,
+                    variant: self.input.variant,
+                    options: self.input.options,
+                },
             },
             layout: LayoutOptions {
                 kind: self.layout.r#type,
@@ -444,6 +576,15 @@ impl RawConfig {
             overlay: OverlayConfig {
                 at_startup: self.overlay.at_startup,
                 font: self.overlay.font,
+            },
+            outputs: self
+                .output
+                .into_iter()
+                .map(RawOutput::resolve)
+                .collect::<Result<_, _>>()?,
+            xwayland: XwaylandConfig {
+                enabled: self.xwayland.enabled,
+                path: self.xwayland.path,
             },
             background: Rgba::parse(self.background.as_deref().unwrap_or("#1e2028"))?,
             autostart: self.autostart,

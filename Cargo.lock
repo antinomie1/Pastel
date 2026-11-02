@@ -203,7 +203,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 [[package]]
 name = "luminaria"
 version = "0.0.1"
-source = "git+https://github.com/antinomie1/luminaria?rev=859763b41fb3a783a9d330612252a77cb3c63985#859763b41fb3a783a9d330612252a77cb3c63985"
+source = "git+https://github.com/antinomie1/luminaria?rev=4c80a32edbf9fe98bffd7f2453766c3a66b6a77d#4c80a32edbf9fe98bffd7f2453766c3a66b6a77d"
 dependencies = [
  "cxx",
  "cxx-build",
@@ -221,6 +221,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 name = "pastel"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "luminaria",
  "pastel-config",
  "pastel-core",
@@ -228,6 +229,7 @@ dependencies = [
  "pastel-render",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-wlr",
 ]
 
 [[package]]
@@ -475,6 +477,19 @@ dependencies = [
  "bitflags",
  "wayland-backend",
  "wayland-client",
+ "wayland-scanner",
+]
+
+[[package]]
+name = "wayland-protocols-wlr"
+version = "0.3.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb04e52f7836d7c7976c78ca0250d61e33873c34156a2a1fc9474828ec268234"
+dependencies = [
+ "bitflags",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "wayland-scanner",
 ]
 

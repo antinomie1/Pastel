@@ -47,6 +47,8 @@ pub struct HotkeyOverlay {
     pipeline: Pipeline,
     rows: Vec<OverlayRow>,
     raster: Option<Raster>,
+    /// What it was rasterized for: another monitor can want it sharper.
+    raster_scale: i32,
     /// Text can't be drawn at all; say so once rather than every frame.
     failed: bool,
     fade: Anim,
@@ -64,6 +66,7 @@ impl HotkeyOverlay {
             pipeline: Pipeline::from_config(&config.window),
             rows: config.binds.overlay_rows(mod_key),
             raster: None,
+            raster_scale: 1,
             failed: false,
             fade: Anim::new(0.0, curve),
             open: false,
@@ -91,10 +94,16 @@ impl HotkeyOverlay {
         self.set_open(!self.open, now);
     }
 
-    fn rasterize(&self) -> Option<(Raster, Vec<u8>)> {
+    /// In image pixels: everything is `scale` times its logical size, and the
+    /// whole divides back to a whole number of logical pixels.
+    fn rasterize(&self, scale: i32) -> Option<(Raster, Vec<u8>)> {
+        let times = scale as f32;
         let open = |size: f32| Font::open(&format!("{}:size={size}", self.style.font));
-        let (mut body, mut heading) = (open(FONT_SIZE)?, open(TITLE_SIZE)?);
-        let line = body.height() + LINE_GAP;
+        let (mut body, mut heading) = (open(FONT_SIZE * times)?, open(TITLE_SIZE * times)?);
+        let padding = PADDING * scale;
+        let (key_gap, column_gap) = (KEY_GAP * scale, COLUMN_GAP * scale);
+        let section_gap = SECTION_GAP * scale;
+        let line = body.height() + LINE_GAP * scale;
         let columns = columns(&self.rows);
 
         // Measure first: the canvas has to fit what's written on it.
@@ -109,17 +118,17 @@ impl HotkeyOverlay {
         let inner: i32 = key_widths
             .iter()
             .zip(&text_widths)
-            .map(|(k, t)| k + KEY_GAP + t)
+            .map(|(k, t)| k + key_gap + t)
             .sum();
-        let gaps = COLUMN_GAP * (columns.len() as i32 - 1).max(0);
-        let width = inner + gaps + 2 * PADDING;
-        let header = heading.height() + SECTION_GAP;
+        let gaps = column_gap * (columns.len() as i32 - 1).max(0);
+        let width = whole(inner + gaps + 2 * padding, scale);
+        let header = heading.height() + section_gap;
         let tallest = columns
             .iter()
-            .map(|c| column_height(c, line))
+            .map(|c| column_height(c, line, section_gap))
             .max()
             .unwrap_or(0);
-        let height = header + tallest + 2 * PADDING;
+        let height = whole(header + tallest + 2 * padding, scale);
 
         let mut canvas: Vec<u8> = PANEL
             .iter()
@@ -129,27 +138,27 @@ impl HotkeyOverlay {
             .collect();
         let (w, h) = (width, height);
         let mut title_pen = |font: &mut Font, x, y, text: &str, ink| {
-            let _ = font.draw(&mut canvas, w, h, x, y, text, ink, w - PADDING);
+            let _ = font.draw(&mut canvas, w, h, x, y, text, ink, w - padding);
         };
-        let baseline = PADDING + heading.ascent();
-        title_pen(&mut heading, PADDING, baseline, "Hotkeys", TEXT);
+        let baseline = padding + heading.ascent();
+        title_pen(&mut heading, padding, baseline, "Hotkeys", TEXT);
 
         let accent = color(self.style.accent);
-        let mut left = PADDING;
+        let mut left = padding;
         for (i, column) in columns.iter().enumerate() {
-            let mut y = PADDING + header + body.ascent();
+            let mut y = padding + header + body.ascent();
             for (section, rows) in column {
                 title_pen(&mut body, left, y, section.title(), DIM);
                 y += line;
                 for row in *rows {
                     title_pen(&mut body, left, y, &row.keys, accent);
-                    let x = left + key_widths[i] + KEY_GAP;
+                    let x = left + key_widths[i] + key_gap;
                     title_pen(&mut body, x, y, &row.title, TEXT);
                     y += line;
                 }
-                y += SECTION_GAP;
+                y += section_gap;
             }
-            left += key_widths[i] + KEY_GAP + text_widths[i] + COLUMN_GAP;
+            left += key_widths[i] + key_gap + text_widths[i] + column_gap;
         }
         Some((Raster { width, height }, canvas))
     }
@@ -188,9 +197,14 @@ fn columns(rows: &[OverlayRow]) -> Vec<Vec<Group<'_>>> {
     out
 }
 
-fn column_height(column: &[Group<'_>], line: i32) -> i32 {
+fn column_height(column: &[Group<'_>], line: i32, section_gap: i32) -> i32 {
     let rows: usize = column.iter().map(|(_, rows)| rows.len() + 1).sum();
-    rows as i32 * line + SECTION_GAP * (column.len() as i32 - 1).max(0)
+    rows as i32 * line + section_gap * (column.len() as i32 - 1).max(0)
+}
+
+/// `value` rounded up to a multiple of `scale`.
+fn whole(value: i32, scale: i32) -> i32 {
+    (value + scale - 1) / scale * scale
 }
 
 impl Overlay for HotkeyOverlay {
@@ -209,8 +223,13 @@ impl Overlay for HotkeyOverlay {
         if alpha <= 0.0 && !self.open {
             return animating;
         }
+        let scale = context.scale.max(1);
+        if scale != self.raster_scale {
+            self.raster = None;
+            self.raster_scale = scale;
+        }
         if self.raster.is_none() && !self.failed {
-            match self.rasterize() {
+            match self.rasterize(scale) {
                 Some((raster, canvas)) => {
                     let (w, h) = (raster.width, raster.height);
                     match context.renderer.set_image(IMAGE_SERIAL, w, h, &canvas) {
@@ -230,7 +249,10 @@ impl Overlay for HotkeyOverlay {
         let Some(raster) = &self.raster else {
             return animating;
         };
-        let (w, h) = (f64::from(raster.width), f64::from(raster.height));
+        let (w, h) = (
+            f64::from(raster.width / scale),
+            f64::from(raster.height / scale),
+        );
         let (cx, cy) = context.monitor.center();
         let x = (cx - w / 2.0).round();
         let y = (cy - h / 2.0 + (1.0 - alpha) * SLIDE).round();

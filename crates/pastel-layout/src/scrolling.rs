@@ -374,6 +374,9 @@ impl Layout for Scrolling {
                     id,
                     rect: Rect::new(x, y, w, height),
                     fullscreen: false,
+                    floating: false,
+                    sized: true,
+                    interactive: false,
                 });
                 y += h + gap;
             }

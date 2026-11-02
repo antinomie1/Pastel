@@ -7,15 +7,22 @@ use std::time::{Duration, Instant};
 
 use luminaria::backend::{AutoBackend, BackendKind, BackendOptions};
 use luminaria::core::Display;
+use luminaria::desktop::{
+    ForeignToplevelList, ForeignToplevelManager, OutputManager, SessionLockManager,
+};
+
 use luminaria::gpu::{Cursor, SceneRenderer};
 use luminaria::protocol::{
-    CommitTimingManager, CoreGlobals, DecorationMode, FifoManager, LayerShell,
+    CommitTimingManager, CoreGlobals, DecorationMode, FifoManager, IdleInhibitManager,
+    IdleNotifier, LayerShell, PointerGestures, XdgActivation,
 };
+use luminaria::render::ScreencopyManager;
 use luminaria::shell::{InputRouter, OutputLayout, PopupTree, ScreenManager, ScreenOptions};
-use pastel_config::Config;
+use pastel_config::{Config, KeymapNames};
 use pastel_render::color;
 
 use crate::state::{Services, State};
+use crate::watch::ConfigWatch;
 
 pub type Error = Box<dyn std::error::Error>;
 
@@ -49,6 +56,17 @@ fn run_on<'d, R>(
     // paces better with it.
     let _fifo = FifoManager::new(display)?;
     let _commit_timing = CommitTimingManager::new(display)?;
+    let _activation = XdgActivation::new(display)?;
+    let locks = SessionLockManager::new(display)?;
+    let idle = IdleNotifier::new(display)?;
+    let gestures = PointerGestures::new(display)?;
+    let inhibitors = IdleInhibitManager::new(display)?;
+    let mut _taskbars = ForeignToplevelManager::new(display)?;
+    _taskbars.track(shell);
+    let mut _window_list = ForeignToplevelList::new(display)?;
+    _window_list.track(shell);
+    let mut capture = ScreencopyManager::new(display)?;
+    capture.enable_toplevel_capture(display, &_window_list)?;
     let layout = OutputLayout::new()?;
     let popups = PopupTree::new(shell)?;
     let backend = AutoBackend::new(display, &options)?;
@@ -72,10 +90,13 @@ fn run_on<'d, R>(
     };
     let screens = ScreenManager::new(display, &backend, &renderer, &layout, &screen_options)?;
     screens.follow_popups(&popups);
+    screens.follow_capture(&capture);
+    let output_manager = OutputManager::new(display, &layout)?;
+    output_manager.set_deferred(true);
     let router = InputRouter::new(seat, &cursor, &screens, shell, &popups)?;
     router.set_click_to_focus(false); // focus lives in Desktop, not in the router
     if let Some(source) = backend.input() {
-        seat.follow(source, false);
+        seat.follow(source, true);
     }
 
     let socket = display.add_socket_auto()?;
@@ -92,9 +113,27 @@ fn run_on<'d, R>(
         screens: &screens,
         router: &router,
         cursor: &cursor,
+        backend: &backend,
+        display,
+        locks: &locks,
+        output_manager: &output_manager,
+        idle: &idle,
+        gestures: &gestures,
+        inhibitors: &inhibitors,
         session: session.as_ref(),
     };
+    let keymap_named = config.input.keymap != KeymapNames::default();
+    let watch = config_path
+        .as_deref()
+        .map(|path| ConfigWatch::new(display, path))
+        .transpose()?
+        .flatten();
     let mut state = State::new(services, config, config_path, socket, nested)?;
+    state.config_watch = watch;
+    state.start_xwayland(); // before autostart, whose programs want its DISPLAY
+    if keymap_named {
+        state.apply_keymap();
+    }
     state.autostart();
 
     driver(&mut state, display)

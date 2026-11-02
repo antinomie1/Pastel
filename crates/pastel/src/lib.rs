@@ -2,6 +2,12 @@
 //! this one; this is where it meets luminaria.
 
 pub mod app;
+pub mod grab;
 pub mod input;
+pub mod lock;
+pub mod outputs;
 pub mod state;
+pub mod touch;
+pub mod watch;
 pub mod windows;
+pub mod xwayland;

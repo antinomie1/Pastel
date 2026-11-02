@@ -86,6 +86,9 @@ there.
   on with `InputRouter::route`. That is what lets the overlay grab the keyboard and
   Mod+drag steal a click. The cost: `seat.follow`, VT switching and session
   handling are ours (`crates/pastel/src/input.rs`).
+- swaybg is a `Background` layer surface per output, named by its `wl_output`.
+  It sits above the `background` colour in the scene, so blur samples it; the
+  colour only shows where no client paints. `crates/pastel/tests/wallpaper.rs`.
 - `SceneKind::Rect` and `Border` honour `corner_radius`; a rounded `Border` stays
   hollow. Never draw anything solid behind a window: it
   shows through translucency and gets sampled into its blur.
@@ -96,12 +99,12 @@ there.
 - A rounded or translucent window is an offscreen group; luminaria only re-renders
   one when a member commits or moves within it. If frames ever stop being
   `unchanged` at rest, `e2e.rs` should say so.
-- There is no way to keep a dead client's pixels, so the close animation draws a
-  frosted pane rather than the window itself.
-- `ScreencopyManager` isn't wired to outputs in the Rust binding, so `grim` can't
-  capture yet. `crates/pastel/tests/snapshot.rs` reads real pixels another way: it
-  presents `State::scene` to a second headless output and calls `read_back`. Set
-  `PASTEL_SNAPSHOT_DIR` to keep the frames.
+- `SceneItem::retained` draws a closed window's last pixels, for as long as every
+  frame keeps asking. Without a GPU, or for a window never drawn, the close
+  animation is a frosted pane instead.
+- `crates/pastel/tests/snapshot.rs` reads real pixels by presenting `State::scene`
+  to a second headless output and calling `read_back`. Set `PASTEL_SNAPSHOT_DIR` to
+  keep the frames.
 - luminaria comes from GitHub, pinned by `rev` in the root `Cargo.toml`. To change
   both projects together, add this to that file and don't commit it:
   ```toml

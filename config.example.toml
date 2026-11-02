@@ -9,10 +9,29 @@ background = "#1e2028"
 # Shell commands run once at startup.
 autostart = []
 
+# X11 apps, through xwayland-satellite. It starts when the first one connects, so
+# this costs nothing until then; without the program there is just no X11.
+[xwayland]
+enabled = true
+path = "xwayland-satellite"
+
+# Any number of these; what `wlr-randr` lists goes in `name`. Anything left out
+# stays as the monitor came up. Scale is a whole number for now.
+# [[output]]
+# name = "DP-1"
+# mode = "2560x1440@144"
+# scale = 2
+# position = [0, 0]
+# transform = "normal"     # 90, 180, 270, flipped, flipped-90, ...
+# enabled = true
+
 [input]
 mod = "super"              # what `Mod` means in [binds]
 nested-mod = "alt"         # ...when running inside another compositor
 focus-follows-mouse = false
+layout = ""                # xkb: "us", "us,ru"; empty follows XKB_DEFAULT_LAYOUT
+variant = ""               # "dvorak", "," for each extra layout
+options = ""               # "ctrl:nocaps,grp:alt_shift_toggle"
 
 [layout]
 type = "scrolling"

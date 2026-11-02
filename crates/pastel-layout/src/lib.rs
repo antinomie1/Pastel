@@ -6,9 +6,13 @@
 //! gets every animation without writing any.
 
 mod desktop;
+mod gesture;
+mod grab;
 mod scrolling;
 
-pub use desktop::{Desktop, Monitor, Workspace, WorkspaceTarget};
+pub use desktop::{Desktop, Floating, Monitor, Workspace, WorkspaceTarget};
+pub use gesture::Swipe;
+pub use grab::{Edges, Grab, GrabKind};
 pub use pastel_core::{Direction, Rect};
 pub use scrolling::Scrolling;
 
@@ -23,6 +27,13 @@ pub struct Placement {
     pub rect: Rect,
     /// Covers the whole monitor, above everything including top layer surfaces.
     pub fullscreen: bool,
+    /// Out of the layout, above it.
+    pub floating: bool,
+    /// False for a floating window that hasn't said what size it wants: it's asked
+    /// with a size of 0, and `rect` is only a guess.
+    pub sized: bool,
+    /// Under the pointer's control: follow it exactly, with no animation.
+    pub interactive: bool,
 }
 
 /// What a window would like, before it is placed.
@@ -30,6 +41,8 @@ pub struct Placement {
 pub struct WindowHint {
     /// Width as a fraction of the working area; `None` takes the layout's default.
     pub width: Option<f64>,
+    /// Out of the layout from the start, as a dialog is.
+    pub floating: bool,
 }
 
 /// A command to a layout. One enum for every layout, so bindings don't depend on

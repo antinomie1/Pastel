@@ -11,7 +11,7 @@ use common::Client;
 use luminaria::backend::{BackendKind, BackendOptions, HeadlessBackend, Output};
 use luminaria::core::Display;
 use luminaria::gpu::SceneOutcome;
-use luminaria::shell::SceneItem;
+use luminaria::shell::{SceneItem, SceneKind};
 use luminaria::util::{Color, Rect as PixelRect};
 use pastel::app;
 use pastel::state::State;
@@ -388,5 +388,74 @@ fn blur_softens_what_is_behind_a_translucent_window() {
     assert!(
         soft * 3 < sharp,
         "blur should flatten the stripes: {soft} vs {sharp}"
+    );
+}
+
+/// What `grim` does, through the output the screen is drawn on.
+#[test]
+fn a_client_can_capture_what_is_on_the_output() {
+    scenario(
+        "[overlay]\nat-startup = false\n[window]\nblur = false\nborder-width = 0.0",
+        |state, display, client| {
+            client.open("shown", RED);
+            at_rest(state, display, 1);
+            client.capture();
+            settle(state, display, |_| client.captured().is_some());
+            let captured = client.captured().expect("a capture");
+            assert_eq!(
+                (captured.width, captured.height),
+                (WIDTH as u32, HEIGHT as u32)
+            );
+            let rect = state.scene.iter().rfind(|i| i.kind == SceneKind::Surface);
+            let rect = rect.expect("the window").rect;
+            let inside = captured.at(
+                (rect.x + rect.width / 2) as u32,
+                (rect.y + rect.height / 2) as u32,
+            );
+            let [r, g, b] = [(RED >> 16) as u8, (RED >> 8) as u8, RED as u8];
+            let near = |a: u8, b: u8| a.abs_diff(b) <= 3;
+            assert!(
+                near(inside[0], r) && near(inside[1], g) && near(inside[2], b),
+                "{inside:?}"
+            );
+            let outside = if rect.x > 100 { 10 } else { WIDTH as u32 - 10 };
+            assert_ne!(captured.at(outside, HEIGHT as u32 / 2), inside);
+        },
+    );
+}
+
+/// A window that's gone still has its colour on the way out, with nothing of the
+/// client left to ask.
+#[test]
+fn a_closed_window_fades_out_with_its_own_pixels() {
+    scenario(
+        "[overlay]\nat-startup = false\n[window]\nblur = false\nborder-width = 0.0\n\
+         [animation]\nslowdown = 20.0",
+        |state, display, client| {
+            client.open("leaving", RED);
+            at_rest(state, display, 1);
+            let mut camera = Camera::new(state, display);
+            camera.present(state);
+            let rect = state.scene.iter().rfind(|i| i.kind == SceneKind::Surface);
+            let rect = rect.expect("the window").rect;
+            let (x, y) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
+
+            client.close(0);
+            settle(state, display, |s| s.windows_mapped() == 0);
+            app::step(state, display, Some(Duration::from_millis(5))).expect("step");
+            assert!(
+                state.scene.iter().any(|i| i.kind == SceneKind::Retained),
+                "its pixels are in the scene"
+            );
+            camera.present(state);
+            let shot = camera.pixels(state);
+            let [r, g, b] = shot.at(x, y)[..3] else {
+                panic!("a pixel");
+            };
+            assert!(
+                r > g.saturating_add(60) && r > b.saturating_add(60),
+                "still red: {r} {g} {b}"
+            );
+        },
     );
 }

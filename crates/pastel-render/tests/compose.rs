@@ -37,6 +37,14 @@ impl Host for FakeHost {
         self.rule
     }
 
+    fn output_key(&self, monitor: u64) -> u64 {
+        monitor * 10
+    }
+
+    fn crop(&self, _id: WindowId) -> (f32, f32, f32, f32) {
+        (0.1, 0.1, 0.8, 0.8)
+    }
+
     fn layers(&self, monitor: u64, layer: Layer, items: &mut Vec<SceneItem>) {
         let tag = monitor * 100 + layer as u64;
         items.push(
@@ -220,7 +228,9 @@ fn a_closed_window_leaves_a_ghost_that_fades_out() {
     world.compose(0.0);
     world.compose(LATER);
     world.desktop.remove_window(A);
-    world.composer.close(A, ResolvedRule::default(), LATER);
+    world
+        .composer
+        .close(A, ResolvedRule::default(), false, LATER);
     assert!(world.compose(LATER + 0.08));
     assert!(world.window(A).is_none());
     let border = world
@@ -262,7 +272,7 @@ fn a_window_closing_out_of_sight_leaves_nothing() {
     world.desktop.remove_window(A);
     world
         .composer
-        .close(A, ResolvedRule::default(), LATER * 2.0);
+        .close(A, ResolvedRule::default(), false, LATER * 2.0);
     assert!(!world.compose(LATER * 2.0 + 0.01));
 }
 
@@ -358,7 +368,7 @@ fn layers_stack_around_the_windows() {
 }
 
 #[test]
-fn windows_are_clipped_at_an_edge_shared_with_another_monitor() {
+fn a_window_past_a_shared_edge_stays_whole_on_its_own_monitor() {
     let mut world = World::new("[layout]\ndefault-width = 0.75");
     world.desktop.add_monitor(2, RIGHT);
     world.add(A);
@@ -372,9 +382,17 @@ fn windows_are_clipped_at_an_edge_shared_with_another_monitor() {
         "off the left, where there is nothing: {:?}",
         a.rect
     );
-    assert!(a.rect.x + a.rect.width <= 1000);
+    assert_eq!(a.only_on, 10, "only on the first monitor");
+    world.desktop.focus_window(A);
+    world.compose(LATER * 3.0);
+    world.compose(LATER * 4.0);
     let b = world.window(B).expect("drawn");
-    assert_eq!(b.rect.x + b.rect.width, 988, "inside its window box");
+    assert_eq!(b.only_on, 10);
+    assert!(
+        b.rect.x + b.rect.width > 1000,
+        "past the edge, uncut, so its corners stay where they are: {:?}",
+        b.rect
+    );
 }
 
 #[test]
@@ -394,6 +412,7 @@ fn rules_reach_the_window() {
         opacity: Some(0.5),
         blur: Some(false),
         default_width: None,
+        floating: None,
     };
     world.add(A);
     world.compose(0.0);
@@ -466,4 +485,38 @@ fn the_pipeline_runs_custom_effects_in_order() {
     let mut item = SceneItem::rect(PixelRect::new(0, 0, 1, 1), Color::rgb(0.0, 0.0, 0.0));
     pipeline.style(&frame, &mut item);
     assert_eq!(item.alpha, 0.25);
+}
+
+#[test]
+fn a_closed_window_with_pixels_left_fades_them_out() {
+    let mut world = World::new("");
+    world.add(A);
+    world.compose(0.0);
+    world.compose(LATER);
+    world
+        .composer
+        .close(A, ResolvedRule::default(), true, LATER);
+    world.compose(LATER + 0.05);
+    let ghost = world.items.iter().find(|i| i.kind == SceneKind::Retained);
+    let ghost = ghost.expect("its pixels");
+    assert_eq!(ghost.surface, SurfaceId(A.0));
+    assert_eq!(
+        ghost.crop,
+        (0.1, 0.1, 0.8, 0.8),
+        "the window, not its shadow"
+    );
+    assert!(ghost.alpha < 1.0 && !ghost.accepts_input);
+}
+
+#[test]
+fn a_closed_window_with_none_left_is_a_pane() {
+    let mut world = World::new("");
+    world.add(A);
+    world.compose(0.0);
+    world.compose(LATER);
+    world
+        .composer
+        .close(A, ResolvedRule::default(), false, LATER);
+    world.compose(LATER + 0.05);
+    assert!(world.items.iter().all(|i| i.kind != SceneKind::Retained));
 }

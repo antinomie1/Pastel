@@ -89,7 +89,11 @@ fn a_new_column_opens_right_of_the_focused_one_and_takes_focus() {
 #[test]
 fn width_hint_overrides_the_default() {
     let mut layout = layout_with(0, CenterFocus::Never);
-    layout.add(W, WindowHint { width: Some(1.0) });
+    let hint = WindowHint {
+        width: Some(1.0),
+        ..WindowHint::default()
+    };
+    layout.add(W, hint);
     assert_eq!(rect_of(&layout, 1).w, 980.0);
 }
 

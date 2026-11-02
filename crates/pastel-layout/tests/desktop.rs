@@ -304,3 +304,156 @@ fn acting_with_no_monitor_or_window_is_harmless() {
     assert!(!d.move_to_workspace(Down));
     assert!(!d.toggle_fullscreen());
 }
+
+// --- floating -------------------------------------------------------------
+
+const FLOAT: WindowHint = WindowHint {
+    width: None,
+    floating: true,
+};
+
+fn with_one_tiled_and_one_floating() -> Desktop {
+    let mut desktop = desktop();
+    desktop.add_window(WindowId(1), WindowHint::default());
+    desktop.add_window(WindowId(2), FLOAT);
+    desktop.fit_floating(WindowId(2), 300.0, 200.0, None);
+    desktop
+}
+
+#[test]
+fn a_floating_window_is_centred_on_top_and_focused() {
+    let desktop = with_one_tiled_and_one_floating();
+    assert_eq!(desktop.focused_window(), Some(WindowId(2)));
+    let rect = desktop.floating(WindowId(2)).expect("floating").rect;
+    assert_eq!(rect, Rect::new(350.0, 200.0, 300.0, 200.0));
+    let monitor = &desktop.monitors()[0];
+    let mut placed = Vec::new();
+    Desktop::place(monitor, monitor.active_workspace(), &mut placed);
+    let last = placed.last().expect("placements");
+    assert!(last.id == WindowId(2) && last.floating);
+}
+
+#[test]
+fn a_workspace_with_only_a_floating_window_is_not_empty() {
+    let mut desktop = desktop();
+    desktop.add_window(WindowId(1), FLOAT);
+    assert_eq!(desktop.monitors()[0].workspaces.len(), 2);
+    assert!(desktop.focus_workspace(Down));
+    assert_eq!(
+        desktop.monitors()[0].workspaces.len(),
+        2,
+        "it's still there"
+    );
+    assert!(desktop.remove_window(WindowId(1)));
+    assert_eq!(desktop.monitors()[0].workspaces.len(), 1);
+}
+
+#[test]
+fn toggling_keeps_the_window_where_it_is_and_back() {
+    let mut desktop = desktop();
+    desktop.add_window(WindowId(1), WindowHint::default());
+    let tiled = desktop.rect_of(WindowId(1)).expect("placed");
+    assert!(desktop.toggle_floating());
+    assert_eq!(desktop.floating(WindowId(1)).expect("floating").rect, tiled);
+    assert_eq!(desktop.focused_window(), Some(WindowId(1)));
+    assert!(desktop.toggle_floating());
+    assert!(desktop.floating(WindowId(1)).is_none());
+    assert_eq!(desktop.focused_window(), Some(WindowId(1)));
+}
+
+#[test]
+fn focus_moves_between_floating_and_the_layout() {
+    let mut desktop = with_one_tiled_and_one_floating();
+    desktop.apply(LayoutOp::Focus(Dir::Left));
+    assert_eq!(desktop.focused_window(), Some(WindowId(1)));
+    assert!(desktop.switch_floating_focus());
+    assert_eq!(desktop.focused_window(), Some(WindowId(2)));
+    assert!(desktop.switch_floating_focus());
+    assert_eq!(desktop.focused_window(), Some(WindowId(1)));
+}
+
+#[test]
+fn moving_a_focused_floating_window_nudges_it() {
+    let mut desktop = with_one_tiled_and_one_floating();
+    let before = desktop.floating(WindowId(2)).expect("floating").rect;
+    assert!(desktop.apply(LayoutOp::Move(Dir::Right)));
+    let after = desktop.floating(WindowId(2)).expect("floating").rect;
+    assert!(after.x > before.x && after.y == before.y);
+    assert!(!desktop.apply(LayoutOp::CycleWidth), "that's for columns");
+}
+
+#[test]
+fn focusing_a_floating_window_raises_it() {
+    let mut desktop = desktop();
+    desktop.add_window(WindowId(1), FLOAT);
+    desktop.add_window(WindowId(2), FLOAT);
+    assert!(desktop.focus_window(WindowId(1)));
+    assert_eq!(desktop.focused_window(), Some(WindowId(1)));
+    let workspace = desktop.monitors()[0].active_workspace();
+    assert_eq!(workspace.floating.last().map(|f| f.id), Some(WindowId(1)));
+}
+
+#[test]
+fn a_floating_window_goes_to_another_workspace_still_floating() {
+    let mut desktop = with_one_tiled_and_one_floating();
+    assert!(desktop.move_to_workspace(Down));
+    assert!(desktop.floating(WindowId(2)).is_some());
+    assert_eq!(desktop.focused_window(), Some(WindowId(2)));
+}
+
+#[test]
+fn a_floating_window_comes_along_when_its_monitor_moves_or_goes() {
+    let mut desktop = desktop();
+    desktop.add_monitor(2, RIGHT);
+    desktop.focus_monitor_at(1300.0, 10.0);
+    desktop.add_window(WindowId(1), FLOAT);
+    desktop.fit_floating(WindowId(1), 100.0, 100.0, None);
+    let start = desktop.floating(WindowId(1)).expect("floating").rect;
+    assert!(start.x >= 1000.0);
+    desktop.remove_monitor(2);
+    let adopted = desktop.floating(WindowId(1)).expect("floating").rect;
+    assert_eq!(adopted.x, start.x - 1000.0, "still on a screen");
+}
+
+#[test]
+fn dropping_a_window_on_another_monitor_moves_it_there() {
+    let mut desktop = desktop();
+    desktop.add_monitor(2, RIGHT);
+    desktop.add_window(WindowId(1), FLOAT);
+    desktop.fit_floating(WindowId(1), 100.0, 100.0, None);
+    desktop.set_floating_rect(WindowId(1), Rect::new(1500.0, 100.0, 100.0, 100.0));
+    desktop.rehome_floating(WindowId(1));
+    let on_second = desktop.monitors()[1].active_workspace();
+    assert!(on_second.contains(WindowId(1)));
+    assert_eq!(desktop.focused_monitor().map(|m| m.id), Some(2));
+}
+
+#[test]
+fn a_dialog_is_centred_over_the_window_it_belongs_to() {
+    let mut desktop = desktop();
+    desktop.add_window(WindowId(1), WindowHint::default());
+    let parent = desktop.rect_of(WindowId(1)).expect("placed");
+    desktop.add_window(WindowId(2), FLOAT);
+    desktop.fit_floating(WindowId(2), 100.0, 60.0, Some(WindowId(1)));
+    let dialog = desktop.floating(WindowId(2)).expect("floating").rect;
+    assert_eq!(dialog.center().0.round(), parent.center().0.round());
+}
+
+#[test]
+fn removing_the_focused_floating_window_gives_focus_back() {
+    let mut desktop = with_one_tiled_and_one_floating();
+    assert!(desktop.remove_window(WindowId(2)));
+    assert_eq!(desktop.focused_window(), Some(WindowId(1)));
+}
+
+#[test]
+fn a_floating_window_can_be_fullscreen() {
+    let mut desktop = with_one_tiled_and_one_floating();
+    assert!(desktop.toggle_fullscreen());
+    assert!(desktop.is_fullscreen(WindowId(2)));
+    let monitor = &desktop.monitors()[0];
+    let mut placed = Vec::new();
+    Desktop::place(monitor, monitor.active_workspace(), &mut placed);
+    let window = placed.iter().find(|p| p.id == WindowId(2)).expect("placed");
+    assert!(window.fullscreen && window.rect == monitor.rect);
+}

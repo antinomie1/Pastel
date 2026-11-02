@@ -10,6 +10,8 @@ pub struct OverlayContext<'a> {
     pub renderer: &'a SceneRenderer,
     /// The focused monitor, in layout coordinates.
     pub monitor: Rect,
+    /// That monitor's scale: what image pixels are per logical pixel.
+    pub scale: i32,
     pub now: f64,
 }
 
