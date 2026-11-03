@@ -45,8 +45,12 @@ pub struct Keyboard {
     swallowed: HashSet<u32>,
     /// A fresh state: asked about a key, it answers with the unshifted symbol, so
     /// `Mod+Shift+1` matches though the key really produces `!`.
-    base: Option<KeymapState>,
+    pub(crate) base: Option<KeymapState>,
     mods: u32,
+    /// What virtual keyboards last said the modifiers are.
+    pub(crate) virtual_mods: luminaria::backend::Modifiers,
+    /// Virtual pointer scrolling, until its frame.
+    pub(crate) virtual_axis: crate::ime::VirtualAxis,
     /// Mod+drag is panning, from this pointer position.
     pan: Option<f64>,
     /// Mouse buttons down right now.
@@ -71,6 +75,8 @@ impl Keyboard {
             swallowed: HashSet::new(),
             base: None,
             mods: 0,
+            virtual_mods: Default::default(),
+            virtual_axis: Default::default(),
             pan: None,
             buttons: 0,
             drag_button: None,
@@ -153,7 +159,7 @@ impl State<'_> {
             }
             _ => {}
         }
-        self.services.router.route(&event);
+        self.route_key(&event);
         self.pointer_moved();
         self.end_grab_with_last_button();
     }
@@ -182,7 +188,7 @@ impl State<'_> {
     ) {
         if !pressed {
             if !self.keyboard.swallowed.remove(&key) {
-                self.services.router.route(event);
+                self.route_key(event);
             }
             return;
         }
@@ -214,7 +220,7 @@ impl State<'_> {
                 self.keyboard.swallowed.insert(key);
                 self.run(action);
             }
-            None => self.services.router.route(event),
+            None => self.route_key(event),
         }
     }
 

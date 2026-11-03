@@ -113,6 +113,10 @@ pub struct Window {
     pub title: String,
     /// The xdg app id.
     pub app_id: String,
+    /// The icon name the window set itself (xdg-toplevel-icon), empty without
+    /// one: for windows whose app id names no desktop entry.
+    #[serde(default)]
+    pub icon: String,
     /// The workspace it is on.
     pub workspace: u64,
     /// It has the keyboard.

@@ -27,6 +27,16 @@
 - [ ] A rounded or translucent window at a fractional scale is an offscreen group
       whose size can differ from its place on screen by a pixel, and is resampled
 
+## Waiting on luminaria
+
+luminaria implements these; its Rust binding or backend can't carry them yet.
+
+- [ ] Pointer constraints and relative pointer (games): the binding sends no relative
+      motion, and a locked pointer needs it
+- [ ] Virtual keyboards with their own keymap (wtype): the keymap isn't exposed
+- [ ] Tablets: the binding leaves mapping each event to the caller
+- [ ] Gamma and CTM (night light): the backend can't apply a ramp or matrix
+
 ## Needs real hardware
 
 Headless can't reach these; they pass everything short of them.

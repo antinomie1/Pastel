@@ -287,6 +287,7 @@ impl State<'_> {
                         id: id.0,
                         title: toplevel.title(),
                         app_id: toplevel.app_id(),
+                        icon: self.services.toplevel_icons.icon_name(surface_of(id)),
                         workspace: workspace.id,
                         focused: Some(id) == focused_window,
                         floating: placement.floating,
@@ -308,7 +309,7 @@ impl State<'_> {
 }
 
 /// Shows workspace `id` on its monitor and focuses that monitor.
-fn focus_workspace(desktop: &mut Desktop, id: u64) -> bool {
+pub(crate) fn focus_workspace(desktop: &mut Desktop, id: u64) -> bool {
     let found = desktop.monitors().iter().find_map(|monitor| {
         let index = monitor.workspaces.iter().position(|w| w.id == id)?;
         Some((monitor.rect.center(), index))

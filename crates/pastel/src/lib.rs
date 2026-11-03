@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod grab;
+pub mod ime;
 pub mod input;
 pub mod ipc;
 pub mod lock;
@@ -11,4 +12,5 @@ pub mod state;
 pub mod touch;
 pub mod watch;
 pub mod windows;
+pub mod workspaces;
 pub mod xwayland;

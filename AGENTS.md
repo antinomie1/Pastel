@@ -91,6 +91,18 @@ Changing the wire types changes the protocol for Palettes too: update both.
 
 ## Luminaria notes
 
+- ext-workspace-v1 (`crates/pastel/src/workspaces.rs`): one group per monitor on its
+  `wl_output`, synced from dirty frames with the IPC. Pastel's workspaces are dynamic
+  and named by position; the protocol can't rename or move one, so a workspace whose
+  position or monitor changes is removed and announced again. Only `activate` is
+  honoured. `crates/pastel/tests/workspaces.rs`.
+- Input methods (`crates/pastel/src/ime.rs`): every key Pastel's bindings pass on goes
+  through `State::route_key`, which hands it to an input method holding the grab.
+  Keys it gives back arrive as `Event::VirtualKey` and are read with the seat's
+  keymap: luminaria doesn't expose a virtual keyboard's own keymap, so a tool that
+  uploads a different one (wtype) types the wrong keys. Candidate windows are scene
+  items under the focused field's text cursor. `crates/pastel/tests/input_method.rs`.
+
 - Events arrive after the fact in `Display::dispatch`; anything luminaria must
   answer synchronously is told ahead of time (`ScreenManager::set_scene`).
 - We do **not** call `InputRouter::attach`. `AutoBackend` forwards all input as

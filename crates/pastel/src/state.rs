@@ -9,13 +9,15 @@ use luminaria::Event;
 use luminaria::backend::{AutoBackend, Output, OutputEvent, Session};
 use luminaria::core::Display;
 use luminaria::desktop::{
-    ForeignToplevelRequest, ForeignToplevelRequestKind, OutputManager, SessionLockManager,
+    ForeignToplevelRequest, ForeignToplevelRequestKind, InputMethodManager, OutputManager,
+    SessionLockManager,
 };
 use luminaria::gpu::{Cursor, SceneRenderer};
 use luminaria::protocol::{
     ActivationEvent, CompositorEvent, CoreGlobals, IdleInhibitEvent, IdleInhibitManager,
     IdleInhibitorId, IdleNotifier, KeyboardInteractivity, LayerShell, LayerSurfaceEvent,
-    PointerGestures, PopupEvent, SurfaceId, Toplevel, ToplevelEvent, XdgShell,
+    PointerGestures, PopupEvent, SurfaceId, TextInputManager, Toplevel, ToplevelEvent, XdgShell,
+    XdgToplevelIconManager,
 };
 use luminaria::shell::{
     InputRouter, LayerManager, OutputLayout, PopupTree, SceneHit, SceneItem, SceneKind,
@@ -51,6 +53,9 @@ pub struct Services<'a> {
     pub idle: &'a IdleNotifier<'a>,
     pub gestures: &'a PointerGestures<'a>,
     pub inhibitors: &'a IdleInhibitManager<'a>,
+    pub text_input: &'a TextInputManager<'a>,
+    pub input_method: &'a InputMethodManager<'a>,
+    pub toplevel_icons: &'a XdgToplevelIconManager<'a>,
     pub layout: &'a OutputLayout,
     pub popups: &'a PopupTree,
     pub renderer: &'a SceneRenderer,
@@ -71,6 +76,7 @@ pub struct State<'a> {
     pub(crate) config: Config,
     pub(crate) config_watch: Option<ConfigWatch<'a>>,
     pub(crate) ipc: Option<Ipc<'a>>,
+    pub(crate) workspaces: Option<crate::workspaces::Workspaces<'a>>,
     xwayland: Option<Xwayland<'a>>,
     pub(crate) lock: LockState,
     pub(crate) held: Option<Held>,
@@ -135,6 +141,7 @@ impl<'a> State<'a> {
             config,
             config_watch: None,
             ipc: None,
+            workspaces: None,
             xwayland: None,
             lock: LockState::default(),
             held: None,
@@ -348,6 +355,14 @@ impl<'a> State<'a> {
             Event::SessionLock(event) => self.lock_event(event),
             Event::IdleInhibit(event) => self.idle_inhibit(event),
             Event::ForeignToplevel(request) => self.foreign_toplevel(request),
+            Event::Workspace(request) => self.workspace_request(request),
+            Event::VirtualKey(key) => self.virtual_key(key),
+            Event::VirtualModifiers(modifiers) => self.virtual_modifiers(modifiers),
+            Event::VirtualPointer(pointer) => self.virtual_pointer(pointer),
+            // Candidate windows come, go and follow the text cursor.
+            Event::InputMethod(_) | Event::TextInput(_) => self.dirty = true,
+            // Subscribers of the IPC show window icons.
+            Event::ToplevelIcon(_) => self.dirty = true,
             Event::FdReady(tag @ (SOCKET_TAG | EXIT_TAG)) => {
                 if let Some(xwayland) = &mut self.xwayland {
                     if tag == SOCKET_TAG {
@@ -791,6 +806,7 @@ impl<'a> State<'a> {
             self.services.screens.set_scene(&self.scene);
             self.update_inhibitors();
             if changed {
+                self.sync_workspaces();
                 self.publish_ipc();
             }
             return;
@@ -821,10 +837,14 @@ impl<'a> State<'a> {
             };
             animating |= self.hotkeys.draw(&context, &mut self.scene);
         }
+        let mut scene = std::mem::take(&mut self.scene);
+        self.input_method_popups(&mut scene);
+        self.scene = scene;
         self.animating = animating;
         self.services.screens.set_scene(&self.scene);
         self.update_inhibitors();
         if changed {
+            self.sync_workspaces();
             self.publish_ipc();
         }
     }

@@ -8,19 +8,23 @@ use std::time::{Duration, Instant};
 use luminaria::backend::{AutoBackend, BackendKind, BackendOptions};
 use luminaria::core::Display;
 use luminaria::desktop::{
-    ForeignToplevelList, ForeignToplevelManager, OutputManager, SessionLockManager,
+    DataControlManager, ForeignToplevelList, ForeignToplevelManager, InputMethodManager,
+    OutputManager, SessionLockManager, VirtualKeyboardManager, VirtualPointerManager,
+    WorkspaceManager,
 };
 
 use luminaria::gpu::{Cursor, SceneRenderer};
 use luminaria::protocol::{
-    CommitTimingManager, CoreGlobals, DecorationMode, FifoManager, IdleInhibitManager,
-    IdleNotifier, LayerShell, PointerGestures, XdgActivation,
+    ColorManager, ColorRepresentationManager, ColorSupport, CommitTimingManager, CoreGlobals,
+    DecorationMode, FifoManager, IdleInhibitManager, IdleNotifier, LayerShell, PointerGestures,
+    TextInputManager, XdgActivation, XdgToplevelIconManager,
 };
 use luminaria::render::ScreencopyManager;
 use luminaria::shell::{InputRouter, OutputLayout, PopupTree, ScreenManager, ScreenOptions};
 use pastel_config::{Config, KeymapNames};
 
 use crate::ipc::Ipc;
+use crate::workspaces::Workspaces;
 use pastel_render::color;
 
 use crate::state::{Services, State};
@@ -63,6 +67,19 @@ fn run_on<'d, R>(
     let idle = IdleNotifier::new(display)?;
     let gestures = PointerGestures::new(display)?;
     let inhibitors = IdleInhibitManager::new(display)?;
+    // fcitx5 and IBus: luminaria bridges the two protocols, Pastel routes the grab.
+    let text_input = TextInputManager::new(display, seat)?;
+    let input_method = InputMethodManager::new(display, seat, &text_input)?;
+    // Input methods hand back the keys they don't use; wayvnc and friends drive the pointer.
+    let _virtual_keyboard = VirtualKeyboardManager::new(display)?;
+    let _virtual_pointer = VirtualPointerManager::new(display)?;
+    // Clipboard managers and wl-paste, which have no window.
+    let _clipboard_managers = DataControlManager::new(display, globals.data_device())?;
+    // Negotiation only: clients are told to render sRGB, which is what is drawn.
+    let _color = ColorManager::new(display, ColorSupport::SrgbOnly)?;
+    let _color_representation = ColorRepresentationManager::new(display, false)?;
+    // A window's own icon name, for bars that find no desktop entry.
+    let toplevel_icons = XdgToplevelIconManager::new(display)?;
     let mut _taskbars = ForeignToplevelManager::new(display)?;
     _taskbars.track(shell);
     let mut _window_list = ForeignToplevelList::new(display)?;
@@ -125,6 +142,9 @@ fn run_on<'d, R>(
         idle: &idle,
         gestures: &gestures,
         inhibitors: &inhibitors,
+        text_input: &text_input,
+        input_method: &input_method,
+        toplevel_icons: &toplevel_icons,
         session: session.as_ref(),
     };
     let keymap_named = config.input.keymap != KeymapNames::default();
@@ -136,6 +156,7 @@ fn run_on<'d, R>(
     let mut state = State::new(services, config, config_path, socket, nested)?;
     state.config_watch = watch;
     state.ipc = Ipc::new(display, state.socket());
+    state.workspaces = Some(Workspaces::new(WorkspaceManager::new(display)?));
     state.start_xwayland(); // before autostart, whose programs want its DISPLAY
     if keymap_named {
         state.apply_keymap();

@@ -9,7 +9,8 @@ A scrolling-tiling Wayland compositor (niri-style) built on [luminaria](https://
 - **Animations**: Spring and ease curves with in-flight retargeting preserving momentum; covers window open/close, movement, workspace switching, focus color transitions, and overlay
 - **Visual effects**: Optional rounded corners (disabled by default), hollow borders, shadows, frosted glass blur, and window rules
 - **Floating windows**: Dialogs float automatically, toggled manually or assigned via window rules; drag by titlebar, `Mod+Left Click` to move, `Mod+Right Click` to resize
-- **Desktop protocols**: Screen lock (swaylock), screenshot/screen recording (grim, wf-recorder), idle notification (swayidle), status bars/panels, output management (wlr-randr, kanshi), and xdg-activation
+- **Desktop protocols**: Screen lock (swaylock), screenshot/screen recording (grim, wf-recorder), idle notification (swayidle), status bars/panels, workspaces for pagers (ext-workspace-v1), taskbars and window lists (wlr-foreign-toplevel, ext-foreign-toplevel-list), output management (wlr-randr, kanshi), clipboard managers (wlr-data-control), window icons (xdg-toplevel-icon), color-management negotiation (sRGB), and xdg-activation
+- **Input methods**: fcitx5 and IBus through text-input-v3 and input-method-v2, with the candidate window under the text cursor; virtual keyboards and pointers (wayvnc, KDE Connect)
 - **X11 applications**: Via [xwayland-satellite](https://github.com/Supreeeme/xwayland-satellite), starts on demand when the first X client connects; can be disabled with `[xwayland] enabled`
 - **Displays**: Fractional scaling (`scale = 1.5`), rotation, multi-output; clients render at their true scale
 - **Input**: Touchscreens (rotates with display, `touch-output` binds to a specific display); touchpad 3-finger horizontal swipe to pan, vertical swipe to switch workspaces, passes other gestures through to applications

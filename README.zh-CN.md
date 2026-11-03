@@ -9,7 +9,8 @@
 - **动画**：弹簧与缓动两种曲线，可在飞行中改目标并保留速度；窗口开关、移动、工作区切换、焦点色、overlay 全部覆盖
 - **视觉效果**：可选圆角（默认关闭）、空心边框、阴影、磨砂模糊、窗口规则
 - **浮动窗口**：对话框自动浮动，也可手动切换或用窗口规则指定；标题栏拖动、`Mod+左键` 移动、`Mod+右键` 缩放
-- **桌面协议**：锁屏（swaylock）、截屏（grim、wf-recorder）、空闲通知（swayidle）、任务栏、输出管理（wlr-randr、kanshi）、xdg-activation
+- **桌面协议**：锁屏（swaylock）、截屏（grim、wf-recorder）、空闲通知（swayidle）、任务栏、分页器工作区（ext-workspace-v1）、任务栏与窗口列表（wlr-foreign-toplevel、ext-foreign-toplevel-list）、输出管理（wlr-randr、kanshi）、剪贴板管理器（wlr-data-control）、窗口图标（xdg-toplevel-icon）、色彩管理协商（sRGB）、xdg-activation
+- **输入法**：经 text-input-v3 与 input-method-v2 支持 fcitx5、IBus，候选窗显示在光标下方；虚拟键盘与虚拟指针（wayvnc、KDE Connect）
 - **X11 应用**：通过 [xwayland-satellite](https://github.com/Supreeeme/xwayland-satellite)，第一个 X 客户端连接时才启动，`[xwayland] enabled` 可关闭
 - **显示**：小数缩放（`scale = 1.5`）、旋转、多屏，客户端按真实缩放绘制
 - **输入**：触摸屏（随屏幕旋转，`touch-output` 指定所在显示器）；触控板三指左右平移、上下切工作区，其余手势交给应用
