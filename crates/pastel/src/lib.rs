@@ -2,6 +2,7 @@
 //! this one; this is where it meets luminaria.
 
 pub mod app;
+pub mod devices;
 pub mod grab;
 pub mod ime;
 pub mod input;

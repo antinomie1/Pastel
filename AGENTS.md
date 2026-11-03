@@ -98,11 +98,17 @@ Changing the wire types changes the protocol for Palettes too: update both.
   honoured. `crates/pastel/tests/workspaces.rs`.
 - Input methods (`crates/pastel/src/ime.rs`): every key Pastel's bindings pass on goes
   through `State::route_key`, which hands it to an input method holding the grab.
-  Keys it gives back arrive as `Event::VirtualKey` and are read with the seat's
-  keymap: luminaria doesn't expose a virtual keyboard's own keymap, so a tool that
-  uploads a different one (wtype) types the wrong keys. Candidate windows are scene
-  items under the focused field's text cursor. `crates/pastel/tests/input_method.rs`.
-
+  Keys it gives back arrive as `Event::VirtualKey`. Each virtual keyboard has its own
+  keymap: the seat switches to it while that keyboard types and back on the next real
+  key, as sway does. Candidate windows are scene items under the focused field's text
+  cursor. `crates/pastel/tests/input_method.rs`.
+- Pointer constraints are luminaria's `InputRouter::follow_constraints`: a locked
+  pointer stays put while relative motion flows, a confined one is clamped. Tablets
+  go through `luminaria::protocol::TabletFeed`, mapped to the monitor under the pen.
+  Gamma and CTM ramps are applied with `Output::set_gamma` / `set_ctm`; each output's
+  table size is told to the protocol once it has a `wl_output`, and outputs without a
+  table (headless, nested) answer `failed`. `crates/pastel/src/devices.rs`,
+  `crates/pastel/tests/devices.rs`.
 - Events arrive after the fact in `Display::dispatch`; anything luminaria must
   answer synchronously is told ahead of time (`ScreenManager::set_scene`).
 - We do **not** call `InputRouter::attach`. `AutoBackend` forwards all input as

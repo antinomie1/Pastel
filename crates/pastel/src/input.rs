@@ -51,6 +51,10 @@ pub struct Keyboard {
     pub(crate) virtual_mods: luminaria::backend::Modifiers,
     /// Virtual pointer scrolling, until its frame.
     pub(crate) virtual_axis: crate::ime::VirtualAxis,
+    /// The seat's keymap while a virtual keyboard's own is in use.
+    pub(crate) physical_keymap: Option<String>,
+    /// That virtual keyboard's keymap, to read its keys with.
+    pub(crate) virtual_keymap: Option<KeymapState>,
     /// Mod+drag is panning, from this pointer position.
     pan: Option<f64>,
     /// Mouse buttons down right now.
@@ -77,6 +81,8 @@ impl Keyboard {
             mods: 0,
             virtual_mods: Default::default(),
             virtual_axis: Default::default(),
+            physical_keymap: None,
+            virtual_keymap: None,
             pan: None,
             buttons: 0,
             drag_button: None,
@@ -128,12 +134,17 @@ impl State<'_> {
                 self.gesture(gesture);
                 return;
             }
+            InputEvent::Tablet(input) => {
+                self.tablet(&input);
+                return;
+            }
             InputEvent::Key {
                 key,
                 pressed,
                 keysym,
                 modifiers,
             } => {
+                self.restore_physical_keymap();
                 self.keyboard.mods = modifiers.held();
                 self.key(&event, key, pressed, keysym, modifiers);
                 return;

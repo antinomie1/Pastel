@@ -27,15 +27,16 @@
 - [ ] A rounded or translucent window at a fractional scale is an offscreen group
       whose size can differ from its place on screen by a pixel, and is resampled
 
-## Waiting on luminaria
+## Desktop protocols
 
-luminaria implements these; its Rust binding or backend can't carry them yet.
-
-- [ ] Pointer constraints and relative pointer (games): the binding sends no relative
-      motion, and a locked pointer needs it
-- [ ] Virtual keyboards with their own keymap (wtype): the keymap isn't exposed
-- [ ] Tablets: the binding leaves mapping each event to the caller
-- [ ] Gamma and CTM (night light): the backend can't apply a ramp or matrix
+- [x] Pointer constraints and relative pointer (games)
+- [x] Virtual keyboards with their own keymap (wtype)
+- [x] Tablets: pens, erasers and pads, mapped to the monitor under the pen
+- [x] Gamma and CTM (night light) on DRM outputs
+- [ ] Constraints under the nested backend: it only reports absolute positions, so
+      nothing is locked or confined there and no relative motion exists
+- [ ] Tablets mapped to a chosen output (`[[tablet]] output = ...`) rather than the one
+      under the pen
 
 ## Needs real hardware
 

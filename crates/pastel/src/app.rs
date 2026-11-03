@@ -8,16 +8,17 @@ use std::time::{Duration, Instant};
 use luminaria::backend::{AutoBackend, BackendKind, BackendOptions};
 use luminaria::core::Display;
 use luminaria::desktop::{
-    DataControlManager, ForeignToplevelList, ForeignToplevelManager, InputMethodManager,
-    OutputManager, SessionLockManager, VirtualKeyboardManager, VirtualPointerManager,
-    WorkspaceManager,
+    CtmControlManager, DataControlManager, ForeignToplevelList, ForeignToplevelManager,
+    GammaControlManager, InputMethodManager, OutputManager, SessionLockManager,
+    VirtualKeyboardManager, VirtualPointerManager, WorkspaceManager,
 };
 
 use luminaria::gpu::{Cursor, SceneRenderer};
 use luminaria::protocol::{
     ColorManager, ColorRepresentationManager, ColorSupport, CommitTimingManager, CoreGlobals,
-    DecorationMode, FifoManager, IdleInhibitManager, IdleNotifier, LayerShell, PointerGestures,
-    TextInputManager, XdgActivation, XdgToplevelIconManager,
+    DecorationMode, FifoManager, IdleInhibitManager, IdleNotifier, LayerShell, PointerConstraints,
+    PointerGestures, RelativePointerManager, TabletManager, TextInputManager, XdgActivation,
+    XdgToplevelIconManager,
 };
 use luminaria::render::ScreencopyManager;
 use luminaria::shell::{InputRouter, OutputLayout, PopupTree, ScreenManager, ScreenOptions};
@@ -71,7 +72,7 @@ fn run_on<'d, R>(
     let text_input = TextInputManager::new(display, seat)?;
     let input_method = InputMethodManager::new(display, seat, &text_input)?;
     // Input methods hand back the keys they don't use; wayvnc and friends drive the pointer.
-    let _virtual_keyboard = VirtualKeyboardManager::new(display)?;
+    let virtual_keyboards = VirtualKeyboardManager::new(display)?;
     let _virtual_pointer = VirtualPointerManager::new(display)?;
     // Clipboard managers and wl-paste, which have no window.
     let _clipboard_managers = DataControlManager::new(display, globals.data_device())?;
@@ -80,6 +81,14 @@ fn run_on<'d, R>(
     let _color_representation = ColorRepresentationManager::new(display, false)?;
     // A window's own icon name, for bars that find no desktop entry.
     let toplevel_icons = XdgToplevelIconManager::new(display)?;
+    // Games and 3D views: a locked or confined pointer, and raw motion.
+    let pointer_constraints = PointerConstraints::new(display, seat)?;
+    let relative_pointer = RelativePointerManager::new(display, seat)?;
+    let tablets = TabletManager::new(display)?;
+    // Night light. Each output's table size is told once it has a wl_output;
+    // until then, and for outputs without a table, clients hear `failed`.
+    let gamma = GammaControlManager::new(display, 0)?;
+    let ctm = CtmControlManager::new(display)?;
     let mut _taskbars = ForeignToplevelManager::new(display)?;
     _taskbars.track(shell);
     let mut _window_list = ForeignToplevelList::new(display)?;
@@ -117,6 +126,7 @@ fn run_on<'d, R>(
     output_manager.set_deferred(true);
     let router = InputRouter::new(seat, &cursor, &screens, shell, &popups)?;
     router.set_click_to_focus(false); // focus lives in Desktop, not in the router
+    router.follow_constraints(&pointer_constraints, Some(&relative_pointer));
     if let Some(source) = backend.input() {
         seat.follow(source, true);
     }
@@ -145,6 +155,10 @@ fn run_on<'d, R>(
         text_input: &text_input,
         input_method: &input_method,
         toplevel_icons: &toplevel_icons,
+        virtual_keyboards: &virtual_keyboards,
+        tablets: &tablets,
+        gamma: &gamma,
+        ctm: &ctm,
         session: session.as_ref(),
     };
     let keymap_named = config.input.keymap != KeymapNames::default();

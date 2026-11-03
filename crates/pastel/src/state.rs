@@ -9,15 +9,15 @@ use luminaria::Event;
 use luminaria::backend::{AutoBackend, Output, OutputEvent, Session};
 use luminaria::core::Display;
 use luminaria::desktop::{
-    ForeignToplevelRequest, ForeignToplevelRequestKind, InputMethodManager, OutputManager,
-    SessionLockManager,
+    CtmControlManager, ForeignToplevelRequest, ForeignToplevelRequestKind, GammaControlManager,
+    InputMethodManager, OutputManager, SessionLockManager, VirtualKeyboardManager,
 };
 use luminaria::gpu::{Cursor, SceneRenderer};
 use luminaria::protocol::{
     ActivationEvent, CompositorEvent, CoreGlobals, IdleInhibitEvent, IdleInhibitManager,
     IdleInhibitorId, IdleNotifier, KeyboardInteractivity, LayerShell, LayerSurfaceEvent,
-    PointerGestures, PopupEvent, SurfaceId, TextInputManager, Toplevel, ToplevelEvent, XdgShell,
-    XdgToplevelIconManager,
+    PointerGestures, PopupEvent, SurfaceId, TabletManager, TextInputManager, Toplevel,
+    ToplevelEvent, XdgShell, XdgToplevelIconManager,
 };
 use luminaria::shell::{
     InputRouter, LayerManager, OutputLayout, PopupTree, SceneHit, SceneItem, SceneKind,
@@ -56,6 +56,10 @@ pub struct Services<'a> {
     pub text_input: &'a TextInputManager<'a>,
     pub input_method: &'a InputMethodManager<'a>,
     pub toplevel_icons: &'a XdgToplevelIconManager<'a>,
+    pub virtual_keyboards: &'a VirtualKeyboardManager<'a>,
+    pub tablets: &'a TabletManager<'a>,
+    pub gamma: &'a GammaControlManager<'a>,
+    pub ctm: &'a CtmControlManager<'a>,
     pub layout: &'a OutputLayout,
     pub popups: &'a PopupTree,
     pub renderer: &'a SceneRenderer,
@@ -77,6 +81,9 @@ pub struct State<'a> {
     pub(crate) config_watch: Option<ConfigWatch<'a>>,
     pub(crate) ipc: Option<Ipc<'a>>,
     pub(crate) workspaces: Option<crate::workspaces::Workspaces<'a>>,
+    pub(crate) tablets: luminaria::protocol::TabletFeed,
+    /// Outputs whose gamma table size the protocol has been told.
+    pub(crate) gamma_sized: Vec<u64>,
     xwayland: Option<Xwayland<'a>>,
     pub(crate) lock: LockState,
     pub(crate) held: Option<Held>,
@@ -142,6 +149,8 @@ impl<'a> State<'a> {
             config_watch: None,
             ipc: None,
             workspaces: None,
+            tablets: Default::default(),
+            gamma_sized: Vec::new(),
             xwayland: None,
             lock: LockState::default(),
             held: None,
@@ -363,6 +372,10 @@ impl<'a> State<'a> {
             Event::InputMethod(_) | Event::TextInput(_) => self.dirty = true,
             // Subscribers of the IPC show window icons.
             Event::ToplevelIcon(_) => self.dirty = true,
+            Event::Gamma(event) => self.gamma(event),
+            Event::Ctm(event) => self.ctm(event),
+            // A constraint for the surface under a still pointer takes it now.
+            Event::PointerConstraint(_) => self.services.router.update_pointer(),
             Event::FdReady(tag @ (SOCKET_TAG | EXIT_TAG)) => {
                 if let Some(xwayland) = &mut self.xwayland {
                     if tag == SOCKET_TAG {
@@ -792,6 +805,9 @@ impl<'a> State<'a> {
             return;
         }
         let changed = self.dirty;
+        if changed {
+            self.sync_gamma_sizes();
+        }
         if self.dirty {
             self.configure_windows();
             self.sync_focus();

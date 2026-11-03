@@ -10,7 +10,9 @@ A scrolling-tiling Wayland compositor (niri-style) built on [luminaria](https://
 - **Visual effects**: Optional rounded corners (disabled by default), hollow borders, shadows, frosted glass blur, and window rules
 - **Floating windows**: Dialogs float automatically, toggled manually or assigned via window rules; drag by titlebar, `Mod+Left Click` to move, `Mod+Right Click` to resize
 - **Desktop protocols**: Screen lock (swaylock), screenshot/screen recording (grim, wf-recorder), idle notification (swayidle), status bars/panels, workspaces for pagers (ext-workspace-v1), taskbars and window lists (wlr-foreign-toplevel, ext-foreign-toplevel-list), output management (wlr-randr, kanshi), clipboard managers (wlr-data-control), window icons (xdg-toplevel-icon), color-management negotiation (sRGB), and xdg-activation
-- **Input methods**: fcitx5 and IBus through text-input-v3 and input-method-v2, with the candidate window under the text cursor; virtual keyboards and pointers (wayvnc, KDE Connect)
+- **Input methods**: fcitx5 and IBus through text-input-v3 and input-method-v2, with the candidate window under the text cursor; virtual keyboards with their own keymaps (wtype) and virtual pointers (wayvnc, KDE Connect)
+- **Games and drawing**: pointer lock and confinement with relative motion; graphics tablets (pens, erasers, pads)
+- **Night light**: wlsunset, gammastep and hyprsunset through wlr-gamma-control and hyprland-ctm-control on DRM outputs
 - **X11 applications**: Via [xwayland-satellite](https://github.com/Supreeeme/xwayland-satellite), starts on demand when the first X client connects; can be disabled with `[xwayland] enabled`
 - **Displays**: Fractional scaling (`scale = 1.5`), rotation, multi-output; clients render at their true scale
 - **Input**: Touchscreens (rotates with display, `touch-output` binds to a specific display); touchpad 3-finger horizontal swipe to pan, vertical swipe to switch workspaces, passes other gestures through to applications

@@ -4,6 +4,7 @@
 
 mod activation;
 mod capture;
+mod devices;
 mod foreign;
 mod lock;
 mod outputs;
@@ -41,6 +42,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1;
 static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
 
 pub use capture::Captured;
+pub use devices::Devices;
 pub use wallpaper::Pattern;
 use wallpaper::Wallpaper;
 
@@ -88,6 +90,16 @@ pub enum Command {
     Unlock,
     /// Window `.0` asks for a token, and uses it to activate window `.1`.
     Activate(usize, usize),
+    /// Lock the pointer to this window, and listen for relative motion.
+    LockPointer(usize),
+    /// Keep the pointer inside this window.
+    ConfinePointer(usize),
+    /// Bind the tablet seat, as a drawing program does.
+    WatchTablets,
+    /// Ask for the gamma control of the output, as wlsunset does.
+    AskGamma,
+    /// Type a key through a virtual keyboard with this keymap, as wtype does.
+    VirtualType(String, u32),
     Quit,
 }
 
@@ -127,6 +139,7 @@ pub struct Report {
     pub touch_ups: usize,
     /// The name of every head announced.
     pub heads: Vec<String>,
+    pub devices: Devices,
 }
 
 pub struct Client {
@@ -341,6 +354,14 @@ impl Client {
             .get(index)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub fn send(&self, command: Command) {
+        self.commands.send(command).expect("client alive");
+    }
+
+    pub fn devices(&self) -> Devices {
+        self.report.lock().expect("report").devices.clone()
     }
 
     pub fn keys(&self) -> Vec<u32> {
@@ -596,6 +617,11 @@ fn run(stream: UnixStream, commands: Receiver<Command>, report: Arc<Mutex<Report
                 Command::WatchWindows => app.watch_windows(),
                 Command::TaskbarActivate(index) => app.taskbar_activate(index),
                 Command::TaskbarClose(index) => app.taskbar_close(index),
+                Command::LockPointer(index) => app.lock_pointer(index),
+                Command::ConfinePointer(index) => app.confine_pointer(index),
+                Command::WatchTablets => app.watch_tablets(),
+                Command::AskGamma => app.ask_gamma(),
+                Command::VirtualType(keymap, key) => app.virtual_type(&keymap, key),
                 Command::Lock => app.lock(),
                 Command::Unlock => app.unlock(),
                 Command::Quit => return,
@@ -697,6 +723,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for App {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if let wl_keyboard::Event::Keymap { .. } = event {
+            app.keymap_arrived();
+        }
         if let wl_keyboard::Event::Key {
             key,
             state: WEnum::Value(state),

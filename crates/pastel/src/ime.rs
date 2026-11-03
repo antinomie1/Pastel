@@ -4,8 +4,10 @@
 //! Pastel's is the policy around it. While an input method (fcitx5, IBus) holds
 //! the keyboard grab, keys that are not Pastel's bindings go to it rather than to
 //! the focused window, and its candidate window is drawn under the text cursor.
-//! Keys it does not use come back through a virtual keyboard, read with the
-//! seat's keymap like real ones, which is what such input methods send.
+//! Keys it does not use come back through a virtual keyboard. Every virtual
+//! keyboard brings its own keymap (wtype makes one up for the keys it types):
+//! the seat switches to it while that keyboard types, and back for real keys,
+//! as sway does.
 //! Virtual pointers (wayvnc, KDE Connect) move and click like a mouse.
 
 use luminaria::backend::{InputEvent, Modifiers, PointerAxis};
@@ -48,16 +50,42 @@ impl State<'_> {
     }
 
     /// A key an input method or another tool typed: straight to the focused window.
+    /// Makes the seat read keys with `keyboard`'s keymap, remembering the real
+    /// one to go back to.
+    fn use_virtual_keymap(&mut self, keyboard: u64) {
+        let keymap = self.services.virtual_keyboards.keymap(keyboard);
+        let seat = self.services.globals.seat();
+        if keymap.is_empty() || keymap == seat.keymap() {
+            return;
+        }
+        if self.keyboard.physical_keymap.is_none() {
+            self.keyboard.physical_keymap = Some(seat.keymap());
+        }
+        seat.set_keymap(&keymap);
+        self.keyboard.virtual_keymap = KeymapState::from_text(&keymap).ok();
+    }
+
+    /// A real key after a virtual keyboard typed: the seat's own keymap again.
+    pub(crate) fn restore_physical_keymap(&mut self) {
+        if let Some(keymap) = self.keyboard.physical_keymap.take() {
+            self.services.globals.seat().set_keymap(&keymap);
+            self.keyboard.virtual_keymap = None;
+        }
+    }
+
     pub(crate) fn virtual_key(&mut self, event: VirtualKeyEvent) {
+        self.use_virtual_keymap(event.keyboard);
         if self.keyboard.base.is_none() {
             self.keyboard.base =
                 KeymapState::from_text(&self.services.globals.seat().keymap()).ok();
         }
-        let keysym = self
+        // Read with the keymap the seat now has: the keyboard's own, if it differs.
+        let reader = self
             .keyboard
-            .base
+            .virtual_keymap
             .as_ref()
-            .map_or(Keysym::new(0), |k| Keysym::new(k.keysym(event.key)));
+            .or(self.keyboard.base.as_ref());
+        let keysym = reader.map_or(Keysym::new(0), |k| Keysym::new(k.keysym(event.key)));
         self.services.router.route(&InputEvent::Key {
             key: event.key,
             pressed: event.pressed,
@@ -67,6 +95,7 @@ impl State<'_> {
     }
 
     pub(crate) fn virtual_modifiers(&mut self, event: VirtualModifiersEvent) {
+        self.use_virtual_keymap(event.keyboard);
         let modifiers = Modifiers {
             depressed: event.depressed,
             latched: event.latched,
