@@ -835,6 +835,11 @@ impl<'a> State<'a> {
             layers: &self.layers,
             popups: self.services.popups,
             outputs: &self.outputs,
+            layer_blur: self
+                .config
+                .window
+                .blur
+                .then_some(self.config.window.blur_xray),
         };
         let mut animating = self
             .composer

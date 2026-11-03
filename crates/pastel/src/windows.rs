@@ -72,6 +72,9 @@ pub struct SceneHost<'a, 's> {
     pub layers: &'a LayerManager,
     pub popups: &'a PopupTree,
     pub outputs: &'a [Output],
+    /// Layer surfaces may ask for blur behind regions of themselves
+    /// (ext-background-effect-v1): `Some(xray)` while blur is on.
+    pub layer_blur: Option<bool>,
 }
 
 impl Host for SceneHost<'_, '_> {
@@ -114,7 +117,14 @@ impl Host for SceneHost<'_, '_> {
     }
 
     fn layers(&self, monitor: u64, layer: Layer, items: &mut Vec<SceneItem>) {
+        let start = items.len();
         self.layers.append_to(items, monitor as u32, layer);
+        if let Some(xray) = self.layer_blur {
+            // A layer that declared no region blurs nothing and costs nothing.
+            for item in &mut items[start..] {
+                *item = item.with_surface_blur(xray);
+            }
+        }
     }
 
     fn popups(&self, items: &mut Vec<SceneItem>) {

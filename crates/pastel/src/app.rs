@@ -15,10 +15,10 @@ use luminaria::desktop::{
 
 use luminaria::gpu::{Cursor, SceneRenderer};
 use luminaria::protocol::{
-    ColorManager, ColorRepresentationManager, ColorSupport, CommitTimingManager, CoreGlobals,
-    DecorationMode, FifoManager, IdleInhibitManager, IdleNotifier, LayerShell, PointerConstraints,
-    PointerGestures, RelativePointerManager, TabletManager, TextInputManager, XdgActivation,
-    XdgToplevelIconManager,
+    BackgroundEffectManager, ColorManager, ColorRepresentationManager, ColorSupport,
+    CommitTimingManager, CoreGlobals, DecorationMode, FifoManager, IdleInhibitManager,
+    IdleNotifier, LayerShell, PointerConstraints, PointerGestures, RelativePointerManager,
+    TabletManager, TextInputManager, XdgActivation, XdgToplevelIconManager,
 };
 use luminaria::render::ScreencopyManager;
 use luminaria::shell::{InputRouter, OutputLayout, PopupTree, ScreenManager, ScreenOptions};
@@ -62,6 +62,8 @@ fn run_on<'d, R>(
     // SDL3 falls back to X11 on a compositor without fifo-v1, and any Vulkan client
     // paces better with it.
     let _fifo = FifoManager::new(display)?;
+    // Panels and docks ask for blur behind their translucent shapes.
+    let _background_effect = BackgroundEffectManager::new(display)?;
     let _commit_timing = CommitTimingManager::new(display)?;
     let _activation = XdgActivation::new(display)?;
     let locks = SessionLockManager::new(display)?;

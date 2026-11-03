@@ -96,6 +96,10 @@ Changing the wire types changes the protocol for Palettes too: update both.
   and named by position; the protocol can't rename or move one, so a workspace whose
   position or monitor changes is removed and announced again. Only `activate` is
   honoured. `crates/pastel/tests/workspaces.rs`.
+- ext-background-effect-v1: layer surfaces (panels, docks) declare blur regions; every
+  layer item gets `with_surface_blur` while `window.blur` is on (x-ray per `blur-xray`),
+  and luminaria blurs only the declared rectangles, nothing for a layer that declared
+  none. Windows keep whole-box blur by rule.
 - Input methods (`crates/pastel/src/ime.rs`): every key Pastel's bindings pass on goes
   through `State::route_key`, which hands it to an input method holding the grab.
   Keys it gives back arrive as `Event::VirtualKey`. Each virtual keyboard has its own
