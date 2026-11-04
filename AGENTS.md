@@ -93,7 +93,7 @@ Changing the wire types changes the protocol for Palettes too: update both.
 
 - ext-workspace-v1 (`crates/pastel/src/workspaces.rs`): one group per monitor on its
   `wl_output`, synced from dirty frames with the IPC. Pastel's workspaces are dynamic
-  and named by position; the protocol can't rename or move one, so a workspace whose
+  (or a fixed count per monitor with `[layout] workspaces`) and named by position; the protocol can't rename or move one, so a workspace whose
   position or monitor changes is removed and announced again. Only `activate` is
   honoured. `crates/pastel/tests/workspaces.rs`.
 - ext-background-effect-v1: layer surfaces (panels, docks) declare blur regions; every

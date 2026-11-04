@@ -12,6 +12,9 @@ use crate::action::Action;
 use crate::defaults;
 use crate::keys::{self, Binds, Combo};
 
+/// More fixed workspaces than anyone switches between by number.
+const MAX_WORKSPACES: usize = 32;
+
 /// An sRGB colour, each channel 0 to 1.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rgba {
@@ -268,6 +271,7 @@ struct RawLayout {
     default_width: f64,
     preset_widths: Vec<f64>,
     center_focus: String,
+    workspaces: usize,
 }
 
 impl Default for RawLayout {
@@ -279,6 +283,7 @@ impl Default for RawLayout {
             default_width: d.default_width,
             preset_widths: d.preset_widths,
             center_focus: "never".into(),
+            workspaces: d.workspaces,
         }
     }
 }
@@ -507,6 +512,9 @@ impl RawConfig {
             return Err("gap can't be negative".into());
         }
         fraction("default-width", self.layout.default_width)?;
+        if self.layout.workspaces > MAX_WORKSPACES {
+            return Err(format!("workspaces can be at most {MAX_WORKSPACES}"));
+        }
         for &width in &self.layout.preset_widths {
             fraction("preset-widths", width)?;
         }
@@ -560,6 +568,7 @@ impl RawConfig {
                 default_width: self.layout.default_width,
                 preset_widths,
                 center_focus,
+                workspaces: self.layout.workspaces,
             },
             window: WindowConfig {
                 corner_radius: w.corner_radius,

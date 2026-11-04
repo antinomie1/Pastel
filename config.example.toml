@@ -40,6 +40,7 @@ gap = 12.0
 default-width = 0.5                                    # of the screen
 preset-widths = [0.3333333333333333, 0.5, 0.6666666666666666]    # what Mod+R cycles
 center-focus = "never"                                 # "always", "on-overflow"
+workspaces = 0             # per monitor: 0 is dynamic, one spare at the bottom; 9 is dwm's tags
 
 [window]
 corner-radius = 0.0

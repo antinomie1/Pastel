@@ -91,7 +91,7 @@ pub struct Output {
 }
 
 /// A workspace. Pastel keeps exactly one empty workspace at the bottom of each
-/// monitor.
+/// monitor, or with `[layout] workspaces = N` always the first N, empty or not.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
     /// Stable for the workspace's life, unlike its index.

@@ -5,7 +5,7 @@ English | [简体中文](README.zh-CN.md)
 A scrolling-tiling Wayland compositor (niri-style) built on [luminaria](https://github.com/antinomie1/luminaria), written in Rust 2024.
 
 - **Native Vulkan 1.3 backend**: Built on luminaria's native Vulkan 1.3 backend
-- **Scrolling tiling**: Columns, stacking within columns, preset widths, maximize, center, dynamic workspaces, and multi-monitor support
+- **Scrolling tiling**: Columns, stacking within columns, preset widths, maximize, center, dynamic or fixed workspaces (`workspaces = 9`, as dwm's tags), and multi-monitor support
 - **Animations**: Spring and ease curves with in-flight retargeting preserving momentum; covers window open/close, movement, workspace switching, focus color transitions, and overlay
 - **Visual effects**: Optional rounded corners (disabled by default), hollow borders, shadows, frosted glass blur, and window rules
 - **Floating windows**: Dialogs float automatically, toggled manually or assigned via window rules; drag by titlebar, `Mod+Left Click` to move, `Mod+Right Click` to resize

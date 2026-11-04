@@ -2,6 +2,8 @@
 //!
 //! Workspaces are dynamic as in niri: there is always exactly one empty workspace
 //! at the bottom, and an empty workspace disappears once it stops being looked at.
+//! With [`LayoutOptions::workspaces`] set, every monitor instead keeps that many,
+//! empty or not, as dwm's tags; only workspaces past them come and go.
 
 use pastel_core::{Direction, Rect};
 
@@ -116,20 +118,17 @@ impl Monitor {
     }
 
     /// Hold the invariants: the last workspace, and only the last, is empty,
-    /// unless it is the one being looked at.
-    fn normalize(&mut self, new_workspace: &mut impl FnMut() -> Workspace) {
-        let mut index = 0;
-        while index + 1 < self.workspaces.len() {
-            if index != self.active && self.workspaces[index].is_empty() {
-                self.workspaces.remove(index);
-                if index < self.active {
-                    self.active -= 1;
-                    self.view_shift -= 1.0;
-                }
-            } else {
-                index += 1;
+    /// unless it is the one being looked at. With `fixed` workspaces, the first
+    /// `fixed` always exist and only empty ones past them, unlooked at, go.
+    fn normalize(&mut self, fixed: usize, new_workspace: &mut impl FnMut() -> Workspace) {
+        if fixed > 0 {
+            self.drop_empty(fixed, self.workspaces.len());
+            while self.workspaces.len() < fixed {
+                self.workspaces.push(new_workspace());
             }
+            return;
         }
+        self.drop_empty(0, self.workspaces.len().saturating_sub(1));
         // All that can be left of a double empty: the active one above the spare.
         let n = self.workspaces.len();
         if n >= 2
@@ -141,6 +140,24 @@ impl Monitor {
         }
         if !self.workspaces.last().is_some_and(Workspace::is_empty) {
             self.workspaces.push(new_workspace());
+        }
+    }
+
+    /// Removes the empty workspaces from `from` up to before `to` (counted
+    /// before removing), except the one being looked at.
+    fn drop_empty(&mut self, from: usize, to: usize) {
+        let (mut index, mut left) = (from, to.saturating_sub(from));
+        while left > 0 && index < self.workspaces.len() {
+            left -= 1;
+            if index != self.active && self.workspaces[index].is_empty() {
+                self.workspaces.remove(index);
+                if index < self.active {
+                    self.active -= 1;
+                    self.view_shift -= 1.0;
+                }
+            } else {
+                index += 1;
+            }
         }
     }
 }
@@ -195,7 +212,13 @@ impl Desktop {
         if create(&options).is_none() {
             return false;
         }
+        let recount = options.workspaces != self.options.workspaces;
         self.options = options;
+        if recount {
+            for index in 0..self.monitors.len() {
+                self.normalize(index);
+            }
+        }
         true
     }
 
@@ -221,7 +244,8 @@ impl Desktop {
         } = self;
         let monitor = &mut monitors[index];
         let area = monitor.usable;
-        monitor.normalize(&mut || Self::new_workspace(options, next_workspace, area));
+        let fixed = options.workspaces;
+        monitor.normalize(fixed, &mut || Self::new_workspace(options, next_workspace, area));
     }
 
     pub fn monitors(&self) -> &[Monitor] {
@@ -267,7 +291,10 @@ impl Desktop {
         let occupied = monitor.workspaces.into_iter().filter(|w| !w.is_empty());
         match self.monitors.first_mut() {
             Some(first) => {
-                let at = first.workspaces.len() - 1; // above the empty one
+                // Above the spare empty one; after the fixed ones, which keep
+                // their numbers.
+                let spare = usize::from(self.options.workspaces == 0);
+                let at = first.workspaces.len() - spare;
                 let area = first.usable;
                 let (dx, dy) = (first.rect.x - origin.0, first.rect.y - origin.1);
                 let mut adopted: Vec<Workspace> = occupied.collect();

@@ -396,3 +396,12 @@ fn keyboard_and_xwayland_have_defaults_and_can_be_set() {
     assert_eq!(config.input.keymap.options, "ctrl:nocaps");
     assert!(!config.xwayland.enabled);
 }
+
+#[test]
+fn fixed_workspaces_are_counted_and_bounded() {
+    assert_eq!(Config::parse("").unwrap().layout.workspaces, 0, "dynamic by default");
+    let nine = Config::parse("[layout]\nworkspaces = 9").expect("nine parses");
+    assert_eq!(nine.layout.workspaces, 9);
+    assert!(Config::parse("[layout]\nworkspaces = 33").is_err());
+    assert!(Config::parse("[layout]\nworkspaces = -1").is_err());
+}

@@ -129,6 +129,8 @@ pub struct LayoutOptions {
     /// What [`LayoutOp::CycleWidth`] steps through.
     pub preset_widths: Vec<f64>,
     pub center_focus: CenterFocus,
+    /// Workspaces every monitor always has, as dwm's tags; 0 keeps them dynamic.
+    pub workspaces: usize,
 }
 
 impl Default for LayoutOptions {
@@ -139,6 +141,7 @@ impl Default for LayoutOptions {
             default_width: 0.5,
             preset_widths: vec![1.0 / 3.0, 0.5, 2.0 / 3.0],
             center_focus: CenterFocus::Never,
+            workspaces: 0,
         }
     }
 }
