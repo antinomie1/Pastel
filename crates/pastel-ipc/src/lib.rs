@@ -73,6 +73,10 @@ pub struct State {
     pub workspaces: Vec<Workspace>,
     /// Mapped windows, by workspace.
     pub windows: Vec<Window>,
+    /// The active keyboard layout's name, such as `English (US)`; empty
+    /// when unknown.
+    #[serde(default)]
+    pub keyboard_layout: String,
 }
 
 /// A monitor.

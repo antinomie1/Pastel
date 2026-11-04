@@ -61,6 +61,31 @@ pub struct Keyboard {
     buttons: u32,
     /// The press that started a drag was ours, so its release is too.
     drag_button: Option<u32>,
+    /// The active layout, as xkb's group.
+    pub(crate) group: u32,
+    /// The keymap's layout names, read when first asked for after a change.
+    pub(crate) layouts: std::cell::RefCell<Option<Vec<String>>>,
+}
+
+/// The layout names of an xkb keymap's text, in group order: its symbols'
+/// `name[GroupN]="..."` lines.
+pub fn layout_names(keymap: &str) -> Vec<String> {
+    let Some(start) = keymap.find("xkb_symbols") else {
+        return Vec::new();
+    };
+    let mut names: Vec<(usize, String)> = keymap[start..]
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim().strip_prefix("name[")?;
+            let (group, rest) = line.split_once(']')?;
+            let digits = group.trim_start_matches(|c: char| !c.is_ascii_digit());
+            let (_, quoted) = rest.split_once('"')?;
+            let (name, _) = quoted.rsplit_once('"')?;
+            Some((digits.parse().ok()?, name.to_owned()))
+        })
+        .collect();
+    names.sort_by_key(|(group, _)| *group);
+    names.into_iter().map(|(_, name)| name).collect()
 }
 
 impl Keyboard {
@@ -86,6 +111,8 @@ impl Keyboard {
             pan: None,
             buttons: 0,
             drag_button: None,
+            group: 0,
+            layouts: Default::default(),
         }
     }
 
@@ -116,6 +143,30 @@ impl Keyboard {
 }
 
 impl State<'_> {
+    /// Another layout became active: shells show it.
+    fn layout_group(&mut self, group: u32) {
+        if self.keyboard.group != group {
+            self.keyboard.group = group;
+            self.publish_ipc();
+        }
+    }
+
+    /// The active layout's name.
+    pub fn keyboard_layout(&self) -> String {
+        let mut layouts = self.keyboard.layouts.borrow_mut();
+        let names = layouts.get_or_insert_with(|| {
+            let keymap = (self.keyboard.physical_keymap.clone())
+                .unwrap_or_else(|| self.services.globals.seat().keymap());
+            layout_names(&keymap)
+        });
+        let group = self.keyboard.group as usize;
+        names
+            .get(group)
+            .or(names.first())
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub fn input(&mut self, event: InputEvent) {
         self.services.idle.notify_activity();
         if let InputEvent::Button { pressed, .. } = event {
@@ -146,11 +197,19 @@ impl State<'_> {
             } => {
                 self.restore_physical_keymap();
                 self.keyboard.mods = modifiers.held();
+                self.layout_group(modifiers.group);
                 self.key(&event, key, pressed, keysym, modifiers);
                 return;
             }
-            InputEvent::Modifiers(modifiers) => self.keyboard.mods = modifiers.held(),
-            InputEvent::KeymapChange(_) => self.keyboard.base = None,
+            InputEvent::Modifiers(modifiers) => {
+                self.keyboard.mods = modifiers.held();
+                self.layout_group(modifiers.group);
+            }
+            InputEvent::KeymapChange(_) => {
+                self.keyboard.base = None;
+                self.keyboard.layouts.replace(None);
+                self.publish_ipc();
+            }
             InputEvent::Motion { dx, .. } => self.pan_by(dx),
             InputEvent::MotionAbsolute { x, .. } => {
                 if let Some(last) = self.keyboard.pan {

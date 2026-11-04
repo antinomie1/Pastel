@@ -68,6 +68,10 @@ fn a_bar_follows_the_desktop_and_drives_it() {
         let first = pump(state, "the first state", &|s| !s.workspaces.is_empty());
         assert_eq!(first.outputs.len(), 1);
         assert!(first.workspaces[0].focused);
+        assert!(
+            !first.keyboard_layout.is_empty(),
+            "the keyboard layout is named"
+        );
 
         let client = Client::connect(state.socket());
         client.open("one", 0xffd05050);
@@ -107,4 +111,21 @@ fn a_bar_follows_the_desktop_and_drives_it() {
         Ok(())
     })
     .expect("compositor runs");
+}
+
+#[test]
+fn layout_names_come_from_the_symbols_in_group_order() {
+    let keymap = r#"xkb_keymap {
+xkb_types "complete" { level_name[Level1] = "Base"; };
+xkb_symbols "pc+us+ru:2" {
+    name[Group2]="Russian";
+    name[Group1]="English (US)";
+    key <AE01> { [ 1, exclam ] };
+};
+};"#;
+    assert_eq!(
+        pastel::input::layout_names(keymap),
+        ["English (US)", "Russian"]
+    );
+    assert!(pastel::input::layout_names("").is_empty());
 }

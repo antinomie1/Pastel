@@ -248,7 +248,10 @@ impl State<'_> {
 
     /// The desktop as the protocol describes it.
     pub fn snapshot(&self) -> Snapshot {
-        let mut state = Snapshot::default();
+        let mut state = Snapshot {
+            keyboard_layout: self.keyboard_layout(),
+            ..Snapshot::default()
+        };
         let focused_monitor = self.desktop.focused_monitor().map(|m| m.id);
         let focused_window = self
             .desktop

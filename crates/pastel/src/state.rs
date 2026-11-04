@@ -285,6 +285,7 @@ impl<'a> State<'a> {
         self.services.backend.set_keymap(&text);
         self.services.globals.seat().set_keymap(&text);
         self.keyboard.forget_base();
+        self.keyboard.layouts.replace(None);
     }
 
     pub fn autostart(&self) {
