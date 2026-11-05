@@ -225,3 +225,21 @@ fn blur_follows_a_wallpaper_that_comes_and_goes() {
         assert!(gone[0] < 80 && gone[2] > gone[0], "back to it: {gone:?}");
     });
 }
+
+/// The hotkey overlay floats over windows, so x-ray (wallpaper only) would blur
+/// the wrong thing: whatever windows use, its blur is real.
+#[test]
+fn the_hotkey_overlay_blurs_the_windows_behind_it() {
+    scenario("[window]\nblur-xray = true", |state, display, client| {
+        client.open("behind", RED);
+        at_rest(state, display, 1);
+        let panel = state.scene.iter().find(|i| i.kind == SceneKind::Image);
+        let Some(panel) = panel else {
+            eprintln!("skipped: no font for the overlay");
+            return;
+        };
+        assert!(panel.blur_enabled && !panel.blur_xray, "real blur");
+        let window = state.scene.iter().rfind(|i| i.kind == SceneKind::Surface);
+        assert!(window.expect("the window").blur_xray, "windows keep x-ray");
+    });
+}

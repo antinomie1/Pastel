@@ -52,6 +52,7 @@ shadow-size = 20.0
 opacity = 1.0
 blur = true                # visible behind translucent windows
 blur-xray = true           # blur only the wallpaper: much cheaper, ignores windows behind
+                           # (the hotkey overlay always blurs what is behind it)
 
 [animation]
 enabled = true
