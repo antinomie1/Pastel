@@ -38,6 +38,7 @@ use wayland_protocols::wp::idle_inhibit::zv1::client::{
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1;
+pub use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer;
 
 static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
 
@@ -66,7 +67,7 @@ pub enum Command {
     /// New pixels in the same `wl_buffer`, as a terminal reusing its shm does.
     Repaint(usize, u32),
     /// Quit any wallpaper client and start a new one with this picture.
-    Wallpaper(Pattern),
+    Wallpaper(Pattern, Layer),
     /// Quit the wallpaper client.
     NoWallpaper,
     /// Ask something of the only output, as wlr-randr does.
@@ -223,7 +224,14 @@ impl Client {
     /// What `swaybg -i ...` does, as a kill and a restart is how it changes.
     pub fn wallpaper(&self, pattern: Pattern) {
         self.commands
-            .send(Command::Wallpaper(pattern))
+            .send(Command::Wallpaper(pattern, Layer::Background))
+            .expect("client alive");
+    }
+
+    /// The same full-screen surface on another layer, as a launcher or a popup.
+    pub fn layer_surface(&self, pattern: Pattern, layer: Layer) {
+        self.commands
+            .send(Command::Wallpaper(pattern, layer))
             .expect("client alive");
     }
 
@@ -606,7 +614,7 @@ fn run(stream: UnixStream, commands: Receiver<Command>, report: Arc<Mutex<Report
                 }
                 Command::Close(index) => app.close(index),
                 Command::Repaint(index, argb) => app.repaint(index, argb),
-                Command::Wallpaper(pattern) => app.start_wallpaper(pattern),
+                Command::Wallpaper(pattern, layer) => app.start_wallpaper(pattern, layer),
                 Command::NoWallpaper => app.stop_wallpaper(),
                 Command::Activate(from, target) => app.activate(from, target),
                 Command::Randr(ask) => app.randr(ask),

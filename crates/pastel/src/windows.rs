@@ -120,6 +120,9 @@ impl Host for SceneHost<'_, '_> {
         let start = items.len();
         self.layers.append_to(items, monitor as u32, layer);
         if let Some(xray) = self.layer_blur {
+            // X-ray sees only the wallpaper: right below the windows, wrong for a
+            // panel or popup drawn over them.
+            let xray = xray && matches!(layer, Layer::Background | Layer::Bottom);
             // A layer that declared no region blurs nothing and costs nothing.
             for item in &mut items[start..] {
                 *item = item.with_surface_blur(xray);

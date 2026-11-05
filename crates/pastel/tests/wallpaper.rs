@@ -8,7 +8,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{Client, Pattern};
+use common::{Client, Layer, Pattern};
 use luminaria::backend::{BackendKind, BackendOptions, HeadlessBackend, Output};
 use luminaria::core::Display;
 use luminaria::shell::SceneKind;
@@ -241,5 +241,28 @@ fn the_hotkey_overlay_blurs_the_windows_behind_it() {
         assert!(panel.blur_enabled && !panel.blur_xray, "real blur");
         let window = state.scene.iter().rfind(|i| i.kind == SceneKind::Surface);
         assert!(window.expect("the window").blur_xray, "windows keep x-ray");
+    });
+}
+
+/// Panels and popups are drawn over windows, so x-ray (wallpaper only) is for the
+/// layers below them.
+#[test]
+fn layers_over_windows_blur_what_is_behind_them() {
+    let blur_of = |state: &State<'_>| {
+        let item = state.scene.iter().find(|i| i.kind == SceneKind::Surface);
+        let item = item.expect("the layer surface");
+        assert!(item.blur_surface_regions, "blurs what it declares");
+        item.blur_xray
+    };
+    scenario(NO_OVERLAY, |state, display, client| {
+        client.layer_surface(STRIPES, Layer::Overlay);
+        at_rest(state, display, 1);
+        assert!(!blur_of(state), "an overlay popup gets real blur");
+        client.layer_surface(STRIPES, Layer::Top);
+        at_rest(state, display, 1);
+        assert!(!blur_of(state), "so does a panel");
+        client.wallpaper(STRIPES);
+        at_rest(state, display, 1);
+        assert!(blur_of(state), "a wallpaper keeps x-ray");
     });
 }

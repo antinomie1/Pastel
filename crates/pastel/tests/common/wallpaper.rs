@@ -43,7 +43,7 @@ pub struct Wallpaper {
 }
 
 impl App {
-    pub(super) fn start_wallpaper(&mut self, pattern: Pattern) {
+    pub(super) fn start_wallpaper(&mut self, pattern: Pattern, on: zwlr_layer_shell_v1::Layer) {
         self.stop_wallpaper();
         use zwlr_layer_surface_v1::Anchor;
         let qh = self.qh.clone();
@@ -65,7 +65,7 @@ impl App {
             let layer = shell.get_layer_surface(
                 &surface,
                 Some(&output),
-                zwlr_layer_shell_v1::Layer::Background,
+                on,
                 "wallpaper".into(),
                 &qh,
                 index,
