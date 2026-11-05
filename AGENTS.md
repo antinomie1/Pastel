@@ -99,9 +99,9 @@ Changing the wire types changes the protocol for Palettes too: update both.
 - ext-background-effect-v1: layer surfaces (panels, docks) declare blur regions; every
   layer item gets `with_surface_blur` while `window.blur` is on, and luminaria blurs
   only the declared rectangles, nothing for a layer that declared none. `blur-xray`
-  applies to the background and bottom layers only: top, overlay and the hotkey
-  overlay sit over windows and always blur for real. Windows keep whole-box blur by
-  rule.
+  applies to the background and bottom layers and to tiled windows only: top,
+  overlay, floating windows and the hotkey overlay sit over windows and always blur
+  for real (`WindowFrame::floating`). Windows keep whole-box blur by rule.
 - Input methods (`crates/pastel/src/ime.rs`): every key Pastel's bindings pass on goes
   through `State::route_key`, which hands it to an input method holding the grab.
   Keys it gives back arrive as `Event::VirtualKey`. Each virtual keyboard has its own

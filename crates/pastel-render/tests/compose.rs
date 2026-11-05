@@ -478,6 +478,7 @@ fn the_pipeline_runs_custom_effects_in_order() {
         focus: 1.0,
         rule: ResolvedRule::default(),
         fullscreen: false,
+        floating: false,
     };
     let mut items = Vec::new();
     pipeline.below(&frame, &mut items);
@@ -519,4 +520,23 @@ fn a_closed_window_with_none_left_is_a_pane() {
         .close(A, ResolvedRule::default(), false, LATER);
     world.compose(LATER + 0.05);
     assert!(world.items.iter().all(|i| i.kind != SceneKind::Retained));
+}
+
+/// X-ray sees only the wallpaper, so it's for tiles: a floating window is over
+/// other windows and its blur has to see them.
+#[test]
+fn a_floating_window_blurs_the_windows_under_it() {
+    let mut world = World::new("[window]\nblur-xray = true");
+    world.add(A);
+    world.add(B);
+    assert!(world.desktop.set_floating(B, true));
+    world.compose(0.0);
+    world.compose(LATER);
+    let tile = world.window(A).expect("tile drawn");
+    let floating = world.window(B).expect("floating window drawn");
+    assert!(tile.blur_enabled && tile.blur_xray, "a tile keeps x-ray");
+    assert!(
+        floating.blur_enabled && !floating.blur_xray,
+        "a floating window blurs for real"
+    );
 }

@@ -6,7 +6,7 @@ use std::rc::Rc;
 use luminaria::shell::SceneItem;
 use luminaria::text::Font;
 use luminaria::util::{Color, Keysym};
-use pastel_config::{Config, OverlayRow, ResolvedRule, Rgba, Section, WindowConfig};
+use pastel_config::{Config, OverlayRow, ResolvedRule, Rgba, Section};
 use pastel_core::{Anim, Curve, Rect};
 use pastel_layout::WindowId;
 
@@ -63,7 +63,7 @@ impl HotkeyOverlay {
                 font: config.overlay.font.clone(),
                 accent: config.window.active_color,
             },
-            pipeline: pipeline(&config.window),
+            pipeline: Pipeline::from_config(&config.window),
             rows: config.binds.overlay_rows(mod_key),
             raster: None,
             raster_scale: 1,
@@ -78,7 +78,7 @@ impl HotkeyOverlay {
             font: config.overlay.font.clone(),
             accent: config.window.active_color,
         };
-        self.pipeline = pipeline(&config.window);
+        self.pipeline = Pipeline::from_config(&config.window);
         self.rows = config.binds.overlay_rows(mod_key);
         self.raster = None;
         self.failed = false;
@@ -162,16 +162,6 @@ impl HotkeyOverlay {
         }
         Some((Raster { width, height }, canvas))
     }
-}
-
-/// The windows' look, except that the blur is always real: x-ray samples only the
-/// wallpaper, which is right for tiles that never overlap but not for a panel
-/// floating over them.
-fn pipeline(window: &WindowConfig) -> Pipeline {
-    Pipeline::from_config(&WindowConfig {
-        blur_xray: false,
-        ..*window
-    })
 }
 
 type Group<'a> = (Section, &'a [OverlayRow]);
@@ -277,6 +267,8 @@ impl Overlay for HotkeyOverlay {
                 ..ResolvedRule::default()
             },
             fullscreen: false,
+            // Over the windows, so its blur has to see them.
+            floating: true,
         };
         let start = items.len();
         self.pipeline.below(&frame, items);

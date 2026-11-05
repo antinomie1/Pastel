@@ -52,8 +52,8 @@ shadow-size = 20.0
 opacity = 1.0
 blur = true                # visible behind translucent windows
 blur-xray = true           # blur only the wallpaper: much cheaper, ignores windows behind
-                           # (layer surfaces over windows and the hotkey overlay always
-                           # blur what is behind them)
+                           # (floating windows, layer surfaces over windows and the
+                           # hotkey overlay always blur what is behind them)
 
 [animation]
 enabled = true

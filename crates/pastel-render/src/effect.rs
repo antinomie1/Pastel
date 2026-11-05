@@ -21,6 +21,8 @@ pub struct WindowFrame {
     pub focus: f32,
     pub rule: ResolvedRule,
     pub fullscreen: bool,
+    /// Above the layout, over other windows.
+    pub floating: bool,
 }
 
 /// The extension point for window appearance. Implement either or both, then add
@@ -105,6 +107,8 @@ impl Effect for Opacity {
     }
 }
 
+/// X-ray samples only the wallpaper: right for tiles, which never overlap, wrong
+/// for anything floating over them.
 struct Blur {
     enabled: bool,
     xray: bool,
@@ -113,7 +117,8 @@ struct Blur {
 impl Effect for Blur {
     fn style(&self, window: &WindowFrame, item: &mut SceneItem) {
         if !window.fullscreen && window.rule.blur.unwrap_or(self.enabled) {
-            *item = item.with_blur(self.xray).with_blur_opacity(window.alpha);
+            let xray = self.xray && !window.floating;
+            *item = item.with_blur(xray).with_blur_opacity(window.alpha);
         }
     }
 }

@@ -51,6 +51,7 @@ struct Visual {
     shown: bool,
     /// The window's part of its surface, for when the surface has gone.
     crop: (f32, f32, f32, f32),
+    floating: bool,
 }
 
 /// A closed window on its way out: its last pixels, if luminaria kept them, and a
@@ -61,6 +62,7 @@ struct Ghost {
     fade: Anim,
     rule: ResolvedRule,
     crop: Option<(f32, f32, f32, f32)>,
+    floating: bool,
 }
 
 struct Curves {
@@ -138,6 +140,7 @@ impl Composer {
             fade,
             rule,
             crop: pixels.then_some(visual.crop),
+            floating: visual.floating,
         });
     }
 
@@ -241,6 +244,7 @@ impl Composer {
             animating |= visual.rect.tick(now) | visual.open.tick(now) | visual.focus.tick(now);
             visual.shown = visible;
             visual.crop = host.crop(placement.id);
+            visual.floating = placement.floating;
             if !visible {
                 continue;
             }
@@ -256,6 +260,7 @@ impl Composer {
                 focus: visual.focus.value(now).clamp(0.0, 1.0) as f32,
                 rule: host.rule(placement.id),
                 fullscreen: placement.fullscreen,
+                floating: placement.floating,
             };
             self.draw_window(&frame, monitor, only_on, host, items);
         }
@@ -275,6 +280,7 @@ impl Composer {
                 focus: Anim::new(focus, curves.focus.clone()),
                 shown: false,
                 crop: (0.0, 0.0, 1.0, 1.0),
+                floating: placement.floating,
             }
         })
     }
@@ -334,6 +340,7 @@ impl Composer {
                 focus: 0.0,
                 rule: ghost.rule,
                 fullscreen: false,
+                floating: ghost.floating,
             };
             let start = items.len();
             self.pipeline.below(&frame, items);
