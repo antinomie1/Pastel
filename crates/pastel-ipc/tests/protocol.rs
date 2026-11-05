@@ -36,7 +36,11 @@ fn client_requests_and_subscribes() {
             output: "DP-1".into(),
             active: true,
             focused: true,
-            windows: 0,
+            windows: 2,
+            layout: "scrolling".into(),
+            columns: 2,
+            column: 1,
+            maximized: false,
         }],
         ..State::default()
     };
@@ -74,4 +78,11 @@ fn client_requests_and_subscribes() {
     assert_eq!(states.len(), 2);
     assert_eq!(states[1].as_ref().unwrap(), &state);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_workspace_from_before_layouts_were_reported_still_decodes() {
+    let old = r#"{"id":1,"index":1,"output":"DP-1","active":true,"focused":true,"windows":0}"#;
+    let workspace: Workspace = decode(old).unwrap();
+    assert_eq!((workspace.layout.as_str(), workspace.column), ("", 0));
 }

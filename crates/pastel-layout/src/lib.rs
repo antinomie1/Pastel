@@ -70,6 +70,18 @@ pub enum LayoutOp {
     Scroll(f64),
 }
 
+/// Where the focus sits in a layout, for a bar to show as dwm shows its
+/// layout symbol: which of how many columns, and whether it fills the area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Overview {
+    /// Columns (or slots) the layout arranges.
+    pub columns: usize,
+    /// The focused one, from 0; `None` when empty.
+    pub focused: Option<usize>,
+    /// The focused one fills the working area.
+    pub maximized: bool,
+}
+
 /// One workspace's arrangement of windows. The extension point for tiling
 /// behaviour: implement this, add it to [`create`], and `layout = "name"` works.
 pub trait Layout {
@@ -96,6 +108,9 @@ pub trait Layout {
 
     /// False if it is not here.
     fn focus(&mut self, id: WindowId) -> bool;
+
+    /// Where the focus sits, for bars.
+    fn overview(&self) -> Overview;
 
     /// False if nothing changed: an edge was hit, or the op means nothing here.
     fn apply(&mut self, op: LayoutOp) -> bool;

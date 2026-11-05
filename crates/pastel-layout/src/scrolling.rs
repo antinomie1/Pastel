@@ -4,7 +4,9 @@
 
 use pastel_core::{Direction, Rect};
 
-use crate::{CenterFocus, Layout, LayoutOp, LayoutOptions, Placement, WindowHint, WindowId};
+use crate::{
+    CenterFocus, Layout, LayoutOp, LayoutOptions, Overview, Placement, WindowHint, WindowId,
+};
 
 const MIN_WIDTH: f64 = 0.1;
 const MAX_WIDTH: f64 = 1.0;
@@ -246,6 +248,15 @@ impl Scrolling {
 impl Layout for Scrolling {
     fn name(&self) -> &'static str {
         "scrolling"
+    }
+
+    fn overview(&self) -> Overview {
+        let focused = (!self.columns.is_empty()).then_some(self.active);
+        Overview {
+            columns: self.columns.len(),
+            focused,
+            maximized: focused.is_some_and(|i| self.columns[i].maximized),
+        }
     }
 
     fn set_area(&mut self, area: Rect) {

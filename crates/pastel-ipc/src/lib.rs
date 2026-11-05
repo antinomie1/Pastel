@@ -122,6 +122,18 @@ pub struct Workspace {
     pub focused: bool,
     /// How many windows it holds.
     pub windows: u32,
+    /// Its layout's name, as `[layout] type` writes it: `scrolling`.
+    #[serde(default)]
+    pub layout: String,
+    /// Columns its layout arranges, floating windows aside.
+    #[serde(default)]
+    pub columns: u32,
+    /// The focused column, from 1; 0 when there is none.
+    #[serde(default)]
+    pub column: u32,
+    /// The focused column fills the working area.
+    #[serde(default)]
+    pub maximized: bool,
 }
 
 /// A mapped toplevel window.

@@ -1,6 +1,6 @@
 use pastel_layout::{
-    CenterFocus, Direction::*, Layout, LayoutOp, LayoutOptions, Placement, Rect, Scrolling,
-    WindowHint, WindowId,
+    CenterFocus, Direction::*, Layout, LayoutOp, LayoutOptions, Overview, Placement, Rect,
+    Scrolling, WindowHint, WindowId,
 };
 
 const W: WindowId = WindowId(1);
@@ -327,4 +327,33 @@ fn degenerate_areas_stay_finite_and_positive() {
     for p in places(&layout) {
         assert!(p.rect.w >= 1.0 && p.rect.h >= 1.0 && p.rect.x.is_finite());
     }
+}
+
+#[test]
+fn the_overview_follows_the_focused_column() {
+    assert_eq!(
+        layout_with(0, CenterFocus::Never).overview(),
+        Overview::default()
+    );
+    let mut layout = layout_with(3, CenterFocus::Never);
+    let overview = |l: &Scrolling| l.overview();
+    assert_eq!(
+        overview(&layout),
+        Overview {
+            columns: 3,
+            focused: Some(2),
+            maximized: false
+        },
+        "a new window takes a column and the focus"
+    );
+    assert!(layout.apply(LayoutOp::Focus(Left)));
+    assert!(layout.apply(LayoutOp::ToggleMaximize));
+    assert_eq!(
+        overview(&layout),
+        Overview {
+            columns: 3,
+            focused: Some(1),
+            maximized: true
+        }
+    );
 }

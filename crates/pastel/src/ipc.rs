@@ -303,6 +303,7 @@ impl State<'_> {
                         fullscreen: workspace.fullscreen == Some(id),
                     });
                 }
+                let overview = workspace.layout.overview();
                 state.workspaces.push(pastel_ipc::Workspace {
                     id: workspace.id,
                     index: index as u32 + 1,
@@ -310,6 +311,10 @@ impl State<'_> {
                     active,
                     focused: active && Some(monitor.id) == focused_monitor,
                     windows: count,
+                    layout: workspace.layout.name().into(),
+                    columns: overview.columns as u32,
+                    column: overview.focused.map_or(0, |i| i as u32 + 1),
+                    maximized: overview.maximized,
                 });
             }
         }
