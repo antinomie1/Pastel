@@ -72,6 +72,8 @@ fn a_bar_follows_the_desktop_and_drives_it() {
             !first.keyboard_layout.is_empty(),
             "the keyboard layout is named"
         );
+        assert_eq!(first.colors.active, "#a6c8ffff", "the config's colors");
+        assert_eq!(first.colors.background, "#1e2028ff");
 
         let client = Client::connect(state.socket());
         client.open("one", 0xffd05050);

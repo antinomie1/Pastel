@@ -77,6 +77,22 @@ pub struct State {
     /// when unknown.
     #[serde(default)]
     pub keyboard_layout: String,
+    /// The colors Pastel draws with, so a shell can match them.
+    #[serde(default)]
+    pub colors: Colors,
+}
+
+/// The config's colors as `#rrggbbaa`; they follow it when it reloads.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Colors {
+    /// Shown where nothing covers the screen.
+    pub background: String,
+    /// The focused window's border.
+    pub active: String,
+    /// Other windows' borders.
+    pub inactive: String,
+    /// Window shadows.
+    pub shadow: String,
 }
 
 /// A monitor.

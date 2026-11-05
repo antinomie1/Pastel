@@ -566,6 +566,18 @@ fn the_keyboard_layout_comes_from_the_config_and_reloads() {
     });
 }
 
+#[test]
+fn ipc_colors_follow_the_config() {
+    reloadable("[window]\nactive-color = \"#ff0000\"", |state, _, write| {
+        assert_eq!(state.snapshot().colors.active, "#ff0000ff");
+        write("background = \"#10203080\"");
+        state.reload_config();
+        let colors = state.snapshot().colors;
+        assert_eq!(colors.background, "#10203080");
+        assert_eq!(colors.active, "#a6c8ffff", "back to the default");
+    });
+}
+
 fn window_id_unknown(state: &State<'_>) -> bool {
     !state.windows.contains(WindowId(0)) && window_count(state) == 0
 }

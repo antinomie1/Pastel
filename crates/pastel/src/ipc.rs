@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use luminaria::core::{Display, FdWatch};
-use pastel_config::Action;
+use pastel_config::{Action, Rgba};
 use pastel_ipc::{Reply, Request, State as Snapshot};
 use pastel_layout::{Desktop, WindowId, WorkspaceTarget};
 
@@ -250,6 +250,12 @@ impl State<'_> {
     pub fn snapshot(&self) -> Snapshot {
         let mut state = Snapshot {
             keyboard_layout: self.keyboard_layout(),
+            colors: pastel_ipc::Colors {
+                background: hex(self.config.background),
+                active: hex(self.config.window.active_color),
+                inactive: hex(self.config.window.inactive_color),
+                shadow: hex(self.config.window.shadow_color),
+            },
             ..Snapshot::default()
         };
         let focused_monitor = self.desktop.focused_monitor().map(|m| m.id);
@@ -309,6 +315,18 @@ impl State<'_> {
         }
         state
     }
+}
+
+/// `#rrggbbaa`, as the config writes colors.
+fn hex(c: Rgba) -> String {
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}{:02x}",
+        byte(c.r),
+        byte(c.g),
+        byte(c.b),
+        byte(c.a)
+    )
 }
 
 /// Shows workspace `id` on its monitor and focuses that monitor.
