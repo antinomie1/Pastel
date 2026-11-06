@@ -5,6 +5,7 @@
 mod activation;
 mod capture;
 mod devices;
+pub mod dnd;
 mod foreign;
 mod lock;
 mod outputs;
@@ -110,6 +111,8 @@ pub enum Command {
     AskGamma,
     /// Type a key through a virtual keyboard with this keymap, as wtype does.
     VirtualType(String, u32),
+    /// The window's next press starts a drag, as a browser tab's does.
+    ArmDrag(usize),
     Quit,
 }
 
@@ -150,6 +153,8 @@ pub struct Report {
     /// The name of every head announced.
     pub heads: Vec<String>,
     pub devices: Devices,
+    /// A drag waits for the next press.
+    pub drag_armed: bool,
 }
 
 pub struct Client {
@@ -395,6 +400,10 @@ impl Client {
         self.report.lock().expect("report").devices.clone()
     }
 
+    pub fn drag_armed(&self) -> bool {
+        self.report.lock().expect("report").drag_armed
+    }
+
     pub fn keys(&self) -> Vec<u32> {
         self.report.lock().expect("report").keys.clone()
     }
@@ -436,6 +445,7 @@ struct App {
     taskbar: Vec<foreign::Handle>,
     capturing: capture::Capturing,
     randr: outputs::Randr,
+    dragging: dnd::Dragging,
     seat: wl_seat::WlSeat,
     globals: GlobalList,
     next: usize,
@@ -637,6 +647,7 @@ fn run(stream: UnixStream, commands: Receiver<Command>, report: Arc<Mutex<Report
         taskbar: Vec::new(),
         capturing: capture::Capturing::default(),
         randr: outputs::Randr::default(),
+        dragging: dnd::Dragging::default(),
         seat,
         globals,
         next: 0,
@@ -683,6 +694,7 @@ fn run(stream: UnixStream, commands: Receiver<Command>, report: Arc<Mutex<Report
                 Command::WatchTablets => app.watch_tablets(),
                 Command::AskGamma => app.ask_gamma(),
                 Command::VirtualType(keymap, key) => app.virtual_type(&keymap, key),
+                Command::ArmDrag(index) => app.arm_drag(index),
                 Command::Lock => app.lock(),
                 Command::Unlock => app.unlock(),
                 Command::Quit => return,

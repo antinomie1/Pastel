@@ -5,7 +5,7 @@
 use std::os::fd::AsFd;
 
 use wayland_client::protocol::{wl_output, wl_pointer};
-use wayland_client::{Connection, Dispatch, QueueHandle, event_created_child};
+use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, event_created_child};
 use wayland_protocols::wp::pointer_constraints::zv1::client::{
     zwp_confined_pointer_v1, zwp_locked_pointer_v1, zwp_pointer_constraints_v1,
 };
@@ -138,16 +138,21 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_pointer::Event::Motion {
-            surface_x,
-            surface_y,
-            ..
-        } = event
-        {
-            app.devices(|d| {
+        match event {
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => app.devices(|d| {
                 d.pointer_motions += 1;
                 d.last_motion = Some((surface_x, surface_y));
-            });
+            }),
+            wl_pointer::Event::Button {
+                serial,
+                state: WEnum::Value(wl_pointer::ButtonState::Pressed),
+                ..
+            } => app.pressed(serial),
+            _ => {}
         }
     }
 }

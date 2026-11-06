@@ -231,6 +231,7 @@ impl State<'_> {
         }
         self.route_key(&event);
         self.pointer_moved();
+        self.drag_moved();
         self.end_grab_with_last_button();
     }
 
@@ -407,8 +408,12 @@ impl State<'_> {
             return;
         };
         self.desktop.focus_monitor_at(x, y);
-        let no_follow =
-            !self.config.input.focus_follows_mouse || self.is_locked() || self.held.is_some();
+        // Focusing what a drag passes over would scroll it away from under the
+        // pointer before the drop.
+        let no_follow = !self.config.input.focus_follows_mouse
+            || self.is_locked()
+            || self.held.is_some()
+            || self.dragging();
         if no_follow || self.keyboard.pan.is_some() {
             return;
         }

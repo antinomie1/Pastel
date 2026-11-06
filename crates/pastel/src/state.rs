@@ -111,6 +111,8 @@ pub struct State<'a> {
     /// The layer surface with the keyboard, over any window.
     pub(crate) layer_focus: Option<SurfaceId>,
     focus: Option<SurfaceId>,
+    /// The drag icon the last frame drew.
+    pub(crate) drag_icon: Option<SurfaceId>,
 
     epoch: Instant,
     /// Something changed and the next frame must show it.
@@ -170,6 +172,7 @@ impl<'a> State<'a> {
             layer_focus: None,
             activators: Vec::new(),
             focus: None,
+            drag_icon: None,
             epoch: now,
             dirty: true,
             animating: false,
@@ -679,7 +682,7 @@ impl<'a> State<'a> {
     }
 
     /// A popup draws for the screen its parent's on, nearly always the focused one.
-    fn tell_scale(&self, surface: SurfaceId) {
+    pub(crate) fn tell_scale(&self, surface: SurfaceId) {
         let focused = self.desktop.focused_monitor().map(|m| m.id);
         if let Some(output) = self.outputs.iter().find(|o| Some(o.id().0) == focused) {
             let fractional = self.services.globals.fractional_scale();
@@ -864,6 +867,7 @@ impl<'a> State<'a> {
         }
         let mut scene = std::mem::take(&mut self.scene);
         self.input_method_popups(&mut scene);
+        self.drag_icon_item(&mut scene);
         self.scene = scene;
         self.animating = animating;
         self.services.screens.set_scene(&self.scene);

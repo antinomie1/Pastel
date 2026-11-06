@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod devices;
+pub mod dnd;
 pub mod grab;
 pub mod ime;
 pub mod input;
