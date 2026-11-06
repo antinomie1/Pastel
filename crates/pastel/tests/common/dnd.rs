@@ -99,6 +99,9 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for App {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if let wl_data_source::Event::Cancelled = event {
+            app.report.lock().expect("report").drag_cancelled = true;
+        }
         if let wl_data_source::Event::Cancelled | wl_data_source::Event::DndFinished = event {
             source.destroy();
             if let Some((icon, ..)) = app.dragging.icon.take() {

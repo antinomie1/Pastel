@@ -155,6 +155,9 @@ pub struct Report {
     pub devices: Devices,
     /// A drag waits for the next press.
     pub drag_armed: bool,
+    /// The drag ended with nothing taking it, which a browser answers with a
+    /// window for the tab.
+    pub drag_cancelled: bool,
 }
 
 pub struct Client {
@@ -402,6 +405,10 @@ impl Client {
 
     pub fn drag_armed(&self) -> bool {
         self.report.lock().expect("report").drag_armed
+    }
+
+    pub fn drag_cancelled(&self) -> bool {
+        self.report.lock().expect("report").drag_cancelled
     }
 
     pub fn keys(&self) -> Vec<u32> {

@@ -1,6 +1,8 @@
 //! Drag and drop as a browser tab does it: the icon the client draws follows
-//! the pointer, offset as it asked, until the drop takes it away; and focus
-//! does not follow a drag over other windows, which would scroll them away.
+//! the pointer, offset as it asked, until the drop takes it away; focus does
+//! not follow a drag over other windows, which would scroll them away; and a
+//! drop nothing takes is cancelled, which is what makes Firefox open the tab
+//! in a new window.
 
 mod common;
 
@@ -95,6 +97,8 @@ fn a_dragged_tab_follows_the_pointer_until_the_drop() {
             let data = s.services.globals.data_device();
             !data.dragging() && !s.scene.iter().any(|i| i.surface == icon)
         });
+        // The window under it never accepted the tab.
+        settle(state, display, "the cancel", |_| client.drag_cancelled());
         Ok(())
     })
     .expect("compositor runs");
