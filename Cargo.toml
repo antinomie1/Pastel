@@ -14,7 +14,7 @@ pastel-config = { path = "crates/pastel-config" }
 pastel-render = { path = "crates/pastel-render" }
 pastel-ipc = { path = "crates/pastel-ipc" }
 # Pinned to a commit; bump `rev` to update. To hack on both, see AGENTS.md.
-luminaria = { git = "https://github.com/antinomie1/luminaria", rev = "b01c4bd95c2bc232b723a33433bd53e5a7e8994d", features = ["text"] }
+luminaria = { git = "https://github.com/antinomie1/luminaria", rev = "fcec0c3ff9a70d48f7594ff963ddf48def067686", features = ["text"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 
