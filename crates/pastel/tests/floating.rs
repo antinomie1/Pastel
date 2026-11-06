@@ -91,6 +91,21 @@ fn a_window_of_one_fixed_size_floats_at_that_size() {
 }
 
 #[test]
+fn a_window_that_sets_its_limits_late_floats_at_its_own_size() {
+    scenario(NO_OVERLAY, |state, display, client| {
+        client.open_held("settings", RED);
+        // Long enough to be laid out as a column and told that column's size.
+        rest(state, display);
+        client.fix(0, (300, 200));
+        settle(state, display, |s| s.windows_mapped() == 1);
+        rest(state, display);
+        let rect = float_rect(state);
+        assert_eq!((rect.w, rect.h), (300.0, 200.0));
+        assert_eq!(rect.center(), (640.0, 400.0), "in the middle");
+    });
+}
+
+#[test]
 fn a_dialog_floats_over_its_parent_and_gives_focus_back() {
     scenario(NO_OVERLAY, |state, display, client| {
         client.open("main", RED);

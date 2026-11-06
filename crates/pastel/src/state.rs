@@ -512,17 +512,20 @@ impl<'a> State<'a> {
                 let toplevel = shell.toplevel(surface);
                 let dialog = toplevel.as_ref().is_some_and(is_dialog);
                 let floating = rule.floating.unwrap_or(dialog);
-                // A window that hid itself left the layout on unmap.
+                // A window that hid itself left the layout on unmap. Limits and
+                // parents can come after the role, so this is the last say; a
+                // dialog laid out as a column until now must not float at the
+                // column's size, which was never its own.
                 let known = self.desktop.monitors().iter().flat_map(|m| &m.workspaces);
-                if !known.into_iter().any(|w| w.contains(id)) {
+                let placed = known.into_iter().any(|w| w.contains(id));
+                if !placed || self.desktop.floating(id).is_some() != floating {
+                    self.desktop.remove_window(id);
                     let hint = WindowHint {
                         width: rule.default_width,
                         floating,
                     };
                     self.desktop.add_window(id, hint);
                 }
-                // Limits and parents can come after the role: this is the last say.
-                self.desktop.set_floating(id, floating);
                 if let Some(toplevel) = toplevel {
                     let size = toplevel.geometry();
                     if size.width > 0 && size.height > 0 {

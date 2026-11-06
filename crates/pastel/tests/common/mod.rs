@@ -59,6 +59,15 @@ pub enum Command {
         fixed: Option<(i32, i32)>,
         parent: Option<usize>,
     },
+    /// A window that does its initial commit but holds back its first frame.
+    OpenHeld {
+        app_id: String,
+        argb: u32,
+    },
+    /// The held window learns it can only be this size, as a GTK dialog sets
+    /// its limits only once laid out, and shows its first frame at that size
+    /// whatever it was told.
+    Fix(usize, (i32, i32)),
     /// Its title bar was grabbed.
     Move(usize),
     /// Its edge was grabbed.
@@ -194,6 +203,20 @@ impl Client {
             parent: Some(parent),
         };
         self.commands.send(command).expect("client alive");
+    }
+
+    pub fn open_held(&self, app_id: &str, argb: u32) {
+        let command = Command::OpenHeld {
+            app_id: app_id.into(),
+            argb,
+        };
+        self.commands.send(command).expect("client alive");
+    }
+
+    pub fn fix(&self, index: usize, size: (i32, i32)) {
+        self.commands
+            .send(Command::Fix(index, size))
+            .expect("client alive");
     }
 
     pub fn request_move(&self, index: usize) {
@@ -396,6 +419,10 @@ struct Window {
     argb: u32,
     pending: (i32, i32),
     states: (bool, bool),
+    /// Holding back its first frame.
+    held: bool,
+    /// The only size it draws at, whatever a configure says.
+    fixed: Option<(i32, i32)>,
     drawn: Option<(File, wl_buffer::WlBuffer, (i32, i32))>,
 }
 
@@ -429,6 +456,25 @@ impl App {
         self.open_with(app_id, argb, None, None);
     }
 
+    fn open_held(&mut self, app_id: &str, argb: u32) {
+        let index = self.next;
+        self.open(app_id, argb);
+        if let Some(window) = self.windows.get_mut(&index) {
+            window.held = true;
+        }
+    }
+
+    fn fix(&mut self, index: usize, (w, h): (i32, i32)) {
+        let Some(window) = self.windows.get_mut(&index) else {
+            return;
+        };
+        window.toplevel.set_min_size(w, h);
+        window.toplevel.set_max_size(w, h);
+        window.fixed = Some((w, h));
+        window.held = false;
+        self.draw(index);
+    }
+
     fn open_with(
         &mut self,
         app_id: &str,
@@ -458,6 +504,8 @@ impl App {
             argb,
             pending: (0, 0),
             states: (false, false),
+            held: false,
+            fixed: None,
             drawn: None,
         };
         self.windows.insert(index, window);
@@ -522,7 +570,10 @@ impl App {
         let Some(window) = self.windows.get_mut(&index) else {
             return;
         };
-        let (w, h) = window.pending;
+        if window.held {
+            return;
+        }
+        let (w, h) = window.fixed.unwrap_or(window.pending);
         let (w, h) = (if w > 0 { w } else { 300 }, if h > 0 { h } else { 200 });
         let pixel = window.argb.to_le_bytes();
         let bytes: Vec<u8> = pixel
@@ -602,6 +653,8 @@ fn run(stream: UnixStream, commands: Receiver<Command>, report: Arc<Mutex<Report
                     fixed,
                     parent,
                 } => app.open_with(&app_id, argb, fixed, parent),
+                Command::OpenHeld { app_id, argb } => app.open_held(&app_id, argb),
+                Command::Fix(index, size) => app.fix(index, size),
                 Command::Move(index) => {
                     if let Some(window) = app.windows.get(&index) {
                         window.toplevel._move(&app.seat, 0);
