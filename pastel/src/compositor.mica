@@ -18,6 +18,8 @@ import reload
 import spawn
 
 let tok_ipc_listen = 1
+let tok_cfg_watch = 2
+let tok_sighup = 3
 let tok_ipc_client_base = 1000
 
 fn ikey(img: lum.Image) -> u64 {
@@ -35,22 +37,36 @@ pub struct Pastel[O: lum.plug.Output, R: lum.plug.Renderer] {
     pub win_by_id: map.Map[u64, lum.Window]
     pub id_by_win: map.Map[lum.Window, u64]
     pub win_rules: map.Map[u64, cfg.ResolvedWindow]
-    pub configured_sizes: map.Map[u64, (i32, i32, bool, bool)]
+    pub meta_rule_done: map.Map[u64, bool]
+    pub configured_sizes: map.Map[u64, (i32, i32, bool, bool, bool, bool)]
     pub out_by_id: map.Map[u64, lum.Output]
     pub id_by_out: map.Map[lum.Output, u64]
+    pub input_devices: List[u32] = []
+    pub suppressed_keys: List[u32] = []
     pub ipc_srv: Option[ipc.IpcServer] = None
     pub ipc_socket_path: str = ""
+    pub xwayland_display: str = ""
+    pub xwayland_pid: int = 0
+    pub cfg_watch: Option[reload.ConfigWatcher] = None
+    pub sig_watch: Option[reload.SignalWatcher] = None
     pub overlay_visible: bool = false
     pub overlay_img: Option[lum.Image] = None
     pub overlay_w: f64 = 0.0
     pub overlay_h: f64 = 0.0
+    pub overlay_scale: f64 = 1.0
     pub anim_tick_img: Option[lum.Image] = None
     pub tick_flip: bool = false
     pub targets_scratch: List[lay.TileTarget] = []
+    pub closing_scratch: List[ren.ClosingFrame] = []
+    pub place_scratch: List[(lum.Window, Option[lum.Output], f64, f64, f32, f32, f32, f32)] = []
+    pub ws_off_scratch: List[f64] = []
+    pub scroll_accum: f64 = 0.0
     pub swipe_active: bool = false
     pub swipe_dx: f64 = 0.0
     pub swipe_dy: f64 = 0.0
     pub swipe_axis: int = 0
+    pub swipe_mon: int = 0
+    pub swipe_ws: int = 0
     pub last_focus_id: u64 = 0
     pub needs_layout: bool = true
 }
@@ -73,17 +89,13 @@ pub fn Pastel[O, R].new(take d: lum.display.Display[O, R], take config: cfg.Conf
         win_by_id: map.Map.new(),
         id_by_win: map.Map.new(),
         win_rules: map.Map.new(),
+        meta_rule_done: map.Map.new(),
         configured_sizes: map.Map.new(),
         out_by_id: map.Map.new(),
         id_by_out: map.Map.new(),
     }
-    // Create 1x1 transparent sentinel image used to drive luminaria's adaptive vblank
-    // clock ONLY while Pastel's spring/ease animations are active (0 wakeups when idle).
-    let px: List[u8] = [0, 0, 0, 0]
-    if let Ok(img) = p.d.image(1, 1, px, false) {
-        p.anim_tick_img = Some(img)
-    }
-    outputs.apply_keymap(mut p)
+    p.ensure_tick_img()
+    outputs.apply_keymap(mut p, false)
     for so in p.d.outputs() {
         outputs.apply_output_config(mut p, so)
     }
@@ -94,6 +106,18 @@ pub fn Pastel[O, R].new(take d: lum.display.Display[O, R], take config: cfg.Conf
     }
     p.sync_layout(time.now_ns())
     return p
+}
+
+/// Create or recreate the 1x1 offscreen sentinel image used to drive luminaria's adaptive
+/// vblank clock ONLY while Pastel animations are active (0 wakeups when idle).
+pub fn Pastel[O, R].ensure_tick_img(mut self) {
+    if let Some(old) = self.anim_tick_img.take() {
+        self.d.drop_image(old)
+    }
+    let px: List[u8] = [0, 0, 0, 0]
+    if let Ok(img) = self.d.image(1, 1, px, false) {
+        self.anim_tick_img = Some(img)
+    }
 }
 
 /// Start listening on the Unix JSON-lines IPC socket and register its fd with `Display.watch`.
@@ -110,19 +134,40 @@ pub fn Pastel[O, R].enable_ipc(mut self) {
     }
 }
 
-/// Run configured `autostart` commands and optional `xwayland-satellite`.
+/// Watch `self.cfg_path` via Linux inotify so saving the config file reloads live (0 wakeups when idle).
+pub fn Pastel[O, R].enable_config_watch(mut self) {
+    if let Some(w) = reload.ConfigWatcher.open(self.cfg_path) {
+        self.d.watch(w.fd, tok_cfg_watch)
+        self.cfg_watch = Some(w)
+    }
+}
+
+/// Watch SIGHUP via Linux signalfd registered with `Display.watch` (immediate wakeup, 0 polling).
+pub fn Pastel[O, R].enable_signal_watch(mut self) -> bool {
+    if let Some(sw) = reload.SignalWatcher.open_sighup() {
+        self.d.watch(sw.fd, tok_sighup)
+        self.sig_watch = Some(sw)
+        return true
+    }
+    return false
+}
+
+/// Run configured `autostart` commands, session env export, and optional `xwayland-satellite`.
 pub fn Pastel[O, R].run_startup(mut self, extra_cmd: str) {
     let sock = self.d.socket()
     if self.cfg.xwayland.enabled {
-        spawn.start_xwayland(self.cfg.xwayland.path, sock)
+        let (disp, pid) = spawn.start_xwayland(self.cfg.xwayland, sock)
+        self.xwayland_display = disp
+        self.xwayland_pid = pid
     }
+    spawn.export_session_env(sock, self.xwayland_display.clone(), self.nested)
     for cmd in self.cfg.autostart.clone() {
         let tok = self.d.activation_token()
-        spawn.spawn_shell(cmd, sock, self.ipc_socket_path.clone(), tok)
+        spawn.spawn_shell(cmd, sock, self.ipc_socket_path.clone(), self.xwayland_display.clone(), tok)
     }
     if not extra_cmd.is_empty() {
         let tok = self.d.activation_token()
-        spawn.spawn_shell(extra_cmd, sock, self.ipc_socket_path.clone(), tok)
+        spawn.spawn_shell(extra_cmd, sock, self.ipc_socket_path.clone(), self.xwayland_display.clone(), tok)
     }
 }
 
@@ -132,15 +177,8 @@ pub fn Pastel[O, R].rebuild_overlay(mut self) {
         self.d.drop_image(old)
     }
     let eff_mod = if self.nested { self.cfg.input.nested_mod } else { self.cfg.input.mod_key }
-    var scale = 1.0
-    let outs = self.d.outputs()
-    if not outs.is_empty() {
-        let (_, _, ow, _) = self.d.output_rect(outs[0])
-        let desc = self.d.output_desc(outs[0])
-        if ow > 0.0 and desc.mode.width > 0 {
-            scale = max(f64(desc.mode.width) / ow, 1.0)
-        }
-    }
+    let scale = max(outputs.active_output_scale(self), 1.0)
+    self.overlay_scale = scale
     guard let Some(img_data) = ren.overlay.render_hotkey_overlay(self.cfg, eff_mod, scale) else {
         io.eprint("pastel: hotkey overlay: no font found for '{self.cfg.overlay.font}'")
         return
@@ -190,17 +228,43 @@ pub fn Pastel[O, R].sync_focus(mut self) {
 pub fn Pastel[O, R].state_json(self) -> str {
     var mons = json.arr()
     for mi in 0..self.desktop.monitors.len() {
-        let name = self.desktop.monitors[mi].name.clone()
         let active_ws = self.desktop.monitors[mi].active_ws + 1
         let ws_count = self.desktop.monitors[mi].workspaces.len()
-        let mobj = json.obj().with("name", json.Value.Str(name)).with("active_workspace", json.Value.Int(active_ws)).with("workspaces", json.Value.Int(ws_count)).with("focused", json.Value.Bool(mi == self.desktop.active_monitor))
+        let full = self.desktop.monitors[mi].full_rect
+        var scale = 1.0
+        if let Some(so) = self.out_by_id.get(self.desktop.monitors[mi].id) {
+            let (_, _, ow, oh) = self.d.output_rect(so)
+            let desc = self.d.output_desc(so)
+            scale = outputs.output_scale(ow, oh, desc.mode)
+        }
+        let mobj = json.obj().with("name", json.Value.Str(self.desktop.monitors[mi].name.clone())).with("x", json.Value.Num(full.x)).with("y", json.Value.Num(full.y)).with("width", json.Value.Num(full.w)).with("height", json.Value.Num(full.h)).with("scale", json.Value.Num(scale)).with("active_workspace", json.Value.Int(active_ws)).with("workspaces", json.Value.Int(ws_count)).with("focused", json.Value.Bool(mi == self.desktop.active_monitor))
         mons = mons.append(mobj)
     }
     var wins = json.arr()
     for id in self.win_by_id.keys() {
         if let Some(w) = self.win_by_id.get(id) {
             let loc = self.desktop.locate(id)
-            let wobj = json.obj().with("id", json.Value.Int(int(id))).with("app_id", json.Value.Str(self.d.app_id(w))).with("title", json.Value.Str(self.d.title(w))).with("focused", json.Value.Bool(self.desktop.focused_window() == Some(id))).with("floating", json.Value.Bool(loc.map(fn(l) => l.floating).unwrap_or(false))).with("workspace", json.Value.Int(loc.map(fn(l) => l.workspace_idx + 1).unwrap_or(0)))
+            var mon_name = ""
+            var is_fs = false
+            var is_max = false
+            if let Some(l) = loc {
+                if l.monitor_idx < self.desktop.monitors.len() {
+                    mon_name = self.desktop.monitors[l.monitor_idx].name.clone()
+                    if l.workspace_idx < self.desktop.monitors[l.monitor_idx].workspaces.len() {
+                        is_fs = self.desktop.monitors[l.monitor_idx].workspaces[l.workspace_idx].fullscreen == Some(id)
+                        if not l.floating {
+                            for ci in 0..self.desktop.monitors[l.monitor_idx].workspaces[l.workspace_idx].strip.columns.len() {
+                                if self.desktop.monitors[l.monitor_idx].workspaces[l.workspace_idx].strip.columns[ci].find(id) >= 0 {
+                                    is_max = self.desktop.monitors[l.monitor_idx].workspaces[l.workspace_idx].strip.columns[ci].maximized
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let (cw, ch) = self.d.size(w)
+            let wobj = json.obj().with("id", json.Value.Int(int(id))).with("app_id", json.Value.Str(self.d.app_id(w))).with("title", json.Value.Str(self.d.title(w))).with("monitor", json.Value.Str(mon_name)).with("focused", json.Value.Bool(self.desktop.focused_window() == Some(id))).with("floating", json.Value.Bool(loc.map(fn(l) => l.floating).unwrap_or(false))).with("fullscreen", json.Value.Bool(is_fs)).with("maximized", json.Value.Bool(is_max)).with("width", json.Value.Int(int(cw))).with("height", json.Value.Int(int(ch))).with("workspace", json.Value.Int(loc.map(fn(l) => l.workspace_idx + 1).unwrap_or(0)))
             wins = wins.append(wobj)
         }
     }
@@ -216,17 +280,21 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
     self.desktop.compute_all(mut targets)
     let ac = self.cfg.animation
     let wc = self.cfg.window
+    let fallback_rule = self.cfg.resolve_window("", "")
 
     // 1. Update animation targets and send configures only for windows whose size/state changed.
     var any_configure = false
     for i in 0..targets.len() {
         let t = targets[i]
-        let rule = self.win_rules.get(t.id).unwrap_or(self.cfg.resolve_window("", ""))
+        let rule = match self.win_rules.get(t.id) {
+            Some(r) => r
+            None => fallback_rule.clone()
+        }
         self.anims.update_window(t.id, t.rect, rule.opacity, t.focused, ac, wc, now_ns)
         if let Some(w) = self.win_by_id.get(t.id) {
             let cw = i32(max(t.rect.w.round(), 1.0))
             let ch = i32(max(t.rect.h.round(), 1.0))
-            let want = (cw, ch, t.focused, t.fullscreen)
+            let want = (cw, ch, t.focused, t.fullscreen, t.floating, t.maximized)
             let prev = self.configured_sizes.get(t.id)
             if prev != Some(want) {
                 if not any_configure {
@@ -237,6 +305,7 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
                 let st = lum.States {
                     activated: t.focused,
                     fullscreen: t.fullscreen,
+                    maximized: t.maximized,
                     tiled_left: tiled,
                     tiled_right: tiled,
                     tiled_top: tiled,
@@ -250,15 +319,24 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
 
     // 2. Tick animations to `now_ns` and build placement + per-output visual effect lists.
     self.anims.begin_frame()
-    var place_wins: List[(lum.Window, f64, f64, f32, f32, f32, f32)] = []
+    var place_wins = mem.replace(mut self.place_scratch, [])
+    place_wins.clear()
     var out_effects: List[List[ren.WindowEffect]] = []
+    var out_closing: List[List[ren.ClosingEffect]] = []
     let outs = self.d.outputs()
-    for _ in 0..outs.len() {
+    var out_rects: List[(f64, f64, f64, f64, f64, u64)] = []
+    for so in outs {
+        let (ox, oy, ow, oh) = self.d.output_rect(so)
+        let desc = self.d.output_desc(so)
+        let sc = outputs.output_scale(ow, oh, desc.mode)
+        out_rects.push((ox, oy, ow, oh, sc, outputs.output_id(so)))
         out_effects.push([])
+        out_closing.push([])
     }
 
     // Per-monitor workspace vertical slide offset
-    var ws_off_y: List[f64] = []
+    var ws_off_y = mem.replace(mut self.ws_off_scratch, [])
+    ws_off_y.clear()
     for mi in 0..self.desktop.monitors.len() {
         ws_off_y.push(self.anims.tick_output_y(self.desktop.monitors[mi].id, now_ns))
     }
@@ -268,42 +346,60 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
         guard let Some(w) = self.win_by_id.get(t.id) else {
             continue
         }
-        let rule = self.win_rules.get(t.id).unwrap_or(self.cfg.resolve_window("", ""))
+        let rule = match self.win_rules.get(t.id) {
+            Some(r) => r
+            None => fallback_rule.clone()
+        }
         let ticked = self.anims.tick_window(t.id, now_ns)
         var r = t.rect
         var sc: f32 = 1.0
         var op = rule.opacity
-        var bc = if t.focused { self.cfg.window.active_color } else { self.cfg.window.inactive_color }
+        var bc = if t.focused { wc.active_color } else { wc.inactive_color }
         if let Some((ar, asc, aop, abc)) = ticked {
             r = ar
             sc = asc
             op = aop
             bc = abc
         }
-        let loc_mi = self.desktop.locate(t.id).map(fn(l) => l.monitor_idx).unwrap_or(0)
-        let wy = if loc_mi < ws_off_y.len() and not t.fullscreen { ws_off_y[loc_mi] } else { 0.0 }
+        let loc_mi = t.monitor_idx
+        let wy = if loc_mi >= 0 and loc_mi < ws_off_y.len() and not t.fullscreen { ws_off_y[loc_mi] } else { 0.0 }
         // Center open-scale subtly around the window midpoint.
         let sx = r.x + r.w * (1.0 - f64(sc)) * 0.5
         let sy = r.y + wy + r.h * (1.0 - f64(sc)) * 0.5
-        let radius = if t.fullscreen { f32(0.0) } else { rule.corner_radius }
-        let shadow = if t.fullscreen { f32(0.0) } else { self.cfg.window.shadow_size }
-        let bw = if t.fullscreen { f32(0.0) } else { rule.border_width }
-        let want_blur = not t.fullscreen and self.cfg.window.blur and rule.blur and op < 0.995
-        place_wins.push((w, sx, sy, op, radius, shadow, sc))
 
-        // Project decoration to each intersecting output in output-pixel coordinates.
         // Use the client's committed logical geometry size when available so borders
         // hug cell-snapping terminals and floating dialogs tightly.
         let (cw_actual, ch_actual) = self.d.size(w)
         let eff_w = if cw_actual > 0 { f64(cw_actual) } else { r.w }
         let eff_h = if ch_actual > 0 { f64(ch_actual) } else { r.h }
-        for oi in 0..outs.len() {
-            let (ox, oy, ow, oh) = self.d.output_rect(outs[oi])
+
+        // Prevent off-screen scrolled columns on one monitor from bleeding onto neighboring monitors.
+        let has_owner = loc_mi >= 0 and loc_mi < self.desktop.monitors.len()
+        if not t.floating and not t.fullscreen and has_owner {
+            let mrect = self.desktop.monitors[loc_mi].full_rect
+            if sx >= mrect.right() or sx + eff_w <= mrect.x or sy >= mrect.bottom() or sy + eff_h <= mrect.y {
+                continue
+            }
+        }
+
+        let radius = if t.fullscreen { f32(0.0) } else { rule.corner_radius }
+        let shadow = if t.fullscreen { f32(0.0) } else { wc.shadow_size }
+        let bw = if t.fullscreen { f32(0.0) } else { rule.border_width }
+        let want_blur = not t.fullscreen and wc.blur and rule.blur
+        let owner_oid = if has_owner { self.desktop.monitors[loc_mi].id } else { u64(0) }
+        let scoped_out = if not t.floating and owner_oid != 0 { self.out_by_id.get(owner_oid) } else { None }
+        place_wins.push((w, scoped_out, sx, sy, op, radius, shadow, sc))
+
+        let wkey = self.d.window_key(w)
+        for oi in 0..out_rects.len() {
+            let (ox, oy, ow, oh, scale, oid) = out_rects[oi]
+            // Tiled & fullscreen decorations stay scoped to their owning monitor; floating windows can span monitors.
+            if not t.floating and owner_oid != 0 and oid != owner_oid {
+                continue
+            }
             if sx < ox + ow and sy < oy + oh and sx + eff_w > ox and sy + eff_h > oy {
-                let desc = self.d.output_desc(outs[oi])
-                let scale = if ow > 0.0 and desc.mode.width > 0 { f64(desc.mode.width) / ow } else { 1.0 }
                 out_effects[oi].push(ren.WindowEffect {
-                    key: 0,
+                    key: wkey,
                     x: f32(((sx - ox) * scale).round()),
                     y: f32(((sy - oy) * scale).round()),
                     w: f32((eff_w * f64(sc) * scale).round()),
@@ -312,9 +408,9 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
                     border_width: bw * f32(scale),
                     border_color: bc.as_vec4(),
                     shadow_size: shadow * f32(scale),
-                    shadow_color: self.cfg.window.shadow_color.as_vec4(),
+                    shadow_color: wc.shadow_color.as_vec4(),
                     blur: want_blur,
-                    blur_xray: self.cfg.window.blur_xray and not t.floating,
+                    blur_xray: wc.blur_xray and not t.floating,
                     blur_opacity: op,
                     is_overlay: t.floating,
                 })
@@ -322,12 +418,47 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
         }
     }
 
-    // 3. Hotkey overlay placement & visually unified effect (inherits [window] border, radius, blur, colors!)
+    // 2b. Closing-window fade+scale ghost animations (`[animation].window-close`).
+    var closing_frames = mem.replace(mut self.closing_scratch, [])
+    self.anims.tick_closing(now_ns, mut closing_frames)
+    let close_fill = core.Color.rgba(self.cfg.background.r, self.cfg.background.g, self.cfg.background.b, 0.35).as_vec4()
+    for cf in closing_frames {
+        let sx = cf.rect.x + cf.rect.w * (1.0 - f64(cf.scale)) * 0.5
+        let sy = cf.rect.y + cf.rect.h * (1.0 - f64(cf.scale)) * 0.5
+        let sw = cf.rect.w * f64(cf.scale)
+        let sh = cf.rect.h * f64(cf.scale)
+        let owner_oid = if cf.monitor_idx >= 0 and cf.monitor_idx < self.desktop.monitors.len() { self.desktop.monitors[cf.monitor_idx].id } else { u64(0) }
+        for oi in 0..out_rects.len() {
+            let (ox, oy, ow, oh, scale, oid) = out_rects[oi]
+            if owner_oid != 0 and oid != owner_oid {
+                continue
+            }
+            if sx < ox + ow and sy < oy + oh and sx + sw > ox and sy + sh > oy {
+                out_closing[oi].push(ren.ClosingEffect {
+                    x: f32(((sx - ox) * scale).round()),
+                    y: f32(((sy - oy) * scale).round()),
+                    w: f32((sw * scale).round()),
+                    h: f32((sh * scale).round()),
+                    radius: cf.radius * f32(scale),
+                    border_width: cf.border_width * f32(scale),
+                    border_color: cf.border_color.as_vec4(),
+                    shadow_size: cf.shadow_size * f32(scale),
+                    shadow_color: cf.shadow_color.as_vec4(),
+                    fill_color: close_fill,
+                    opacity: cf.opacity,
+                })
+            }
+        }
+    }
+    self.closing_scratch = closing_frames
+
+    // 3. Hotkey overlay placement & visually unified effect (inherits [window] & [overlay] styling).
     let (ov_alpha, ov_slide) = self.anims.tick_overlay(now_ns)
+    let ov_eff_alpha = ov_alpha * self.cfg.overlay.opacity
     var show_ov = false
     var ov_x = 0.0
     var ov_y = 0.0
-    if ov_alpha > 0.005 {
+    if ov_eff_alpha > 0.005 {
         if let Some(ov_img) = self.overlay_img {
             if not self.desktop.monitors.is_empty() {
                 let u = self.desktop.monitors[self.desktop.active_monitor].usable_rect
@@ -335,25 +466,23 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
                 ov_y = u.y + (u.h - self.overlay_h) * 0.5 + ov_slide
                 show_ov = true
                 let ok = ikey(ov_img)
-                for oi in 0..outs.len() {
-                    let (ox, oy, ow, oh) = self.d.output_rect(outs[oi])
+                for oi in 0..out_rects.len() {
+                    let (ox, oy, ow, oh, scale, _) = out_rects[oi]
                     if ov_x < ox + ow and ov_y < oy + oh and ov_x + self.overlay_w > ox and ov_y + self.overlay_h > oy {
-                        let desc = self.d.output_desc(outs[oi])
-                        let scale = if ow > 0.0 and desc.mode.width > 0 { f64(desc.mode.width) / ow } else { 1.0 }
                         out_effects[oi].push(ren.WindowEffect {
                             key: ok,
                             x: f32(((ov_x - ox) * scale).round()),
                             y: f32(((ov_y - oy) * scale).round()),
                             w: f32((self.overlay_w * scale).round()),
                             h: f32((self.overlay_h * scale).round()),
-                            radius: self.cfg.window.corner_radius * f32(scale),
-                            border_width: self.cfg.window.border_width * f32(scale),
-                            border_color: self.cfg.window.active_color.as_vec4(),
-                            shadow_size: self.cfg.window.shadow_size * f32(scale),
-                            shadow_color: self.cfg.window.shadow_color.as_vec4(),
-                            blur: self.cfg.window.blur,
+                            radius: wc.corner_radius * f32(scale),
+                            border_width: wc.border_width * f32(scale),
+                            border_color: wc.active_color.as_vec4(),
+                            shadow_size: wc.shadow_size * f32(scale),
+                            shadow_color: wc.shadow_color.as_vec4(),
+                            blur: wc.blur,
                             blur_xray: false,
-                            blur_opacity: ov_alpha,
+                            blur_opacity: ov_eff_alpha,
                             is_overlay: true,
                         })
                     }
@@ -364,13 +493,13 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
 
     // 4. Push visual effects sheet to PastelRenderer before updating luminaria's placement list.
     let blur_cfg = ren.BlurSettings {
-        enabled: self.cfg.window.blur,
-        xray: self.cfg.window.blur_xray,
-        passes: self.cfg.window.blur_passes,
-        offset: self.cfg.window.blur_offset,
+        enabled: wc.blur,
+        xray: wc.blur_xray,
+        passes: wc.blur_passes,
+        offset: wc.blur_offset,
     }
-    for oi in 0..outs.len() {
-        self.sheet.set_output(oi, self.cfg.background, blur_cfg, out_effects[oi].clone())
+    for oi in 0..out_rects.len() {
+        self.sheet.set_output_full(oi, self.cfg.background, blur_cfg, out_effects[oi].clone(), out_closing[oi].clone())
     }
 
     // 5. Commit placement list to luminaria. Include culled offscreen tick sentinel ONLY while animating.
@@ -383,15 +512,20 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
     let ov_img_opt = self.overlay_img
     let ov_w = self.overlay_w
     let ov_h = self.overlay_h
-    let ov_rad = self.cfg.window.corner_radius
-    let ov_shd = self.cfg.window.shadow_size
+    let ov_rad = wc.corner_radius
+    let ov_shd = wc.shadow_size
     self.d.layout(fn(mut l) {
-        for (w, x, y, op, rad, shd, sc) in place_wins {
-            l.window(w, x, y, lum.Style { opacity: op, radius: rad, shadow: shd, scale: sc, transition_ms: 0 })
+        for (w, scoped_out, x, y, op, rad, shd, sc) in place_wins {
+            let st = lum.Style { opacity: op, radius: rad, shadow: shd, scale: sc, transition_ms: 0 }
+            if let Some(so) = scoped_out {
+                l.window_on(w, so, x, y, st)
+            } else {
+                l.window(w, x, y, st)
+            }
         }
         if show_ov {
             if let Some(img) = ov_img_opt {
-                l.image(img, ov_x, ov_y, ov_w, ov_h, lum.Style { opacity: ov_alpha, radius: ov_rad, shadow: ov_shd, scale: 1.0, transition_ms: 0 })
+                l.image(img, ov_x, ov_y, ov_w, ov_h, lum.Style { opacity: ov_eff_alpha, radius: ov_rad, shadow: ov_shd, scale: 1.0, transition_ms: 0 })
             }
         }
         if active {
@@ -404,9 +538,25 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
         self.d.end(60)
     }
     self.targets_scratch = targets
+    self.place_scratch = place_wins
+    self.ws_off_scratch = ws_off_y
 }
 
-/// Dispatch readable IPC socket fd (`tok_ipc_listen` or client token).
+fn Pastel[O, R].send_ipc(mut self, fd: int, payload: str) -> bool {
+    guard let Some(got) = self.ipc_srv.take() else {
+        return false
+    }
+    var srv = got
+    let ok = srv.send(fd, payload)
+    if not ok {
+        srv.disconnect(fd)
+        self.d.unwatch(fd)
+    }
+    self.ipc_srv = Some(srv)
+    return ok
+}
+
+/// Dispatch readable IPC socket fd (`tok_ipc_listen` or client token) in exact request arrival order.
 pub fn Pastel[O, R].handle_ipc_ready(mut self, token: int) {
     guard let Some(got) = self.ipc_srv.take() else {
         return
@@ -423,49 +573,41 @@ pub fn Pastel[O, R].handle_ipc_ready(mut self, token: int) {
     if token >= tok_ipc_client_base {
         let fd = token - tok_ipc_client_base
         let (lines, closed) = srv.read_lines(fd)
-        var actions: List[str] = []
-        var want_state = false
-        var want_sub = false
-        var parse_errs: List[str] = []
-        for line in lines {
-            match ipc.server.decode_request(line) {
-                Ok(Action(a)) => actions.push(a)
-                Ok(State) => want_state = true
-                Ok(Subscribe) => want_sub = true
-                Err(e) => parse_errs.push(e)
-            }
-        }
-        if want_sub {
-            srv.mark_subscribed(fd)
-        }
-        for err in parse_errs {
-            discard srv.send(fd, ipc.server.encode_err(err))
-        }
         self.ipc_srv = Some(srv)
 
-        if want_state {
-            let st = self.state_json()
-            if let Some(got2) = self.ipc_srv.take() {
-                var s2 = got2
-                discard s2.send(fd, st)
-                self.ipc_srv = Some(s2)
+        var alive = true
+        for line in lines {
+            if not alive {
+                break
             }
-        }
-        for act_str in actions {
-            let reply = match cfg.Action.parse(act_str) {
-                Ok(act) => match input.dispatch_action(mut self, act) {
-                    Ok => ipc.server.encode_ok()
-                    Err(e) => ipc.server.encode_err(e)
+            match ipc.server.decode_request(line) {
+                Ok(Action(act_str)) => {
+                    let reply = match cfg.Action.parse(act_str) {
+                        Ok(act) => match input.dispatch_action(mut self, act) {
+                            Ok => ipc.server.encode_ok()
+                            Err(e) => ipc.server.encode_err(e)
+                        }
+                        Err(e) => ipc.server.encode_err(e)
+                    }
+                    alive = self.send_ipc(fd, reply)
                 }
-                Err(e) => ipc.server.encode_err(e)
-            }
-            if let Some(got2) = self.ipc_srv.take() {
-                var s2 = got2
-                discard s2.send(fd, reply)
-                self.ipc_srv = Some(s2)
+                Ok(State) => {
+                    let st = self.state_json()
+                    alive = self.send_ipc(fd, st)
+                }
+                Ok(Subscribe) => {
+                    if let Some(got2) = self.ipc_srv.take() {
+                        var s2 = got2
+                        s2.mark_subscribed(fd)
+                        self.ipc_srv = Some(s2)
+                    }
+                }
+                Err(e) => {
+                    alive = self.send_ipc(fd, ipc.server.encode_err(e))
+                }
             }
         }
-        if closed {
+        if closed and alive {
             self.d.unwatch(fd)
             if let Some(got2) = self.ipc_srv.take() {
                 var s2 = got2
@@ -488,7 +630,20 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
             outputs.sync_outputs(mut self)
             self.needs_layout = true
         }
-        DeviceAdded(dev, _) => outputs.apply_input_config(mut self, dev)
+        DeviceAdded(dev, _) => {
+            if not self.input_devices.contains(dev) {
+                self.input_devices.push(dev)
+            }
+            outputs.apply_input_config(mut self, dev)
+        }
+        DeviceRemoved(dev) => {
+            for i in 0..self.input_devices.len() {
+                if self.input_devices[i] == dev {
+                    discard self.input_devices.remove(i)
+                    break
+                }
+            }
+        }
         Frame(_, vblank_ns) => {
             if self.anims.is_active() or self.needs_layout {
                 self.sync_layout(vblank_ns)
@@ -497,13 +652,56 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
         WindowNew(w) => windows.on_window_new(mut self, w)
         WindowMapped(w) => windows.on_window_mapped(mut self, w)
         WindowUnmapped(w) => windows.on_window_unmapped(mut self, w)
+        WindowClosed(w) => windows.on_window_unmapped(mut self, w)
         WindowTitle(w) => windows.on_window_meta(mut self, w)
         WindowAppId(w) => windows.on_window_meta(mut self, w)
         WindowDecoration(w, _) => self.d.decorate(w, true)
+        RequestActivate(w) => {
+            let id = windows.window_id(w)
+            var prev_target_ws = -1
+            if let Some(loc) = self.desktop.locate(id) {
+                if loc.monitor_idx < self.desktop.monitors.len() {
+                    prev_target_ws = self.desktop.monitors[loc.monitor_idx].active_ws
+                }
+            }
+            if self.desktop.focus_window(id) {
+                let cur_mon = self.desktop.active_monitor
+                let cur_ws = if cur_mon < self.desktop.monitors.len() { self.desktop.monitors[cur_mon].active_ws } else { -1 }
+                if prev_target_ws >= 0 and cur_ws != prev_target_ws {
+                    input.notify_ws_change(mut self, time.now_ns())
+                } else {
+                    self.sync_focus()
+                    self.needs_layout = true
+                }
+            }
+        }
+        OutputConfig(c, only_test) => {
+            let ok = self.d.apply_output_config(c, only_test)
+            self.d.output_config_done(c, ok)
+            if ok and not only_test {
+                outputs.sync_outputs(mut self)
+                if (outputs.active_output_scale(self) - self.overlay_scale).abs() > 0.05 {
+                    self.rebuild_overlay()
+                }
+                self.needs_layout = true
+            }
+        }
         RequestMaximize(w, on) => windows.on_request_maximize(mut self, w, on)
-        RequestFullscreen(w, _, on) => windows.on_request_fullscreen(mut self, w, on)
+        RequestFullscreen(w, target_out, on) => windows.on_request_fullscreen(mut self, w, target_out, on)
         Moved(w, dx, dy) => windows.on_moved(mut self, w, dx, dy)
         Resized(w, dx, dy, width, height) => windows.on_resized(mut self, w, dx, dy, width, height)
+        Panned(dx, _) => {
+            if not self.desktop.monitors.is_empty() {
+                let mi = self.desktop.active_monitor
+                let wi = self.desktop.monitors[mi].active_ws
+                let area = self.desktop.monitors[mi].usable_rect
+                let gap = self.desktop.gap
+                self.desktop.monitors[mi].workspaces[wi].strip.pan(-dx)
+                self.desktop.monitors[mi].workspaces[wi].strip.pan_end(area, gap)
+                self.sync_focus()
+                self.needs_layout = true
+            }
+        }
         Key(k) => {
             if not input.on_key(mut self, k) {
                 self.d.accept(e)
@@ -529,10 +727,36 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
             }
         }
         GpuReset => {
+            self.ensure_tick_img()
             self.rebuild_overlay()
             self.needs_layout = true
         }
-        Ready(token) => self.handle_ipc_ready(token)
+        Ready(token) => {
+            if token == tok_cfg_watch {
+                if let Some(got) = self.cfg_watch.take() {
+                    var watcher = got
+                    let changed = watcher.poll_changed()
+                    self.cfg_watch = Some(watcher)
+                    if changed {
+                        if let Err(err) = reload.reload_config(mut self) {
+                            io.eprint("pastel: auto-reload failed: {err}")
+                        }
+                    }
+                }
+            } else if token == tok_sighup {
+                if let Some(got) = self.sig_watch.take() {
+                    let triggered = got.drain()
+                    self.sig_watch = Some(got)
+                    if triggered {
+                        if let Err(err) = reload.reload_config(mut self) {
+                            io.eprint("pastel: reload failed: {err}")
+                        }
+                    }
+                }
+            } else {
+                self.handle_ipc_ready(token)
+            }
+        }
         _ => self.d.accept(e)
     }
     if self.needs_layout {
@@ -540,8 +764,24 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
     }
 }
 
-/// Clean shutdown of IPC socket and overlay textures.
+/// Clean shutdown of IPC socket, watchers, xwayland-satellite, and overlay textures.
 pub fn Pastel[O, R].shutdown(mut self) {
+    spawn.stop_xwayland(self.xwayland_pid)
+    self.xwayland_pid = 0
+    if let Some(got) = self.sig_watch.take() {
+        var sw = got
+        if sw.fd >= 0 {
+            self.d.unwatch(sw.fd)
+        }
+        sw.close()
+    }
+    if let Some(got) = self.cfg_watch.take() {
+        var watcher = got
+        if watcher.fd >= 0 {
+            self.d.unwatch(watcher.fd)
+        }
+        watcher.close()
+    }
     if let Some(got) = self.ipc_srv.take() {
         var srv = got
         srv.close()

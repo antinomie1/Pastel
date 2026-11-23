@@ -32,7 +32,7 @@ pastel (binary: event loop, input, windows, outputs, reload, spawn)
 | Per-frame placement & decoration lists | Reusable scratch buffers via `mem.replace` | Zero heap allocation per frame in steady state |
 | Animation springs | Analytical ODE state (`pos`, `vel`, `target`, `t0`) | O(1) evaluation at exact `vblank_ns`; refresh-rate independent; zero drift |
 | Blur textures | Lazily allocated half/quarter-res ping-pong pyramid | Zero VRAM when blur is unused or windows are opaque; cached in X-Ray mode |
-| Overlay glyph rendering | Static embedded 8x16 bitmap table | Zero fontconfig/freetype/pango/cairo RSS overhead; instant cold start (<0.5 ms) |
+| Overlay glyph rendering | Dynamically loaded FreeType2 + Fontconfig (`extern table`) | Zero extra link-time dependencies; crisp anti-aliased TrueType/OpenType text matching `[overlay].font` |
 
 ## 3. Event Loop & Zero-Idle Guarantee
 

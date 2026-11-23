@@ -11,10 +11,12 @@ background = "#1e2028"
 # Shell commands executed once at startup (with WAYLAND_DISPLAY set).
 autostart = []
 
-# Optional X11 compatibility via xwayland-satellite (launched on demand).
+# Optional X11 compatibility via xwayland-satellite (pure Wayland core; XWayland runs out-of-process).
 [xwayland]
 enabled = true
 path = "xwayland-satellite"
+display = ""                  # Fixed X11 display (e.g. ":0"); empty auto-picks first free :0..:31
+ready-timeout-ms = 1500       # Max ms to wait for X11 socket readiness before autostart (0..10000)
 
 # Per-monitor configuration. Add as many [[output]] blocks as needed.
 # [[output]]
@@ -29,6 +31,7 @@ path = "xwayland-satellite"
 mod = "super"                 # Meaning of `Mod` on DRM/bare-metal
 nested-mod = "alt"            # Meaning of `Mod` when nested in another Wayland session
 focus-follows-mouse = false
+warp-mouse-to-focus = false   # Warp pointer to focused monitor/window on keyboard monitor switches
 repeat-rate = 25
 repeat-delay = 600
 tap-to-click = true
@@ -84,7 +87,7 @@ opacity = 0.92                # Overlay panel opacity (inherits [window] border,
 # "Mod+D" = "spawn fuzzel"
 # "Mod+B" = "spawn firefox"
 
-# Per-window rules (case-sensitive substring match on app-id and/or title).
+# Per-window rules (substring match, or `*` wildcard glob on app-id and/or title).
 # Later matching rules override earlier ones.
 # [[window-rule]]
 # app-id = "foot"
@@ -92,3 +95,7 @@ opacity = 0.92                # Overlay panel opacity (inherits [window] border,
 # blur = true
 # default-width = 0.5
 # floating = false
+# fullscreen = false
+# maximized = false
+# workspace = 1
+# monitor = "DP-1"

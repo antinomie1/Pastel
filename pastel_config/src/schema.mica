@@ -37,6 +37,10 @@ pub fn CenterFocus.from_str(s: str) -> Result[CenterFocus, str] {
 pub struct XWaylandConfig {
     pub enabled: bool = true
     pub path: str = "xwayland-satellite"
+    /// Optional fixed X11 display (e.g. `":0"` or `":12"`); empty auto-picks first free display.
+    pub display: str = ""
+    /// Max milliseconds to wait for the X11 socket to become ready before launching autostart apps.
+    pub ready_timeout_ms: int = 1500
 }
 
 pub struct OutputConfig {
@@ -53,6 +57,7 @@ pub struct InputConfig {
     pub mod_key: ModKey = ModKey.Super
     pub nested_mod: ModKey = ModKey.Alt
     pub focus_follows_mouse: bool = false
+    pub warp_mouse_to_focus: bool = false
     pub repeat_rate: i32 = 25
     pub repeat_delay: i32 = 600
     pub tap_to_click: bool = true
@@ -121,18 +126,62 @@ pub struct WindowRule {
     pub border_width: Option[f32] = None
     pub default_width: Option[f64] = None
     pub floating: Option[bool] = None
+    pub fullscreen: Option[bool] = None
+    pub maximized: Option[bool] = None
     pub workspace: Option[int] = None
+    pub monitor: str = ""
 }
 
-/// Case-sensitive substring match on non-empty `app_id` and `title` criteria.
+/// Glob match supporting `*` wildcards (when `*` is present) or case-sensitive substring match otherwise.
+fn match_pattern(pattern: str, text: str) -> bool {
+    guard not pattern.is_empty() else {
+        return true
+    }
+    if not pattern.contains("*") {
+        return text.contains(pattern)
+    }
+    let parts = pattern.split("*")
+    let anchor_start = not pattern.starts_with("*")
+    let anchor_end = not pattern.ends_with("*")
+    var pos = 0
+    for i, part in parts {
+        if part.is_empty() {
+            continue
+        }
+        if i == 0 and anchor_start {
+            if not text.starts_with(part) {
+                return false
+            }
+            pos = part.len()
+        } else {
+            let rest = text.slice(pos, text.len())
+            guard let Some(idx) = rest.find(part) else {
+                return false
+            }
+            pos += idx + part.len()
+        }
+    }
+    if anchor_end {
+        let last = parts[parts.len() - 1].clone()
+        if not last.is_empty() and not text.ends_with(last) {
+            return false
+        }
+    }
+    return true
+}
+
+/// Match `app_id` and `title` criteria (supports `*` wildcards or substring match).
 pub fn WindowRule.matches(self, app_id: str, title: str) -> bool {
-    if not self.app_id.is_empty() and not app_id.contains(self.app_id) {
+    guard not self.app_id.is_empty() or not self.title.is_empty() else {
         return false
     }
-    if not self.title.is_empty() and not title.contains(self.title) {
+    if not self.app_id.is_empty() and not match_pattern(self.app_id, app_id) {
         return false
     }
-    return not self.app_id.is_empty() or not self.title.is_empty()
+    if not self.title.is_empty() and not match_pattern(self.title, title) {
+        return false
+    }
+    return true
 }
 
 /// Effective styling and placement hints resolved for a specific window.
@@ -143,5 +192,8 @@ pub struct ResolvedWindow {
     pub border_width: f32 = 2.0
     pub default_width: f64 = 0.5
     pub floating: Option[bool] = None
+    pub fullscreen: Option[bool] = None
+    pub maximized: Option[bool] = None
     pub workspace: Option[int] = None
+    pub monitor: str = ""
 }

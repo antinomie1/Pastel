@@ -9,11 +9,16 @@ test "hotkey overlay rasterizes cleanly with TrueType font and pastel-rs styling
     let img = ren.overlay.render_hotkey_overlay(c, cfg.ModKey.Super, 1.0).expect("overlay font")
     assert(img.width > 300 and img.height > 150)
     assert_eq(img.pixels.len(), int(img.width) * int(img.height) * 4)
-    // Top-left corner pixel matches pastel-rs premultiplied panel `[19, 21, 27, 209]`.
-    assert_eq(img.pixels[0], u8(19))
-    assert_eq(img.pixels[1], u8(21))
-    assert_eq(img.pixels[2], u8(27))
-    assert_eq(img.pixels[3], u8(209))
+    // Top-left corner pixel derives cleanly from default background (#1e2028) & overlay.opacity (0.92).
+    assert(img.pixels[0] >= u8(18) and img.pixels[0] <= u8(22))
+    assert(img.pixels[1] >= u8(19) and img.pixels[1] <= u8(23))
+    assert(img.pixels[2] >= u8(24) and img.pixels[2] <= u8(29))
+    assert(img.pixels[3] >= u8(205) and img.pixels[3] <= u8(213))
+    // Custom background & [overlay].opacity visibly change the rendered panel.
+    let c_custom = cfg.from_toml("background = \"#402020\"\n[overlay]\nopacity = 0.5\n").expect("custom cfg")
+    let img2 = ren.overlay.render_hotkey_overlay(c_custom, cfg.ModKey.Super, 1.0).expect("custom overlay")
+    assert(img2.pixels[0] > img2.pixels[2])
+    assert(img2.pixels[3] < u8(140))
     // Verify anti-aliased glyphs actually rendered bright pixels onto the panel.
     var lit = 0
     for i in 0..int(img.width) * int(img.height) {
@@ -109,6 +114,213 @@ test "PastelRenderer renders GPU SDF square borders and Dual-Kawase frosted glas
     let ci = (64 * 128 + 64) * 4
     assert(pixels[ci + 2] > 80) // R channel (BGRA layout)
     assert(pixels[ci] > 20) // B channel from blurred backdrop
+    r.drop_target(tkey)
+    r.close()
+}
+
+test "PastelRenderer partial damage, blur expansion, native-alpha blur, X-Ray wallpaper update, and overlay skip" {
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(rr) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped: no Vulkan device")
+        return
+    }
+    var r = rr
+    r.add_output(0, 256, 256, vec4(0.05, 0.05, 0.1, 1.0))
+    let ts = r.targets(types.Want { width: 256, height: 256, format: types.buffer.xrgb8888, count: 1, export: false }).expect("targets")
+    let tkey = ts[0].key
+
+    // 1. Opaque XRGB window with blur permitted (opacity=1.0) must NOT activate blur.
+    var opq_px: List[u8] = []
+    for _ in 0..64 * 64 {
+        opq_px.push(20)
+        opq_px.push(20)
+        opq_px.push(200)
+        opq_px.push(255)
+    }
+    let opq_key: u64 = 10
+    assert(r.image(opq_key, 64, 64, types.buffer.xbgr8888, opq_px, 64 * 4))
+    sheet.set_output(0, core.Color.rgb(0.05, 0.05, 0.1), ren.BlurSettings { enabled: true, xray: false, passes: 2, offset: 2.0 }, [
+        ren.WindowEffect {
+            key: 0,
+            x: 16.0,
+            y: 16.0,
+            w: 64.0,
+            h: 64.0,
+            border_width: 2.0,
+            border_color: vec4(1.0, 1.0, 1.0, 1.0),
+            blur: true,
+            blur_xray: false,
+            blur_opacity: 1.0,
+        },
+    ])
+    r.layout(0, [types.Placement { key: opq_key, tex: opq_key, x: 16.0, y: 16.0, w: 64.0, h: 64.0, opacity: 1.0 }])
+    assert(r.render(0, tkey, 0).expect("initial draw").is_some())
+    // No changes: both age=1 and age=2 must skip GPU work cleanly.
+    assert(r.idle(0))
+    assert(r.render(0, tkey, 1).expect("idle age 1").is_none())
+    assert(r.render(0, tkey, 2).expect("idle age 2").is_none())
+
+    // Small commit on opaque window produces tight partial damage (< 30x30).
+    let opq_rect: List[(i32, i32, i32, i32)] = [(i32(10), i32(10), i32(8), i32(8))]
+    r.commit(opq_key, opq_rect)
+    assert(not r.idle(0))
+    assert(r.render(0, tkey, 1).expect("partial commit").is_some())
+    var dmg: List[(i32, i32, i32, i32)] = []
+    r.changed(0, mut dmg)
+    assert_eq(dmg.len(), 1)
+    assert(dmg[0].2 < 32 and dmg[0].3 < 32)
+
+    // 2. Native-alpha ABGR surface with opacity=1.0 activates live blur AND expands commit damage.
+    var alpha_px: List[u8] = []
+    for _ in 0..64 * 64 {
+        alpha_px.push(10)
+        alpha_px.push(10)
+        alpha_px.push(10)
+        alpha_px.push(100)
+    }
+    let alpha_key: u64 = 11
+    assert(r.image(alpha_key, 64, 64, types.buffer.abgr8888, alpha_px, 64 * 4))
+    r.layout(0, [types.Placement { key: alpha_key, tex: alpha_key, x: 16.0, y: 16.0, w: 64.0, h: 64.0, opacity: 1.0 }])
+    assert(r.render(0, tkey, 0).expect("native alpha initial").is_some())
+    let alpha_rect: List[(i32, i32, i32, i32)] = [(i32(20), i32(20), i32(4), i32(4))]
+    r.commit(alpha_key, alpha_rect)
+    assert(r.render(0, tkey, 1).expect("live blur commit").is_some())
+    dmg.clear()
+    r.changed(0, mut dmg)
+    assert(not dmg.is_empty())
+    // Expanded by blur kernel radius (> 32px), yet strictly smaller than full 256x256 output.
+    assert(dmg[0].2 > 32 and dmg[0].2 < 256)
+
+    // 3. X-Ray blur behind translucent window invalidates when underlying wallpaper commits.
+    var wp_red: List[u8] = []
+    var wp_green: List[u8] = []
+    for _ in 0..256 * 256 {
+        wp_red.push(220)
+        wp_red.push(20)
+        wp_red.push(20)
+        wp_red.push(255)
+        wp_green.push(20)
+        wp_green.push(220)
+        wp_green.push(20)
+        wp_green.push(255)
+    }
+    let wp_key: u64 = 12
+    assert(r.image(wp_key, 256, 256, types.buffer.xbgr8888, wp_red, 256 * 4))
+    sheet.set_output(0, core.Color.rgb(0.05, 0.05, 0.1), ren.BlurSettings { enabled: true, xray: true, passes: 2, offset: 2.0 }, [
+        ren.WindowEffect {
+            key: 0,
+            x: 64.0,
+            y: 64.0,
+            w: 128.0,
+            h: 128.0,
+            border_width: 2.0,
+            border_color: vec4(1.0, 1.0, 1.0, 1.0),
+            blur: true,
+            blur_xray: true,
+            blur_opacity: 1.0,
+        },
+    ])
+    r.layout(0, [
+        types.Placement { key: wp_key, tex: wp_key, x: 0.0, y: 0.0, w: 256.0, h: 256.0, opacity: 1.0 },
+        types.Placement { key: alpha_key, tex: alpha_key, x: 64.0, y: 64.0, w: 128.0, h: 128.0, opacity: 1.0 },
+    ])
+    assert(r.render(0, tkey, 0).expect("xray red wp").is_some())
+    let px1 = r.read(tkey).expect("read red")
+    let mid = (128 * 256 + 128) * 4
+    assert(px1[mid + 2] > px1[mid + 1] + 40) // Red dominates Green (BGRA)
+
+    // Update wallpaper to green and commit: X-Ray cache must refresh automatically.
+    assert(r.image(wp_key, 256, 256, types.buffer.xbgr8888, wp_green, 256 * 4))
+    let all_rects: List[(i32, i32, i32, i32)] = []
+    r.commit(wp_key, all_rects)
+    assert(r.render(0, tkey, 1).expect("xray green wp").is_some())
+    let px2 = r.read(tkey).expect("read green")
+    assert(px2[mid + 1] > px2[mid + 2] + 40) // Green dominates Red (BGRA)
+
+    // 4. Hardware overlay promotion skips drawing client texture on primary while keeping border.
+    sheet.set_output(0, core.Color.rgb(0.0, 0.0, 0.0), ren.BlurSettings { enabled: false }, [
+        ren.WindowEffect {
+            key: 0,
+            x: 32.0,
+            y: 32.0,
+            w: 64.0,
+            h: 64.0,
+            border_width: 4.0,
+            border_color: vec4(1.0, 1.0, 1.0, 1.0),
+            blur: false,
+        },
+    ])
+    r.layout(0, [types.Placement { key: opq_key, tex: opq_key, x: 32.0, y: 32.0, w: 64.0, h: 64.0, opacity: 1.0 }])
+    r.set_overlays(0, [opq_key])
+    assert(r.render(0, tkey, 0).expect("overlay render").is_some())
+    let px3 = r.read(tkey).expect("read overlay")
+    // Interior of promoted overlay stays background black (0,0,0), outer border at (30,30) is white!
+    let in_ov = (64 * 256 + 64) * 4
+    let on_bd = (30 * 256 + 30) * 4
+    assert(px3[in_ov] < 5 and px3[in_ov + 1] < 5 and px3[in_ov + 2] < 5)
+    assert(px3[on_bd] > 200 and px3[on_bd + 1] > 200 and px3[on_bd + 2] > 200)
+
+    r.drop_target(tkey)
+    r.close()
+}
+
+test "AnimState window-close animation and PastelRenderer hotplug output index mapping" {
+    let c = cfg.Config.default()
+    var anims = ren.AnimState.new()
+    anims.open_window(7, core.Rect.new(20.0, 20.0, 400.0, 300.0), 1.0, true, c.animation, c.window, 0)
+    anims.begin_frame()
+    discard anims.tick_window(7, 500000000)
+    anims.close_window(7, 0.0, 2.0, 12.0, c.window.shadow_color, 0, c.animation, 500000000)
+    assert(anims.windows.get(7).is_none())
+    var frames: List[ren.ClosingFrame] = []
+    anims.begin_frame()
+    anims.tick_closing(550000000, mut frames)
+    assert_eq(frames.len(), 1)
+    assert(anims.is_active())
+    assert(frames[0].opacity > 0.0 and frames[0].opacity < 1.0)
+    anims.begin_frame()
+    anims.tick_closing(1500000000, mut frames)
+    assert(frames.is_empty())
+    assert(not anims.is_active())
+
+    // Verify hotplug: unplugging output 0 still maps dense sheet index 0 to surviving output slot 1.
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(rr) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped: no Vulkan device")
+        return
+    }
+    var r = rr
+    r.add_output(0, 128, 128, vec4(0.0, 0.0, 0.0, 1.0))
+    r.add_output(1, 128, 128, vec4(0.0, 0.0, 0.0, 1.0))
+    r.remove_output(0)
+    let ts = r.targets(types.Want { width: 128, height: 128, format: types.buffer.xrgb8888, count: 1, export: false }).expect("targets")
+    let tkey = ts[0].key
+    var px: List[u8] = []
+    for _ in 0..64 * 64 {
+        px.push(20)
+        px.push(20)
+        px.push(20)
+        px.push(255)
+    }
+    let wkey: u64 = 55
+    assert(r.image(wkey, 64, 64, types.buffer.xbgr8888, px, 64 * 4))
+    // Dense index 0 (only surviving output!) sets a crisp white border for output slot 1.
+    sheet.set_output(0, core.Color.rgb(0.0, 0.0, 0.0), ren.BlurSettings { enabled: false }, [
+        ren.WindowEffect {
+            key: 0,
+            x: 32.0,
+            y: 32.0,
+            w: 64.0,
+            h: 64.0,
+            border_width: 4.0,
+            border_color: vec4(1.0, 1.0, 1.0, 1.0),
+        },
+    ])
+    r.layout(1, [types.Placement { key: wkey, tex: wkey, x: 32.0, y: 32.0, w: 64.0, h: 64.0, opacity: 1.0 }])
+    assert(r.render(1, tkey, 0).expect("render slot 1").is_some())
+    let fb = r.read(tkey).expect("read slot 1")
+    let bi = (30 * 128 + 30) * 4
+    assert(fb[bi] > 200 and fb[bi + 1] > 200 and fb[bi + 2] > 200)
     r.drop_target(tkey)
     r.close()
 }

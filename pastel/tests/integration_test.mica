@@ -156,3 +156,68 @@ test "end-to-end headless Pastel tiles Wayland clients, animates scrolling, togg
     let fb = p.d.read_output(out).expect("read headless fb")
     assert_eq(fb.len(), 1280 * 720 * 4)
 }
+
+test "RequestActivate syncs desktop workspace/focus and inotify auto-reloads config on save" {
+    let dir = fs.create_temp_dir("pastel-e2e-watch").expect("temp dir")
+    discard env.set("XDG_RUNTIME_DIR", dir.clone())
+    let cfg_path = "{dir}/config.toml"
+    discard fs.write(cfg_path.clone(), "[layout]\ngap = 12.0\n").expect("write initial config")
+
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(comp_ren) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped: no Vulkan device")
+        return
+    }
+    let mode = lum.Mode { width: 1280, height: 720, refresh_mhz: 120000 }
+    let opts = lum.Options { backend: lum.Kind.Headless, headless: [mode], title: "Pastel-Watch-Test" }
+    let be = lum.backend.Backend.open(lum.backend.Options { kind: lum.Kind.Headless, headless: [mode] }).expect("headless")
+    let disp = lum.display.Display.with(opts, be, comp_ren).expect("display")
+
+    let config = cfg.load(cfg_path.clone()).expect("load config")
+    var p = pastel.compositor.Pastel.new(disp, config, cfg_path.clone(), false, sheet)
+    defer p.shutdown()
+    p.enable_config_watch()
+
+    let conn = wire.connect(p.d.socket()).expect("connect wayland")
+    var fx = ClientFx { c: conn }
+    let comp = wl.Compositor { id: bind_global(mut p, mut fx, wl.compositor_iface, 6) }
+    let shm = wl.Shm { id: bind_global(mut p, mut fx, wl.shm_iface, 1) }
+    let wm = xdg.WmBase { id: bind_global(mut p, mut fx, xdg.wm_base_iface, 2) }
+
+    // Map window on workspace 1, switch to workspace 2, then send RequestActivate for window 1.
+    map_shm_window(mut p, mut fx, comp, shm, wm, "app1", "Win 1", 600, 680)
+    let w1_id = p.desktop.focused_window().unwrap()
+    let w1 = p.win_by_id.get(w1_id).unwrap()
+    pastel.input.dispatch_action(mut p, cfg.Action.FocusWorkspace(2)).expect("ws 2")
+    assert_eq(p.desktop.monitors[0].active_ws, 1)
+    assert(p.desktop.focused_window().is_none())
+
+    p.handle_event(lum.Event.RequestActivate(w1))
+    assert_eq(p.desktop.monitors[0].active_ws, 0)
+    assert_eq(p.desktop.focused_window(), Some(w1_id))
+
+    // Modify config.toml on disk and verify inotify auto-reload updates gap and repeat-rate live.
+    assert_eq(p.desktop.gap, 12.0)
+    discard fs.write(cfg_path.clone(), "[layout]\ngap = 24.0\n[input]\nrepeat-rate = 40\nrepeat-delay = 300\n").expect("write updated config")
+    pump(mut p, mut fx, 60)
+    assert_eq(p.desktop.gap, 24.0)
+    assert_eq(p.cfg.input.repeat_rate, 40)
+    assert_eq(p.cfg.input.repeat_delay, 300)
+
+    // Verify exact window_key is emitted into EffectSheet (non-zero, no geometry guessing).
+    let snap = p.sheet.snapshot(0)
+    assert(not snap.items.is_empty())
+    assert_eq(snap.items[0].key, p.d.window_key(w1))
+    assert(snap.items[0].key != u64(0))
+
+    // Invalid config write must preserve the working gap = 24.0 without crashing.
+    discard fs.write(cfg_path, "[layout]\nunknown-bad-key = 1\n").expect("write bad config")
+    pump(mut p, mut fx, 60)
+    assert_eq(p.desktop.gap, 24.0)
+
+    // Verify rotation-invariant output_scale for portrait 90° outputs (e.g. 2560x1440 rotated to 1440x2560 or 720x1280).
+    let mode_4k = lum.Mode { width: 2560, height: 1440, refresh_mhz: 144000 }
+    assert((pastel.outputs.output_scale(2560.0, 1440.0, mode_4k) - 1.0).abs() < 0.001)
+    assert((pastel.outputs.output_scale(1440.0, 2560.0, mode_4k) - 1.0).abs() < 0.001)
+    assert((pastel.outputs.output_scale(720.0, 1280.0, mode_4k) - 2.0).abs() < 0.001)
+}

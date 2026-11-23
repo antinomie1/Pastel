@@ -25,7 +25,7 @@ Two Vulkan fragment shaders (`blur_down.frag.spv` 5-tap downsample, `blur_up.fra
 
 ## 4. Visually Consistent Hotkey Overlay
 
-The niri-style hotkey overlay (`Mod+Shift+/`, optionally shown on startup) renders clean, anti-aliased TrueType/OpenType typography onto a premultiplied RGBA8 panel (`[19, 21, 27, 209]`) via dynamically loaded `libfontconfig.so.1` and `libfreetype.so.6` (`pastel_render.font`):
+The niri-style hotkey overlay (`Mod+Shift+/`, optionally shown on startup) renders clean, anti-aliased TrueType/OpenType typography onto a translucent premultiplied RGBA8 panel derived directly from `background` and `[overlay].opacity` via dynamically loaded `libfontconfig.so.1` and `libfreetype.so.6` (`pastel_render.font`):
 
 - **Zero extra link-time dependencies**: Fontconfig and FreeType2 are loaded lazily at runtime via Mica `extern table` only when rasterizing the overlay, keeping the binary footprint minimal (`~2.1 MB`, 20 shared libraries).
 - **Clean typography & layout**: Title `"Hotkeys"`, 4 balanced sections (`Windows`, `Columns`, `Workspaces`, `Session`) split cleanly across two columns, folded keybindings (e.g., `Super + H / Left`) in `[window].active-color`, descriptions in crisp off-white, and `[overlay].font` configurable (default `"sans-serif"`).

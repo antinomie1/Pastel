@@ -112,15 +112,20 @@ fn run_compositor(cfg_path: str, backend_name: str, validation: bool, startup: s
 
     var pastel = compositor.Pastel.new(disp, config, cfg_path, is_nested, sheet)
     defer pastel.shutdown()
+    // Ignore SIGPIPE so disconnecting IPC clients never terminate the compositor.
+    discard signal.ignore(signal.pipe)
     pastel.enable_ipc()
+    pastel.enable_config_watch()
+    // Prefer zero-wakeup signalfd for SIGHUP; fall back to std.signal if unavailable.
+    let has_signalfd = pastel.enable_signal_watch()
+    if not has_signalfd {
+        discard signal.watch(signal.hangup)
+    }
     io.eprint("pastel: WAYLAND_DISPLAY={pastel.d.socket()}")
     pastel.run_startup(startup)
 
-    // Watch SIGHUP for live config reload (`kill -HUP $(pidof pastel)`).
-    discard signal.watch(1)
-
     while true {
-        if signal.received(1) {
+        if not has_signalfd and signal.received(signal.hangup) {
             if let Err(err) = reload.reload_config(mut pastel) {
                 io.eprint("pastel: reload failed: {err}")
             }

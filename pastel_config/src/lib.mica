@@ -15,6 +15,7 @@ pub type KeyCombo = keys.KeyCombo
 pub type ModMask = keys.ModMask
 pub type ModKey = schema.ModKey
 pub type CenterFocus = schema.CenterFocus
+pub type XWaylandConfig = schema.XWaylandConfig
 pub type OutputConfig = schema.OutputConfig
 pub type InputConfig = schema.InputConfig
 pub type LayoutConfig = schema.LayoutConfig

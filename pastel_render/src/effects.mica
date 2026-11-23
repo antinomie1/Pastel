@@ -40,11 +40,27 @@ pub struct WindowEffect {
     pub is_overlay: bool = false
 }
 
+/// Fading visual ghost emitted while a closed window runs its `[animation].window-close` curve.
+pub struct ClosingEffect {
+    pub x: f32 = 0.0
+    pub y: f32 = 0.0
+    pub w: f32 = 0.0
+    pub h: f32 = 0.0
+    pub radius: f32 = 0.0
+    pub border_width: f32 = 0.0
+    pub border_color: vec4 = zeroed()
+    pub shadow_size: f32 = 0.0
+    pub shadow_color: vec4 = zeroed()
+    pub fill_color: vec4 = zeroed()
+    pub opacity: f32 = 0.0
+}
+
 /// Per-output visual state pushed from the compositor before each layout update.
 pub struct OutputEffects {
     pub background: vec4 = zeroed()
     pub blur: BlurSettings = BlurSettings {}
     pub items: List[WindowEffect] = []
+    pub closing: List[ClosingEffect] = []
     pub generation: u64 = 0
 }
 
@@ -68,8 +84,15 @@ pub fn EffectSheet.clone(self) -> EffectSheet {
 
 /// Update output `o`'s effects atomically, bumping the sheet generation.
 pub fn EffectSheet.set_output(self, o: int, bg: core.Color, blur: BlurSettings, take items: List[WindowEffect]) {
+    let empty_closing: List[ClosingEffect] = []
+    self.set_output_full(o, bg, blur, items, empty_closing)
+}
+
+/// Update output `o`'s effects and closing-window ghost animations atomically.
+pub fn EffectSheet.set_output_full(self, o: int, bg: core.Color, blur: BlurSettings, take items: List[WindowEffect], take closing: List[ClosingEffect]) {
     let bgv = bg.premul()
     let copy = items
+    let ccopy = closing
     self.inner.write(fn(mut s: SheetData) {
         while s.outputs.len() <= o {
             s.outputs.push(OutputEffects {})
@@ -79,6 +102,7 @@ pub fn EffectSheet.set_output(self, o: int, bg: core.Color, blur: BlurSettings, 
             background: bgv,
             blur,
             items: copy.clone(),
+            closing: ccopy.clone(),
             generation: s.generation,
         }
     })

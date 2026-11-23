@@ -1,13 +1,223 @@
-// Live configuration reload without restarting the compositor.
+// Live configuration reload without restarting the compositor, plus zero-wakeup inotify & SIGHUP watchers.
 
+import std.fs
 import std.io
 import std.json
+import std.os
+import std.path
 import luminaria as lum
 import pastel_config as cfg
 import pastel_layout as lay
 import compositor
 import outputs
+import spawn
 import windows
+
+extern table LinuxWatchLibc {
+    fn inotify_init1(flags: i32) -> i32 = "inotify_init1"
+    fn inotify_add_watch(fd: i32, pathname: str, mask: u32) -> i32 = "inotify_add_watch"
+    fn sigemptyset(set: Ptr[u8]) -> i32 = "sigemptyset"
+    fn sigaddset(set: Ptr[u8], signum: i32) -> i32 = "sigaddset"
+    fn sigprocmask(how: i32, set: Ptr[u8], oldset: Ptr[u8]) -> i32 = "sigprocmask"
+    fn signalfd(fd: i32, mask: Ptr[u8], flags: i32) -> i32 = "signalfd"
+}
+
+let in_nonblock: i32 = 0x800
+let in_cloexec: i32 = 0x80000
+let in_watch_mask: u32 = 0x00000008 | 0x00000080 | 0x00000100 | 0x00000200 // IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE
+let sig_block: i32 = 0
+let sfd_nonblock: i32 = 0x800
+let sfd_cloexec: i32 = 0x80000
+let sighup_num: i32 = 1
+
+fn open_libc() -> Option[LinuxWatchLibc] {
+    let names = ["libc.so.6", "libc.musl-x86_64.so.1", "libc.musl-aarch64.so.1", "libc.so"]
+    for name in names {
+        if let Ok(lib) = LinuxWatchLibc.open(name) {
+            return Some(lib)
+        }
+    }
+    return None
+}
+
+/// Find the nearest existing ancestor directory of `target_dir` so watching works even
+/// when `~/.config/pastel` does not exist yet at compositor startup.
+fn nearest_existing_dir(target_dir: str) -> Option[str] {
+    var cur = target_dir.clone()
+    for _ in 0..16 {
+        if fs.exists(cur) {
+            return Some(cur)
+        }
+        guard let Some(p) = path.parent(cur) else {
+            break
+        }
+        if p == cur or p.is_empty() {
+            break
+        }
+        cur = p
+    }
+    return None
+}
+
+/// Zero-wakeup Linux inotify watcher on the config file's parent directory (or nearest existing ancestor).
+pub struct ConfigWatcher {
+    pub fd: int = -1
+    pub path: str = ""
+    pub target_dir: str = ""
+    pub watching_target: bool = false
+    pub last_text: str = ""
+}
+
+pub fn ConfigWatcher.open(cfg_path: str) -> Option[ConfigWatcher] {
+    guard not cfg_path.is_empty() else {
+        return None
+    }
+    let target_dir = path.parent(cfg_path).unwrap_or(".")
+    guard let Some(watch_dir) = nearest_existing_dir(target_dir) else {
+        return None
+    }
+    guard let Some(libc) = open_libc() else {
+        return None
+    }
+    let fd = int(libc.inotify_init1(in_nonblock | in_cloexec))
+    guard fd >= 0 else {
+        return None
+    }
+    let wd = libc.inotify_add_watch(i32(fd), watch_dir, in_watch_mask)
+    if wd < 0 {
+        os.close(fd)
+        return None
+    }
+    let initial = if fs.exists(cfg_path) { fs.read_to_str(cfg_path).unwrap_or("") } else { "" }
+    return Some(ConfigWatcher {
+        fd,
+        path: cfg_path.clone(),
+        target_dir: target_dir.clone(),
+        watching_target: watch_dir == target_dir,
+        last_text: initial,
+    })
+}
+
+/// Drain pending inotify events, attach to `target_dir` once created, and return `true` if contents changed.
+pub fn ConfigWatcher.poll_changed(mut self) -> bool {
+    guard self.fd >= 0 else {
+        return false
+    }
+    var buf: List[u8] = List.with_cap(1024)
+    for _ in 0..1024 {
+        buf.push(u8(0))
+    }
+    while true {
+        match os.read_into(self.fd, mut buf) {
+            Ok(n) => {
+                if n <= 0 {
+                    break
+                }
+            }
+            Err => {
+                break
+            }
+        }
+    }
+    if not self.watching_target and fs.exists(self.target_dir) {
+        if let Some(libc) = open_libc() {
+            if libc.inotify_add_watch(i32(self.fd), self.target_dir, in_watch_mask) >= 0 {
+                self.watching_target = true
+            }
+        }
+    }
+    let text = if fs.exists(self.path) {
+        match fs.read_to_str(self.path) {
+            Ok(s) => s
+            Err => {
+                return false
+            }
+        }
+    } else {
+        ""
+    }
+    if text == self.last_text {
+        return false
+    }
+    self.last_text = text
+    return true
+}
+
+pub fn ConfigWatcher.sync_disk(mut self) {
+    self.last_text = if fs.exists(self.path) { fs.read_to_str(self.path).unwrap_or("") } else { "" }
+}
+
+pub fn ConfigWatcher.close(mut self) {
+    if self.fd >= 0 {
+        os.close(self.fd)
+        self.fd = -1
+    }
+}
+
+/// Zero-wakeup Linux signalfd watcher for SIGHUP so `kill -HUP` wakes epoll immediately while idle.
+pub struct SignalWatcher {
+    pub fd: int = -1
+}
+
+pub fn SignalWatcher.open_sighup() -> Option[SignalWatcher] {
+    guard let Some(libc) = open_libc() else {
+        return None
+    }
+    // sigset_t is 128 bytes on Linux (glibc & musl).
+    var mask: List[u8] = List.with_cap(128)
+    for _ in 0..128 {
+        mask.push(u8(0))
+    }
+    unsafe {
+        let p = mask.as_ptr()
+        guard libc.sigemptyset(p) == 0 else {
+            return None
+        }
+        guard libc.sigaddset(p, sighup_num) == 0 else {
+            return None
+        }
+        guard libc.sigprocmask(sig_block, p, Ptr.null()) == 0 else {
+            return None
+        }
+        let fd = int(libc.signalfd(-1, p, sfd_nonblock | sfd_cloexec))
+        guard fd >= 0 else {
+            return None
+        }
+        return Some(SignalWatcher { fd })
+    }
+}
+
+pub fn SignalWatcher.drain(self) -> bool {
+    guard self.fd >= 0 else {
+        return false
+    }
+    var buf: List[u8] = List.with_cap(128)
+    for _ in 0..128 {
+        buf.push(u8(0))
+    }
+    var got = false
+    while true {
+        match os.read_into(self.fd, mut buf) {
+            Ok(n) => {
+                if n <= 0 {
+                    break
+                }
+                got = true
+            }
+            Err => {
+                break
+            }
+        }
+    }
+    return got
+}
+
+pub fn SignalWatcher.close(mut self) {
+    if self.fd >= 0 {
+        os.close(self.fd)
+        self.fd = -1
+    }
+}
 
 pub fn center_mode(m: cfg.CenterFocus) -> lay.CenterMode {
     return match m {
@@ -20,9 +230,34 @@ pub fn center_mode(m: cfg.CenterFocus) -> lay.CenterMode {
 /// Reload `p.cfg_path` cleanly. On error, keeps the current working config intact.
 pub fn reload_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) -> Result[(), str] {
     let next = try cfg.load(p.cfg_path)
+    let xw_changed = next.xwayland.enabled != p.cfg.xwayland.enabled or next.xwayland.path != p.cfg.xwayland.path or next.xwayland.display != p.cfg.xwayland.display
     p.cfg = next
+    if let Some(got) = p.cfg_watch.take() {
+        var watcher = got
+        watcher.sync_disk()
+        p.cfg_watch = Some(watcher)
+    }
     p.desktop.reconfigure(p.cfg.layout.workspaces, p.cfg.layout.gap, p.cfg.layout.default_width, center_mode(p.cfg.layout.center_focus))
-    outputs.apply_keymap(mut p)
+    outputs.apply_keymap(mut p, true)
+    // Live reload keyboard repeat rate & delay across all seats.
+    p.d.set_repeat(p.cfg.input.repeat_rate, p.cfg.input.repeat_delay)
+    // Re-apply pointer/touchpad settings to every currently connected input device.
+    let devs = p.input_devices.clone()
+    for dev in devs {
+        outputs.apply_input_config(mut p, dev)
+    }
+    // Live reconcile xwayland-satellite lifecycle when `[xwayland]` changed.
+    if xw_changed {
+        spawn.stop_xwayland(p.xwayland_pid)
+        p.xwayland_pid = 0
+        p.xwayland_display = ""
+        if p.cfg.xwayland.enabled {
+            let (disp, pid) = spawn.start_xwayland(p.cfg.xwayland, p.d.socket())
+            p.xwayland_display = disp
+            p.xwayland_pid = pid
+        }
+        spawn.export_session_env(p.d.socket(), p.xwayland_display.clone(), p.nested)
+    }
     for so in p.d.outputs() {
         outputs.apply_output_config(mut p, so)
     }
@@ -32,8 +267,9 @@ pub fn reload_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor
     for w in wins {
         windows.resolve_rules(mut p, w)
     }
-    // Re-rasterize hotkey overlay with updated colors, border width, radius, and bindings.
+    // Re-rasterize hotkey overlay with updated colors, border width, radius, opacity, and bindings.
     p.rebuild_overlay()
+    p.sync_focus()
     p.needs_layout = true
     p.broadcast_event("config-reloaded", json.obj().with("path", json.Value.Str(p.cfg_path.clone())))
     io.eprint("pastel: reloaded config from {p.cfg_path}")

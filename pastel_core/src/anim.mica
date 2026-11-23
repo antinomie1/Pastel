@@ -15,6 +15,7 @@ pub struct Anim {
     pub spec: curve.CurveSpec = curve.CurveSpec.Spring(curve.Spring {})
     pub active: bool = false
     pub eps: f64 = 0.05
+    pub max_duration_s: f64 = 5.0
 }
 
 pub fn Anim.new(initial: f64) -> Anim {
@@ -53,6 +54,7 @@ pub fn Anim.retarget(mut self, next_target: f64, spec: curve.CurveSpec, now_ns: 
     self.target = next_target
     self.t0 = now_ns
     self.spec = spec.scaled(slowdown)
+    self.max_duration_s = 5.0 * max(slowdown, 1.0)
     self.active = true
 }
 
@@ -74,7 +76,7 @@ pub fn Anim.tick(mut self, now_ns: int) -> f64 {
     let (pos, vel) = self.spec.eval(elapsed, self.x0, self.v0, self.target)
     let done = match self.spec {
         Ease => self.spec.settled(elapsed, self.x0, self.v0, self.target)
-        Spring => elapsed >= 5.0 or ((pos - self.target).abs() <= self.eps and vel.abs() <= self.eps * 10.0)
+        Spring => elapsed >= self.max_duration_s or ((pos - self.target).abs() <= self.eps and vel.abs() <= self.eps * 10.0)
     }
     if done {
         self.snap(self.target)
@@ -120,6 +122,10 @@ pub fn AnimRect.tick(mut self, now_ns: int) -> geom.Rect {
 
 pub fn AnimRect.is_active(self) -> bool {
     return self.x.active or self.y.active or self.w.active or self.h.active
+}
+
+pub fn AnimRect.target_center(self) -> geom.Point {
+    return geom.Point { x: self.x.target + self.w.target * 0.5, y: self.y.target + self.h.target * 0.5 }
 }
 
 /// Retargetable RGBA color transition (e.g. focus ring color).

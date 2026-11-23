@@ -12,6 +12,7 @@ import windows
 
 let btn_left: u32 = 272
 let btn_right: u32 = 273
+let scroll_step_threshold: f64 = 15.0
 
 fn effective_mod[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R]) -> cfg.ModKey {
     return if p.nested { p.cfg.input.nested_mod } else { p.cfg.input.mod_key }
@@ -23,6 +24,36 @@ fn mod_down[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R]
         Alt => m.alt
         Ctrl => m.ctrl
     }
+}
+
+/// True when the active workspace is focused on a tiled window (not floating or fullscreen).
+fn tiled_focused[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R]) -> bool {
+    guard not p.desktop.monitors.is_empty() else {
+        return false
+    }
+    let mi = p.desktop.active_monitor
+    let wi = p.desktop.monitors[mi].active_ws
+    guard wi < p.desktop.monitors[mi].workspaces.len() else {
+        return false
+    }
+    return p.desktop.monitors[mi].workspaces[wi].fullscreen.is_none() and not p.desktop.monitors[mi].workspaces[wi].focus_floating and not p.desktop.monitors[mi].workspaces[wi].strip.is_empty()
+}
+
+/// Optional cursor warp to the newly focused monitor or window center when `[input].warp-mouse-to-focus` is enabled.
+fn maybe_warp_pointer[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) {
+    guard p.cfg.input.warp_mouse_to_focus and not p.desktop.monitors.is_empty() else {
+        return
+    }
+    if let Some(id) = p.desktop.focused_window() {
+        if let Some(wa) = p.anims.windows.get(id) {
+            let c = wa.rect.target_center()
+            p.d.warp(c.x, c.y)
+            return
+        }
+    }
+    let mi = p.desktop.active_monitor
+    let c = p.desktop.monitors[mi].usable_rect.center()
+    p.d.warp(c.x, c.y)
 }
 
 /// Dispatch any compositor action (from keybindings or IPC).
@@ -40,14 +71,17 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             p.set_overlay_visible(not p.overlay_visible, now)
         }
         CloseWindow => {
-            if let Some(w) = p.d.focused() {
-                p.d.close(w)
+            if let Some(id) = p.desktop.focused_window() {
+                if let Some(w) = p.win_by_id.get(id) {
+                    p.d.close(w)
+                }
             }
         }
         FocusColumnLeft => {
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                p.desktop.monitors[mi].workspaces[wi].fullscreen = None
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(-1, 0)
                 p.sync_focus()
@@ -58,6 +92,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                p.desktop.monitors[mi].workspaces[wi].fullscreen = None
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(1, 0)
                 p.sync_focus()
@@ -68,6 +103,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                p.desktop.monitors[mi].workspaces[wi].fullscreen = None
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_first()
                 p.sync_focus()
@@ -78,6 +114,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                p.desktop.monitors[mi].workspaces[wi].fullscreen = None
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_last()
                 p.sync_focus()
@@ -88,6 +125,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                p.desktop.monitors[mi].workspaces[wi].fullscreen = None
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(0, 1)
                 p.sync_focus()
@@ -98,6 +136,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                p.desktop.monitors[mi].workspaces[wi].fullscreen = None
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(0, -1)
                 p.sync_focus()
@@ -105,7 +144,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         MoveColumnLeft => {
-            if not p.desktop.monitors.is_empty() {
+            if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 if p.desktop.monitors[mi].workspaces[wi].strip.move_dir(-1, 0) {
@@ -114,7 +153,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         MoveColumnRight => {
-            if not p.desktop.monitors.is_empty() {
+            if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 if p.desktop.monitors[mi].workspaces[wi].strip.move_dir(1, 0) {
@@ -123,7 +162,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         MoveWindowDown => {
-            if not p.desktop.monitors.is_empty() {
+            if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 if p.desktop.monitors[mi].workspaces[wi].strip.move_dir(0, 1) {
@@ -132,7 +171,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         MoveWindowUp => {
-            if not p.desktop.monitors.is_empty() {
+            if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 if p.desktop.monitors[mi].workspaces[wi].strip.move_dir(0, -1) {
@@ -141,7 +180,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         ConsumeIntoColumn => {
-            if not p.desktop.monitors.is_empty() {
+            if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 if p.desktop.monitors[mi].workspaces[wi].strip.consume_into_column() {
@@ -151,7 +190,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         ExpelFromColumn => {
-            if not p.desktop.monitors.is_empty() {
+            if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 if p.desktop.monitors[mi].workspaces[wi].strip.expel_from_column() {
@@ -161,7 +200,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         CyclePresetWidth => {
-            if not p.desktop.monitors.is_empty() {
+            if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 let presets = p.cfg.layout.preset_widths.clone()
@@ -171,7 +210,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         SetColumnWidth(frac) => {
-            if not p.desktop.monitors.is_empty() {
+            if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 if p.desktop.monitors[mi].workspaces[wi].strip.set_column_width(frac) {
@@ -180,7 +219,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         AdjustColumnWidth(delta) => {
-            if not p.desktop.monitors.is_empty() {
+            if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 if p.desktop.monitors[mi].workspaces[wi].strip.adjust_column_width(delta) {
@@ -188,8 +227,17 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
                 }
             }
         }
+        AdjustWindowHeight(delta) => {
+            if tiled_focused(p) {
+                let mi = p.desktop.active_monitor
+                let wi = p.desktop.monitors[mi].active_ws
+                if p.desktop.monitors[mi].workspaces[wi].strip.adjust_row_weight(delta) {
+                    p.needs_layout = true
+                }
+            }
+        }
         MaximizeColumn => {
-            if not p.desktop.monitors.is_empty() {
+            if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 if p.desktop.monitors[mi].workspaces[wi].strip.toggle_maximize_column() {
@@ -198,7 +246,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         CenterColumn => {
-            if not p.desktop.monitors.is_empty() {
+            if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 p.desktop.monitors[mi].workspaces[wi].strip.center_column()
@@ -226,6 +274,16 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
                 let wi = p.desktop.monitors[mi].active_ws
                 discard p.desktop.monitors[mi].workspaces[wi].switch_focus_layer()
                 p.sync_focus()
+                p.needs_layout = true
+            }
+        }
+        MoveFloating(dx, dy) => {
+            if p.desktop.move_focused_floating(dx, dy) {
+                p.needs_layout = true
+            }
+        }
+        ResizeFloating(dw, dh) => {
+            if p.desktop.resize_focused_floating(dw, dh) {
                 p.needs_layout = true
             }
         }
@@ -260,38 +318,70 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         FocusMonitorLeft => {
-            if p.desktop.focus_monitor_dir(-1) {
+            if p.desktop.focus_monitor_2d(-1, 0) {
                 p.sync_focus()
+                maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
         }
         FocusMonitorRight => {
-            if p.desktop.focus_monitor_dir(1) {
+            if p.desktop.focus_monitor_2d(1, 0) {
                 p.sync_focus()
+                maybe_warp_pointer(mut p)
+                p.needs_layout = true
+            }
+        }
+        FocusMonitorUp => {
+            if p.desktop.focus_monitor_2d(0, -1) {
+                p.sync_focus()
+                maybe_warp_pointer(mut p)
+                p.needs_layout = true
+            }
+        }
+        FocusMonitorDown => {
+            if p.desktop.focus_monitor_2d(0, 1) {
+                p.sync_focus()
+                maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
         }
         MoveWindowToMonitorLeft => {
-            if p.desktop.move_focused_to_monitor_dir(-1) {
+            if p.desktop.move_focused_to_monitor_2d(-1, 0) {
                 p.sync_focus()
+                maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
         }
         MoveWindowToMonitorRight => {
-            if p.desktop.move_focused_to_monitor_dir(1) {
+            if p.desktop.move_focused_to_monitor_2d(1, 0) {
                 p.sync_focus()
+                maybe_warp_pointer(mut p)
+                p.needs_layout = true
+            }
+        }
+        MoveWindowToMonitorUp => {
+            if p.desktop.move_focused_to_monitor_2d(0, -1) {
+                p.sync_focus()
+                maybe_warp_pointer(mut p)
+                p.needs_layout = true
+            }
+        }
+        MoveWindowToMonitorDown => {
+            if p.desktop.move_focused_to_monitor_2d(0, 1) {
+                p.sync_focus()
+                maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
         }
         Spawn(cmd) => {
             let tok = p.d.activation_token()
-            spawn.spawn_shell(cmd, p.d.socket(), p.ipc_socket_path.clone(), tok)
+            spawn.spawn_shell(cmd, p.d.socket(), p.ipc_socket_path.clone(), p.xwayland_display.clone(), tok)
         }
     }
     return Ok(())
 }
 
-fn notify_ws_change[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], now: int) {
+pub fn notify_ws_change[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], now: int) {
     guard not p.desktop.monitors.is_empty() else {
         return
     }
@@ -306,9 +396,21 @@ fn notify_ws_change[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.
     p.broadcast_event("workspace-changed", json.obj().with("monitor", json.Value.Str(p.desktop.monitors[mi].name.clone())).with("workspace", json.Value.Int(ws + 1)))
 }
 
-/// Handle a key event. Returns `true` if consumed by Pastel.
+fn suppress_key[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], code: u32) {
+    if not p.suppressed_keys.contains(code) {
+        p.suppressed_keys.push(code)
+    }
+}
+
+/// Handle a key event. Returns `true` if consumed by Pastel (including matching key releases).
 pub fn on_key[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], k: lum.Key) -> bool {
-    guard k.pressed else {
+    if not k.pressed {
+        for i in 0..p.suppressed_keys.len() {
+            if p.suppressed_keys[i] == k.code {
+                discard p.suppressed_keys.remove(i)
+                return true
+            }
+        }
         return false
     }
     guard not p.d.shortcuts_inhibited() else {
@@ -318,7 +420,7 @@ pub fn on_key[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel
     let eff = effective_mod(p)
     var matched: Option[cfg.Action] = None
     for b in p.cfg.binds {
-        if b.combo.matches(k.sym, k.mods.shift, k.mods.ctrl, k.mods.alt, k.mods.logo, eff) {
+        if b.combo.matches_with_base(k.sym, k.base_sym, k.mods.shift, k.mods.ctrl, k.mods.alt, k.mods.logo, eff) {
             matched = Some(b.act.clone())
             break
         }
@@ -328,6 +430,7 @@ pub fn on_key[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel
         // Ignore pure modifier keys so pressing Mod to hit Mod+Shift+/ doesn't dismiss early.
         let is_mod_key = k.sym >= u32(0xffe1) and k.sym <= u32(0xffee)
         if not is_mod_key {
+            suppress_key(mut p, k.code)
             p.set_overlay_visible(false, time.now_ns())
             if let Some(act) = matched {
                 match act {
@@ -348,21 +451,28 @@ pub fn on_key[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel
     guard let Some(act) = matched else {
         return false
     }
+    suppress_key(mut p, k.code)
     if let Err(err) = dispatch_action(mut p, act) {
         io.eprint("pastel: action error: {err}")
     }
     return true
 }
 
-/// Click-to-focus, Mod+Left drag (move floating / pan strip), Mod+Right drag (resize floating).
+/// Click-to-focus, Mod+Left drag (move floating / pan tiled strip), Mod+Right drag (resize floating).
 pub fn on_button[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], b: lum.Pointer) -> bool {
     guard b.pressed else {
         return false
     }
     if p.overlay_visible {
         p.set_overlay_visible(false, time.now_ns())
+        return true
     }
     guard let Some(w) = p.d.window_at(b.x, b.y) else {
+        // Clicking empty space on another monitor transfers active monitor focus cleanly.
+        if p.desktop.focus_monitor_at(b.x, b.y) {
+            p.sync_focus()
+            p.needs_layout = true
+        }
         return false
     }
     let id = windows.window_id(w)
@@ -392,11 +502,14 @@ pub fn on_button[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pas
                 return true
             }
         }
+    } else if b.button == btn_left {
+        p.d.manipulate_pan()
+        return true
     }
     return false
 }
 
-/// Optional focus-follows-mouse on pointer motion.
+/// Optional focus-follows-mouse on pointer motion (including empty monitors).
 pub fn on_motion[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], m: lum.Pointer) {
     guard p.cfg.input.focus_follows_mouse else {
         return
@@ -409,24 +522,47 @@ pub fn on_motion[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pas
                 p.needs_layout = true
             }
         }
+        return
+    }
+    if p.desktop.focus_monitor_at(m.x, m.y) {
+        p.sync_focus()
+        p.needs_layout = true
     }
 }
 
-/// Mod+Scroll horizontally scrolls columns in the active workspace.
+/// Mod+Scroll horizontally scrolls columns in the active workspace with smooth detent accumulation.
 pub fn on_scroll[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], s: lum.Scroll) -> bool {
     guard mod_down(p, p.d.mods()) and not p.desktop.monitors.is_empty() else {
+        p.scroll_accum = 0.0
         return false
     }
     let delta = if s.dx.abs() > s.dy.abs() { s.dx } else { s.dy }
     if delta == 0.0 {
         return true
     }
-    let dir = if delta > 0.0 { 1 } else { -1 }
-    let mi = p.desktop.active_monitor
-    let wi = p.desktop.monitors[mi].active_ws
-    discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(dir, 0)
-    p.sync_focus()
-    p.needs_layout = true
+    var steps = 0
+    if delta.abs() >= scroll_step_threshold {
+        p.scroll_accum = 0.0
+        steps = if delta > 0.0 { 1 } else { -1 }
+    } else {
+        if (p.scroll_accum > 0.0 and delta < 0.0) or (p.scroll_accum < 0.0 and delta > 0.0) {
+            p.scroll_accum = 0.0
+        }
+        p.scroll_accum += delta
+        if p.scroll_accum.abs() >= scroll_step_threshold {
+            steps = if p.scroll_accum > 0.0 { 1 } else { -1 }
+            p.scroll_accum = 0.0
+        }
+    }
+    if steps != 0 {
+        let mi = p.desktop.active_monitor
+        let wi = p.desktop.monitors[mi].active_ws
+        p.desktop.monitors[mi].workspaces[wi].fullscreen = None
+        p.desktop.monitors[mi].workspaces[wi].focus_floating = false
+        discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(steps, 0)
+        p.sync_focus()
+        p.needs_layout = true
+    }
     return true
 }
 
@@ -435,13 +571,15 @@ pub fn on_scroll[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pas
 pub fn on_gesture[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], g: lum.Gesture) -> bool {
     match g.kind {
         SwipeBegin => {
-            guard g.fingers == 3 else {
+            guard g.fingers == 3 and not p.desktop.monitors.is_empty() else {
                 return false
             }
             p.swipe_active = true
             p.swipe_dx = 0.0
             p.swipe_dy = 0.0
             p.swipe_axis = 0
+            p.swipe_mon = p.desktop.active_monitor
+            p.swipe_ws = p.desktop.monitors[p.swipe_mon].active_ws
             return true
         }
         SwipeUpdate => {
@@ -453,10 +591,8 @@ pub fn on_gesture[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pa
             if p.swipe_axis == 0 and (p.swipe_dx.abs() > 10.0 or p.swipe_dy.abs() > 10.0) {
                 p.swipe_axis = if p.swipe_dx.abs() >= p.swipe_dy.abs() { 1 } else { 2 }
             }
-            if p.swipe_axis == 1 and not p.desktop.monitors.is_empty() {
-                let mi = p.desktop.active_monitor
-                let wi = p.desktop.monitors[mi].active_ws
-                p.desktop.monitors[mi].workspaces[wi].strip.pan(-g.dx * 1.4)
+            if p.swipe_axis == 1 and p.swipe_mon < p.desktop.monitors.len() and p.swipe_ws < p.desktop.monitors[p.swipe_mon].workspaces.len() {
+                p.desktop.monitors[p.swipe_mon].workspaces[p.swipe_ws].strip.pan(-g.dx * 1.4)
                 p.needs_layout = true
             }
             return true
@@ -466,20 +602,18 @@ pub fn on_gesture[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pa
                 return false
             }
             p.swipe_active = false
-            if not g.cancelled and not p.desktop.monitors.is_empty() {
-                let mi = p.desktop.active_monitor
-                let wi = p.desktop.monitors[mi].active_ws
-                if p.swipe_axis == 1 {
-                    let area = p.desktop.monitors[mi].usable_rect
-                    let gap = p.desktop.gap
-                    p.desktop.monitors[mi].workspaces[wi].strip.pan_end(area, gap)
-                    p.sync_focus()
-                    p.needs_layout = true
-                } else if p.swipe_axis == 2 and p.swipe_dy.abs() > 35.0 {
-                    let dir = if p.swipe_dy > 0.0 { -1 } else { 1 }
-                    if p.desktop.focus_workspace_rel(dir) {
-                        notify_ws_change(mut p, time.now_ns())
-                    }
+            // Always finish horizontal pan on the originating workspace, even if the gesture was cancelled,
+            // so `manual_pan` can never remain stuck true.
+            if p.swipe_axis == 1 and p.swipe_mon < p.desktop.monitors.len() and p.swipe_ws < p.desktop.monitors[p.swipe_mon].workspaces.len() {
+                let area = p.desktop.monitors[p.swipe_mon].usable_rect
+                let gap = p.desktop.gap
+                p.desktop.monitors[p.swipe_mon].workspaces[p.swipe_ws].strip.pan_end(area, gap)
+                p.sync_focus()
+                p.needs_layout = true
+            } else if not g.cancelled and p.swipe_axis == 2 and p.swipe_dy.abs() > 35.0 and not p.desktop.monitors.is_empty() {
+                let dir = if p.swipe_dy > 0.0 { -1 } else { 1 }
+                if p.desktop.focus_workspace_rel(dir) {
+                    notify_ws_change(mut p, time.now_ns())
                 }
             }
             p.swipe_axis = 0

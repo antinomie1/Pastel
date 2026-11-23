@@ -16,6 +16,8 @@ pub struct ModMask {
 pub struct KeyCombo {
     pub mods: ModMask = ModMask {}
     pub sym: u32 = 0
+    /// Canonical base key label (e.g. `"/"`, `"Return"`, `"+"`).
+    pub key_name: str = ""
     /// Canonical display string for the hotkey overlay (e.g. `Mod+Shift+/`).
     pub display: str = ""
 }
@@ -92,11 +94,15 @@ pub fn name_to_sym(raw: str) -> Option[u32] {
     }
 }
 
-/// Normalize shifted XKB keysyms back to their base key so `Mod+Shift+/` matches `?`
-/// and `Mod+Shift+1` matches `!`, regardless of keyboard shift translation.
-pub fn normalize_sym(sym: u32) -> u32 {
+/// Normalize XKB keysyms to their canonical base form.
+/// Uppercase ASCII letters always fold to lowercase; shifted punctuation folds only
+/// when `shifted` is true so `Mod+Shift+/` matches `?` without making `Mod+Plus` collide with `Mod+Equal`.
+pub fn normalize_sym(sym: u32, shifted: bool) -> u32 {
     if sym >= 65 and sym <= 90 {
         return sym + 32
+    }
+    if not shifted {
+        return sym
     }
     return match sym {
         63 => u32(0x002f) // ? -> /
@@ -119,35 +125,54 @@ pub fn normalize_sym(sym: u32) -> u32 {
     }
 }
 
-/// Parse a key combination string such as `"Mod+Shift+/"` or `"Mod+Return"`.
+/// Split a key spec into `(modifiers, key_name)`, handling trailing `"+"` keys (e.g. `"Mod++"` or `"+"`).
+fn split_key_spec(trimmed: str) -> (List[str], str) {
+    if trimmed == "+" {
+        return ([], "+")
+    }
+    var raw_mods = ""
+    var key_part = ""
+    if trimmed.ends_with("++") {
+        raw_mods = trimmed.slice(0, trimmed.len() - 2)
+        key_part = "+"
+    } else if let Some(pos) = trimmed.rfind("+") {
+        raw_mods = trimmed.slice(0, pos)
+        key_part = trimmed.slice(pos + 1, trimmed.len()).trim()
+    } else {
+        return ([], trimmed.clone())
+    }
+    var mod_list: List[str] = []
+    if not raw_mods.is_empty() {
+        for m in raw_mods.split("+") {
+            mod_list.push(m.trim())
+        }
+    }
+    return (mod_list, key_part)
+}
+
+/// Parse a key combination string such as `"Mod+Shift+/"`, `"Mod+Return"`, or `"Mod++"`.
 pub fn KeyCombo.parse(spec: str) -> Result[KeyCombo, str] {
     let trimmed = spec.trim()
     guard not trimmed.is_empty() else {
         return Err("empty key specification")
     }
-    let parts = trimmed.split("+")
+    let (mod_parts, key_part) = split_key_spec(trimmed)
     var mods = ModMask {}
-    var sym: u32 = 0
-    var key_name = ""
-    for i, raw in parts {
-        let p = raw.trim()
-        if i < parts.len() - 1 {
-            match p.to_lower() {
-                "mod" => mods.uses_mod = true
-                "shift" => mods.shift = true
-                "ctrl" or "control" => mods.ctrl = true
-                "alt" => mods.alt = true
-                "super" or "logo" or "meta" => mods.logo = true
-                _ => { return Err("unknown modifier '{p}' in key spec '{spec}'") }
-            }
-        } else {
-            guard let Some(s) = name_to_sym(p) else {
-                return Err("unknown key '{p}' in key spec '{spec}'")
-            }
-            sym = normalize_sym(s)
-            key_name = p
+    for p in mod_parts {
+        match p.to_lower() {
+            "mod" => mods.uses_mod = true
+            "shift" => mods.shift = true
+            "ctrl" or "control" => mods.ctrl = true
+            "alt" => mods.alt = true
+            "super" or "logo" or "meta" => mods.logo = true
+            _ => { return Err("unknown modifier '{p}' in key spec '{spec}'") }
         }
     }
+    guard let Some(s) = name_to_sym(key_part) else {
+        return Err("unknown key '{key_part}' in key spec '{spec}'")
+    }
+    let sym = normalize_sym(s, mods.shift)
+    let key_label = if key_part.len() == 1 { key_part.to_upper() } else { key_part }
     // Canonical display label
     var disp = ""
     if mods.uses_mod {
@@ -165,8 +190,8 @@ pub fn KeyCombo.parse(spec: str) -> Result[KeyCombo, str] {
     if mods.shift {
         disp += "Shift+"
     }
-    disp += if key_name.len() == 1 { key_name.to_upper() } else { key_name }
-    return Ok(KeyCombo { mods, sym, display: disp })
+    disp += key_label
+    return Ok(KeyCombo { mods, sym, key_name: key_label, display: disp })
 }
 
 /// Format this combo for the hotkey overlay with the active `Mod` resolved
@@ -195,10 +220,7 @@ pub fn KeyCombo.format_for(self, effective_mod: schema.ModKey) -> str {
     if self.mods.shift {
         parts.push("Shift")
     }
-    // Extract base key name from canonical `display`.
-    let segs = self.display.split("+")
-    let key = if segs.is_empty() { self.display.clone() } else { segs[segs.len() - 1].clone() }
-    parts.push(key)
+    parts.push(self.key_name.clone())
     var out = ""
     for i, p in parts {
         if i > 0 {
@@ -216,7 +238,14 @@ pub fn KeyCombo.same(self, other: KeyCombo) -> bool {
 
 /// Match an incoming key press against this combo under the active `effective_mod`.
 pub fn KeyCombo.matches(self, sym: u32, shift: bool, ctrl: bool, alt: bool, logo: bool, effective_mod: schema.ModKey) -> bool {
-    guard normalize_sym(sym) == self.sym else {
+    return self.matches_with_base(sym, 0, shift, ctrl, alt, logo, effective_mod)
+}
+
+/// Layout-independent match using both the effective keysym `sym` and the unshifted
+/// level-0 keysym `base_sym` (so `Mod+Shift+/` and `Mod+Shift+1..9` work on any XKB layout).
+pub fn KeyCombo.matches_with_base(self, sym: u32, base_sym: u32, shift: bool, ctrl: bool, alt: bool, logo: bool, effective_mod: schema.ModKey) -> bool {
+    let sym_hit = normalize_sym(sym, shift) == self.sym or (base_sym != 0 and normalize_sym(base_sym, false) == self.sym)
+    guard sym_hit else {
         return false
     }
     var want_shift = self.mods.shift
@@ -263,6 +292,8 @@ pub fn default_bindings() -> List[Binding] {
         bind("Mod+R", action.Action.CyclePresetWidth),
         bind("Mod+Minus", action.Action.AdjustColumnWidth(-0.1)),
         bind("Mod+Equal", action.Action.AdjustColumnWidth(0.1)),
+        bind("Mod+Shift+Minus", action.Action.AdjustWindowHeight(-0.2)),
+        bind("Mod+Shift+Equal", action.Action.AdjustWindowHeight(0.2)),
         bind("Mod+F", action.Action.MaximizeColumn),
         bind("Mod+C", action.Action.CenterColumn),
         bind("Mod+Shift+F", action.Action.ToggleFullscreen),
@@ -290,6 +321,14 @@ pub fn default_bindings() -> List[Binding] {
         bind("Mod+Shift+7", action.Action.MoveWindowToWorkspace(7)),
         bind("Mod+Shift+8", action.Action.MoveWindowToWorkspace(8)),
         bind("Mod+Shift+9", action.Action.MoveWindowToWorkspace(9)),
+        bind("Mod+Ctrl+H", action.Action.FocusMonitorLeft),
+        bind("Mod+Ctrl+L", action.Action.FocusMonitorRight),
+        bind("Mod+Ctrl+K", action.Action.FocusMonitorUp),
+        bind("Mod+Ctrl+J", action.Action.FocusMonitorDown),
+        bind("Mod+Ctrl+Shift+H", action.Action.MoveWindowToMonitorLeft),
+        bind("Mod+Ctrl+Shift+L", action.Action.MoveWindowToMonitorRight),
+        bind("Mod+Ctrl+Shift+K", action.Action.MoveWindowToMonitorUp),
+        bind("Mod+Ctrl+Shift+J", action.Action.MoveWindowToMonitorDown),
         bind("Mod+Shift+R", action.Action.ReloadConfig),
         bind("Mod+Shift+E", action.Action.Quit),
     ]

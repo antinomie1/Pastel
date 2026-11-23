@@ -86,3 +86,55 @@ test "shifted hotkey Mod+Shift+/ matches both / and ? keysyms" {
     assert(combo.matches(u32(0x003f), true, false, false, true, cfg.ModKey.Super))
     assert(not combo.matches(u32(0x002f), false, false, false, true, cfg.ModKey.Super))
 }
+
+test "plus key parsing, non-collision with equal, mode validation, and 2D monitor actions" {
+    let plus = cfg.KeyCombo.parse("Mod++").expect("Mod++")
+    let eq = cfg.KeyCombo.parse("Mod+Equal").expect("Mod+Equal")
+    assert(not plus.same(eq))
+    assert_eq(plus.format_for(cfg.ModKey.Super), "Super + +")
+    assert(cfg.Action.parse("focus-monitor-up").is_ok())
+    assert(cfg.Action.parse("move-window-to-monitor-down").is_ok())
+    assert(cfg.Action.parse("adjust-window-height 0.25").is_ok())
+    assert(cfg.from_toml("[[output]]\nname = \"DP-1\"\nmode = \"1920x1080@144\"\n").is_ok())
+    assert(cfg.from_toml("[[output]]\nname = \"DP-1\"\nmode = \"1920x1080@-60\"\n").is_err())
+    assert(cfg.from_toml("[[output]]\nname = \"DP-1\"\nmode = \"not-a-mode\"\n").is_err())
+}
+
+test "xwayland-satellite config, wildcard window rules, floating actions, and layout-independent base_sym matching" {
+    let toml = """
+    [xwayland]
+    enabled = true
+    path = "/usr/bin/xwayland-satellite"
+    display = ":12"
+    ready-timeout-ms = 500
+
+    [input]
+    warp-mouse-to-focus = true
+
+    [[window-rule]]
+    app-id = "org.mozilla.*"
+    title = "*Picture-in-Picture*"
+    floating = true
+    fullscreen = false
+    maximized = false
+    monitor = "DP-1"
+    """
+    let c = cfg.from_toml(toml).expect("full config")
+    assert(c.xwayland.enabled)
+    assert_eq(c.xwayland.display, ":12")
+    assert_eq(c.xwayland.ready_timeout_ms, 500)
+    assert(c.input.warp_mouse_to_focus)
+    let r = c.resolve_window("org.mozilla.firefox", "Video - Picture-in-Picture")
+    assert_eq(r.floating, Some(true))
+    assert_eq(r.monitor, "DP-1")
+    let miss = c.resolve_window("org.mozilla.firefox", "Normal Tab")
+    assert(miss.floating.is_none())
+
+    assert(cfg.Action.parse("move-floating 20 -10").is_ok())
+    assert(cfg.Action.parse("resize-floating 100 50").is_ok())
+    assert(cfg.from_toml("[xwayland]\ndisplay = \"bad\"\n").is_err())
+
+    // Layout-independent match: non-US layout where Shift+/ produces e.g. 0x005f ('_') but base_sym is '/'.
+    let combo = cfg.KeyCombo.parse("Mod+Shift+/").expect("combo")
+    assert(combo.matches_with_base(u32(0x005f), u32(0x002f), true, false, false, true, cfg.ModKey.Super))
+}

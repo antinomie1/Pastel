@@ -9,6 +9,8 @@ pub struct TileTarget {
     pub focused: bool = false
     pub floating: bool = false
     pub fullscreen: bool = false
+    pub maximized: bool = false
+    pub monitor_idx: int = 0
     pub workspace_idx: int = 0
 }
 

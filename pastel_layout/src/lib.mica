@@ -1,5 +1,6 @@
 // pastel_layout: pluggable scrolling-tiling layout engine, workspaces, and multi-monitor desktop.
 
+import pastel_core as core
 pub import traits
 pub import column
 pub import scrolling
@@ -16,3 +17,8 @@ pub type Workspace = workspace.Workspace
 pub type WindowLoc = desktop.WindowLoc
 pub type Monitor = desktop.Monitor
 pub type Desktop = desktop.Desktop
+
+/// Monomorphized entry point for any pluggable `LayoutPolicy` implementation.
+pub fn compute_policy[L: traits.LayoutPolicy](mut policy: L, area: core.Rect, gap: f64, center: traits.CenterMode, mut out: List[traits.TileTarget]) {
+    policy.compute(area, gap, center, mut out)
+}

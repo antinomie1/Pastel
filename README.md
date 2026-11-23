@@ -61,15 +61,17 @@ Default terminal is `foot` and default launcher is `fuzzel` (override in `[binds
 | `Mod+Shift+J` / `Mod+Shift+K` | Move window down / up |
 | `Mod+[` / `Mod+]` | Consume window into column / expel window out |
 | `Mod+R` / `Mod+F` / `Mod+C` | Cycle preset width / maximize column / center column |
+| `Mod+Minus` / `Mod+Equal` | Shrink / grow column width (`Mod+Shift+-/=` adjusts row height) |
 | `Mod+Shift+F` | Toggle fullscreen |
 | `Mod+V` / `Mod+Shift+V` | Toggle floating / switch focus between tiled and floating |
 | `Mod+U` / `Mod+I` | Focus previous / next workspace |
 | `Mod+1` .. `Mod+9` | Focus workspace 1..9 |
 | `Mod+Shift+1` .. `Mod+Shift+9` | Move window to workspace 1..9 |
+| `Mod+Ctrl+H/J/K/L` | Focus monitor left / down / up / right (`+Shift` moves window) |
 | `Mod+Shift+R` | Reload configuration live |
 | `Mod+Shift+E` | Quit Pastel |
 | `Mod+Scroll` | Scroll columns horizontally |
-| `Mod+Left Drag` / `Mod+Right Drag` | Move / resize floating window |
+| `Mod+Left Drag` / `Mod+Right Drag` | Move floating or pan tiled strip / resize floating window |
 | 3-finger touchpad swipe | Horizontal column pan / vertical workspace switch |
 
 ## Configuration

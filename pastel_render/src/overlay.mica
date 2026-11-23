@@ -81,15 +81,52 @@ fn fold_labels(labels: &[str]) -> str {
 
 fn build_groups(c: cfg.Config, effective_mod: cfg.ModKey) -> List[Group] {
     let sections = ["Windows", "Columns", "Workspaces", "Session"]
-    let mod_name = match effective_mod {
-        Super => "Super"
-        Alt => "Alt"
-        Ctrl => "Ctrl"
-    }
     var groups: List[Group] = []
     for sec in sections {
         var titles: List[str] = []
         var keys_list: List[List[str]] = []
+        // Detect if FocusWorkspace(1..9) / MoveWindowToWorkspace(1..9) all share a single prefix.
+        var ws_focus_prefix = ""
+        var ws_focus_count = 0
+        var ws_focus_uniform = true
+        var ws_move_prefix = ""
+        var ws_move_count = 0
+        var ws_move_uniform = true
+        if sec == "Workspaces" {
+            for b in c.binds {
+                match b.act {
+                    FocusWorkspace(n) => {
+                        let (pfx, key) = split_label(b.combo.format_for(effective_mod))
+                        if n >= 1 and n <= 9 and key == "{n}" and not pfx.is_empty() {
+                            if ws_focus_count == 0 {
+                                ws_focus_prefix = pfx
+                            } else if pfx != ws_focus_prefix {
+                                ws_focus_uniform = false
+                            }
+                            ws_focus_count += 1
+                        } else {
+                            ws_focus_uniform = false
+                        }
+                    }
+                    MoveWindowToWorkspace(n) => {
+                        let (pfx, key) = split_label(b.combo.format_for(effective_mod))
+                        if n >= 1 and n <= 9 and key == "{n}" and not pfx.is_empty() {
+                            if ws_move_count == 0 {
+                                ws_move_prefix = pfx
+                            } else if pfx != ws_move_prefix {
+                                ws_move_uniform = false
+                            }
+                            ws_move_count += 1
+                        } else {
+                            ws_move_uniform = false
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let fold_ws_focus = ws_focus_uniform and ws_focus_count >= 2
+        let fold_ws_move = ws_move_uniform and ws_move_count >= 2
         var saw_ws_focus = false
         var saw_ws_move = false
         for b in c.binds {
@@ -99,20 +136,24 @@ fn build_groups(c: cfg.Config, effective_mod: cfg.ModKey) -> List[Group] {
             if sec == "Workspaces" {
                 match b.act {
                     FocusWorkspace => {
-                        if not saw_ws_focus {
-                            saw_ws_focus = true
-                            titles.push("Workspace 1..9")
-                            keys_list.push(["{mod_name} + 1..9"])
+                        if fold_ws_focus {
+                            if not saw_ws_focus {
+                                saw_ws_focus = true
+                                titles.push("Workspace 1..9")
+                                keys_list.push(["{ws_focus_prefix} + 1..9"])
+                            }
+                            continue
                         }
-                        continue
                     }
                     MoveWindowToWorkspace => {
-                        if not saw_ws_move {
-                            saw_ws_move = true
-                            titles.push("Move to workspace 1..9")
-                            keys_list.push(["{mod_name} + Shift + 1..9"])
+                        if fold_ws_move {
+                            if not saw_ws_move {
+                                saw_ws_move = true
+                                titles.push("Move to workspace 1..9")
+                                keys_list.push(["{ws_move_prefix} + 1..9"])
+                            }
+                            continue
                         }
-                        continue
                     }
                     _ => {}
                 }
@@ -238,7 +279,9 @@ pub fn render_hotkey_overlay(c: cfg.Config, effective_mod: cfg.ModKey, scale_f: 
         inner += key_widths[i] + key_gap + text_widths[i]
     }
     let gaps = col_gap * i32(max(cols.len() - 1, 0))
-    let width = whole(inner + gaps + 2 * pad, sc)
+    let title_w = heading.measure("Hotkeys")
+    let content_w = max(inner + gaps, title_w)
+    let width = whole(content_w + 2 * pad, sc)
     let header_h = heading.height() + sec_gap
     var tallest: i32 = 0
     for col in cols {
@@ -246,18 +289,28 @@ pub fn render_hotkey_overlay(c: cfg.Config, effective_mod: cfg.ModKey, scale_f: 
     }
     let height = whole(header_h + tallest + 2 * pad, sc)
 
-    // Panel premultiplied RGBA8: `[19, 21, 27, 209]` (matching pastel-rs exactly).
+    // Derive panel background directly from `config.background` and `[overlay].opacity`
+    // for visual unity across dark and light themes.
+    let dark = c.background.luminance() < 0.55
+    let tint: f32 = if dark { 0.80 } else { 0.96 }
+    let panel_a = (c.overlay.opacity * 0.89).clamp(0.18, 0.98)
+    let panel_rgba = core.Color.rgba(
+        (c.background.r * tint).clamp(0.0, 1.0),
+        (c.background.g * tint).clamp(0.0, 1.0),
+        (c.background.b * tint).clamp(0.0, 1.0),
+        panel_a,
+    ).to_rgba8_premul()
     let total = int(width) * int(height)
     var px: List[u8] = List.with_cap(total * 4)
     for _ in 0..total {
-        px.push(19)
-        px.push(21)
-        px.push(27)
-        px.push(209)
+        px.push(panel_rgba[0])
+        px.push(panel_rgba[1])
+        px.push(panel_rgba[2])
+        px.push(panel_rgba[3])
     }
 
-    let text_ink = core.Color.rgb(0.92, 0.93, 0.95)
-    let dim_ink = core.Color.rgb(0.60, 0.63, 0.70)
+    let text_ink = if dark { core.Color.rgb(0.92, 0.93, 0.95) } else { core.Color.rgb(0.10, 0.11, 0.14) }
+    let dim_ink = if dark { core.Color.rgb(0.60, 0.63, 0.70) } else { core.Color.rgb(0.40, 0.43, 0.50) }
     let accent = c.window.active_color.with_alpha(1.0)
     let max_x = width - pad
 

@@ -35,7 +35,8 @@ extern table FtFn {
 
 let ft_load_render: i32 = 4
 
-// Verified Linux x86_64 FreeType2 struct offsets (FT_FaceRec / FT_SizeRec / FT_GlyphSlotRec / FT_Bitmap).
+// Verified Linux LP64 (x86_64/aarch64) FreeType2 struct offsets
+// (FT_FaceRec / FT_SizeRec / FT_GlyphSlotRec / FT_Bitmap).
 let off_face_glyph: int = 152
 let off_face_size: int = 160
 let off_size_ascender: int = 48
@@ -45,8 +46,12 @@ let off_slot_bmp_rows: int = 152
 let off_slot_bmp_width: int = 156
 let off_slot_bmp_pitch: int = 160
 let off_slot_bmp_buf: int = 168
+let off_slot_bmp_pixel_mode: int = 178
 let off_slot_bmp_left: int = 192
 let off_slot_bmp_top: int = 196
+
+let ft_pixel_mode_mono: u8 = 1
+let ft_pixel_mode_gray: u8 = 2
 
 unsafe fn read_cstr(p: Ptr[u8]) -> str {
     var bytes: List[u8] = []
@@ -120,6 +125,10 @@ pub unsafe struct Font {
 
 /// Open a system font matching `pattern` at `size_pt` points (96 DPI).
 pub fn Font.open(pattern: str, size_pt: f32) -> Option[Font] {
+    // Hardcoded FreeType2 struct offsets above target 64-bit Linux LP64 (x86_64/aarch64).
+    guard size_of[Ptr[u8]]() == 8 else {
+        return None
+    }
     guard let Some(path) = resolve_font_path(pattern) else {
         return None
     }
@@ -229,9 +238,12 @@ pub fn Font.draw(self, mut px: List[u8], w: i32, h: i32, x: i32, baseline_y: i32
                 let width = i32(slot.offset(off_slot_bmp_width).cast[u32]().read())
                 let pitch = slot.offset(off_slot_bmp_pitch).cast[i32]().read()
                 let buf = slot.offset(off_slot_bmp_buf).cast[Ptr[u8]]().read()
+                let pmode = slot.offset(off_slot_bmp_pixel_mode).read()
                 let left = slot.offset(off_slot_bmp_left).cast[i32]().read()
                 let top = slot.offset(off_slot_bmp_top).cast[i32]().read()
-                if rows > 0 and width > 0 and not buf.is_null() {
+                let is_supported = pmode == ft_pixel_mode_gray or pmode == ft_pixel_mode_mono
+                if rows > 0 and width > 0 and pitch != 0 and not buf.is_null() and is_supported {
+                    let abs_pitch = if pitch < 0 { int(-pitch) } else { int(pitch) }
                     let gx0 = pen_x + left
                     let gy0 = baseline_y - top
                     for r in 0..rows {
@@ -239,13 +251,24 @@ pub fn Font.draw(self, mut px: List[u8], w: i32, h: i32, x: i32, baseline_y: i32
                         if dy < 0 or dy >= h {
                             continue
                         }
-                        let row_off = int(r) * int(pitch)
+                        let src_row = if pitch < 0 { int(rows - 1 - r) } else { int(r) }
+                        let row_off = src_row * abs_pitch
                         for c in 0..width {
                             let dx = gx0 + c
                             if dx < 0 or dx >= w or dx >= max_x {
                                 continue
                             }
-                            let cov = buf.offset(row_off + int(c)).read()
+                            let cov = if pmode == ft_pixel_mode_gray {
+                                buf.offset(row_off + int(c)).read()
+                            } else {
+                                let byte = buf.offset(row_off + int(c / 8)).read()
+                                let bit = (byte >> u8(7 - (c % 8))) & u8(1)
+                                if bit != 0 {
+                                    u8(255)
+                                } else {
+                                    u8(0)
+                                }
+                            }
                             if cov == 0 {
                                 continue
                             }

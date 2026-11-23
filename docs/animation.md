@@ -38,9 +38,8 @@ An animation settles to its exact target once $|x(t) - x_{\text{target}}| < \eps
 
 ## 4. Animated Channels
 
-- **Window geometry** (`window-movement`): X, Y, W, H
-- **Strip camera** (`window-movement`): horizontal `camera_x` per workspace
+- **Window geometry & strip scroll** (`window-movement`): X, Y, W, H per window (smoothly interpolating column/camera shifts)
 - **Workspace switch** (`workspace-switch`): vertical strip slide between workspaces
-- **Window open / close** (`window-open` / `window-close`): subtle scale (`0.94 -> 1.0`) and opacity (`0.0 -> 1.0`)
+- **Window open / close** (`window-open` / `window-close`): subtle scale (`0.94 <-> 1.0`) and opacity fade on open and close
 - **Focus ring** (`focus-ring`): RGBA border color interpolation between `inactive-color` and `active-color`
-- **Hotkey overlay** (`overlay`): opacity & slight vertical slide
+- **Hotkey overlay** (`overlay`): opacity & slight vertical slide (`12px`)

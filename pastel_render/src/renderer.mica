@@ -14,6 +14,8 @@ import luminaria_compose.format as format
 import effects
 import blur
 
+let fx_history_len = 4
+
 struct Output {
     scene: vc.Scene
     width: u32 = 1
@@ -26,19 +28,100 @@ struct Output {
     last_ps: List[types.Placement] = []
     blur_pyr: blur.BlurPyramid = blur.BlurPyramid {}
     fx_gen: u64 = 0
-    fx_dirty: bool = true
     has_active_blur: bool = false
+    /// Placement index of the first managed window (`fi >= 0`) so X-Ray only captures backdrop/wallpaper layers below it.
+    first_window_idx: int = -1
     /// Cached effect snapshot for the current frame.
     fx: effects.OutputEffects = effects.OutputEffects {}
+    /// Matched effect index per placement in `last_ps` (-1 if unmatched).
+    ps_fx: List[int] = []
+    /// Keys currently promoted to hardware KMS overlay planes.
+    overlay_keys: List[u64] = []
+    /// Partial damage tracking for the effects render path (mirrors `vk_compose.Scene`).
+    fx_pending: vc.Region
+    fx_history: List[vc.Region] = []
+    fx_area: vc.Region
+    fx_prev_used: bool = false
+}
+
+fn new_output(width: u32, height: u32, background: vec4, alive: bool) -> Output {
+    var out = Output {
+        scene: vc.Scene.new(width, height, background),
+        width,
+        height,
+        background,
+        alive,
+        by_key: map.Map.new(),
+        by_id: map.Map.new(),
+        fx_pending: vc.Region.new(),
+        fx_history: [vc.Region.new()],
+        fx_area: vc.Region.new(),
+    }
+    if alive {
+        out.fx_pending.add(draw2d.Rect { w: f32(width), h: f32(height) })
+    }
+    return out
 }
 
 fn blank_output() -> Output {
-    return Output {
-        scene: vc.Scene.new(1, 1, vec4(0.0)),
-        alive: false,
-        by_key: map.Map.new(),
-        by_id: map.Map.new(),
+    return new_output(1, 1, vec4(0.0), false)
+}
+
+fn screen_rect(out: Output) -> draw2d.Rect {
+    return draw2d.Rect { w: f32(out.width), h: f32(out.height) }
+}
+
+fn add_fx_damage(mut out: Output, r: draw2d.Rect) {
+    out.fx_pending.add(r.intersect(screen_rect(out)))
+}
+
+fn is_image_key(key: u64) -> bool {
+    return (key & (u64(1) << 63)) != 0
+}
+
+fn is_cursor_key(key: u64) -> bool {
+    return not is_image_key(key) and key >= u64(0x7fffffffff000000)
+}
+
+fn placement_rect(p: types.Placement, t: gpu.Texture) -> draw2d.Rect {
+    let has_src = p.src.w > 0.0 and p.src.h > 0.0
+    let pw = if p.w > 0.0 { p.w } else if has_src { p.src.w } else { f32(t.width()) }
+    let ph = if p.h > 0.0 { p.h } else if has_src { p.src.h } else { f32(t.height()) }
+    return draw2d.Rect { x: p.x, y: p.y, w: pw, h: ph }
+}
+
+fn effect_bounds(ef: effects.WindowEffect) -> draw2d.Rect {
+    let pad = max(ef.border_width, ef.shadow_size) + 4.0
+    return draw2d.Rect { x: ef.x - pad, y: ef.y - pad, w: ef.w + pad * 2.0, h: ef.h + pad * 2.0 }
+}
+
+fn closing_bounds(cf: effects.ClosingEffect) -> draw2d.Rect {
+    let pad = max(cf.border_width, cf.shadow_size) + 4.0
+    return draw2d.Rect { x: cf.x - pad, y: cf.y - pad, w: cf.w + pad * 2.0, h: cf.h + pad * 2.0 }
+}
+
+fn same_effect(a: effects.WindowEffect, b: effects.WindowEffect) -> bool {
+    return a.key == b.key and a.x == b.x and a.y == b.y and a.w == b.w and a.h == b.h and a.radius == b.radius and a.border_width == b.border_width and a.border_color == b.border_color and a.shadow_size == b.shadow_size and a.shadow_color == b.shadow_color and a.blur == b.blur and a.blur_xray == b.blur_xray and a.blur_opacity == b.blur_opacity and a.is_overlay == b.is_overlay
+}
+
+fn same_closing(a: effects.ClosingEffect, b: effects.ClosingEffect) -> bool {
+    return a.x == b.x and a.y == b.y and a.w == b.w and a.h == b.h and a.radius == b.radius and a.border_width == b.border_width and a.border_color == b.border_color and a.shadow_size == b.shadow_size and a.shadow_color == b.shadow_color and a.fill_color == b.fill_color and a.opacity == b.opacity
+}
+
+fn same_placement(a: types.Placement, b: types.Placement) -> bool {
+    return a.key == b.key and a.x == b.x and a.y == b.y and a.w == b.w and a.h == b.h and a.src.x == b.src.x and a.src.y == b.src.y and a.src.w == b.src.w and a.src.h == b.src.h and a.transform == b.transform and a.opacity == b.opacity and a.radius == b.radius and a.shadow == b.shadow and a.opaque.x == b.opaque.x and a.opaque.y == b.opaque.y and a.opaque.w == b.opaque.w and a.opaque.h == b.opaque.h
+}
+
+/// True when `p` with texture `t` has transparency (either reduced opacity or non-opaque surface buffer).
+fn surface_translucent(p: types.Placement, t: gpu.Texture) -> bool {
+    if p.opacity < 0.995 {
+        return true
     }
+    if t.opaque() {
+        return false
+    }
+    let r = placement_rect(p, t)
+    return p.opaque.w < r.w - 0.5 or p.opaque.h < r.h - 0.5
 }
 
 struct Shm {
@@ -126,6 +209,11 @@ pub fn PastelRenderer.recover(mut self) -> Result[(), str] {
     }
     if not self.dev.lost() {
         discard self.dev.idle()
+        for o in 0..self.outputs.len() {
+            var pyr = mem.replace(mut self.outputs[o].blur_pyr, blur.BlurPyramid {})
+            pyr.destroy(mut self.dev)
+            self.outputs[o].blur_pyr = pyr
+        }
     }
     self.texs.clear()
     self.shms.clear()
@@ -139,15 +227,7 @@ pub fn PastelRenderer.recover(mut self) -> Result[(), str] {
     for o in 0..self.outputs.len() {
         let prev = mem.replace(mut self.outputs[o], blank_output())
         if prev.alive {
-            self.outputs[o] = Output {
-                scene: vc.Scene.new(prev.width, prev.height, prev.background),
-                width: prev.width,
-                height: prev.height,
-                background: prev.background,
-                alive: true,
-                by_key: map.Map.new(),
-                by_id: map.Map.new(),
-            }
+            self.outputs[o] = new_output(prev.width, prev.height, prev.background, true)
         }
     }
     self.resets += 1
@@ -158,23 +238,18 @@ pub fn PastelRenderer.add_output(mut self, o: int, width: u32, height: u32, back
     while self.outputs.len() <= o {
         self.outputs.push(blank_output())
     }
-    self.outputs[o] = Output {
-        scene: vc.Scene.new(width, height, background),
-        width,
-        height,
-        background,
-        alive: true,
-        by_key: map.Map.new(),
-        by_id: map.Map.new(),
-    }
+    self.outputs[o] = new_output(width, height, background, true)
 }
 
 pub fn PastelRenderer.resize(mut self, o: int, width: u32, height: u32) {
     if o < self.outputs.len() {
-        self.outputs[o].width = width
-        self.outputs[o].height = height
-        self.outputs[o].scene.resize(width, height)
-        self.outputs[o].blur_pyr.invalidate_xray()
+        var out = mem.replace(mut self.outputs[o], blank_output())
+        out.width = width
+        out.height = height
+        out.scene.resize(width, height)
+        out.blur_pyr.invalidate_xray()
+        add_fx_damage(mut out, screen_rect(out))
+        self.outputs[o] = out
     }
 }
 
@@ -187,6 +262,9 @@ pub fn PastelRenderer.remove_output(mut self, o: int) {
         self.outputs[o].by_key.clear()
         self.outputs[o].by_id.clear()
         self.outputs[o].last_ps.clear()
+        self.outputs[o].ps_fx.clear()
+        self.outputs[o].overlay_keys.clear()
+        self.outputs[o].fx_pending.clear()
     }
 }
 
@@ -196,26 +274,83 @@ fn to_view(p: types.Placement, t: gpu.Texture) -> vc.View {
     return vc.View { tex: t, x: p.x, y: p.y, w: p.w, h: p.h, src, transform: vc.Transform(p.transform), opacity: p.opacity, radius: p.radius, shadow: p.shadow, opaque }
 }
 
-/// Match a decoration entry against a placement by key (for images) or output-pixel bounds (for windows).
-fn find_effect(fx: effects.OutputEffects, p: types.Placement) -> int {
+/// Match an unused decoration entry against `p`: exact key match first (compositor images),
+/// then closest output-pixel bounds among client surface placements (never matching images/cursors).
+fn find_effect_unused(fx: effects.OutputEffects, p: types.Placement, used: &[bool]) -> int {
     for i, item in fx.items {
-        if item.key != 0 {
-            if item.key == p.key {
-                return i
-            }
-        } else if (item.x - p.x).abs() <= 2.0 and (item.y - p.y).abs() <= 2.0 and (item.w - p.w).abs() <= 4.0 and (item.h - p.h).abs() <= 4.0 {
+        if not used[i] and item.key != 0 and item.key == p.key {
             return i
         }
     }
-    return -1
+    guard not is_image_key(p.key) and not is_cursor_key(p.key) else {
+        return -1
+    }
+    var best = -1
+    var best_err: f32 = 1.0e9
+    for i, item in fx.items {
+        if not used[i] and item.key == 0 {
+            let dx = (item.x - p.x).abs()
+            let dy = (item.y - p.y).abs()
+            let dw = (item.w - p.w).abs()
+            let dh = (item.h - p.h).abs()
+            if dx <= 2.0 and dy <= 2.0 and dw <= 4.0 and dh <= 4.0 {
+                let err = dx + dy + dw + dh
+                if err < best_err {
+                    best_err = err
+                    best = i
+                }
+            }
+        }
+    }
+    return best
+}
+
+fn placement_pad(p: types.Placement, fx: effects.OutputEffects, fi: int) -> f32 {
+    if fi >= 0 and fi < fx.items.len() {
+        let ef = fx.items[fi]
+        return max(max(ef.border_width, ef.shadow_size), p.shadow) + 4.0
+    }
+    return p.shadow + 2.0
+}
+
+fn need_effects_path(out: Output) -> bool {
+    if not out.fx.closing.is_empty() {
+        return true
+    }
+    guard not out.fx.items.is_empty() else {
+        return false
+    }
+    if out.has_active_blur {
+        return true
+    }
+    return out.fx.items.any(fn(it) => it.border_width > 0.0)
+}
+
+/// Map luminaria output slot `o` to its dense rank among currently alive outputs,
+/// matching the dense index order returned by `Display.outputs()` even after monitor hot-unplug.
+fn PastelRenderer.alive_index(self, o: int) -> int {
+    var rank = 0
+    for i in 0..o {
+        if i < self.outputs.len() and self.outputs[i].alive {
+            rank += 1
+        }
+    }
+    return rank
 }
 
 pub fn PastelRenderer.layout(mut self, o: int, placements: &[types.Placement]) {
     guard o < self.outputs.len() and self.outputs[o].alive else {
         return
     }
+    let sheet_idx = self.alive_index(o)
     var out = mem.replace(mut self.outputs[o], blank_output())
-    let snap = self.sheet.snapshot(o)
+    let prev_ps = mem.replace(mut out.last_ps, [])
+    let prev_ps_fx = mem.replace(mut out.ps_fx, [])
+    let prev_fx = out.fx.clone()
+    let prev_first_win = out.first_window_idx
+
+    let snap = self.sheet.snapshot(sheet_idx)
+    var blur_settings_changed = false
     if snap.generation != out.fx_gen {
         if snap.generation > 0 and snap.background != out.background {
             out.background = snap.background
@@ -223,42 +358,99 @@ pub fn PastelRenderer.layout(mut self, o: int, placements: &[types.Placement]) {
             out.by_key.clear()
             out.by_id.clear()
             out.blur_pyr.invalidate_xray()
+            add_fx_damage(mut out, screen_rect(out))
         }
-        // Any decoration change (border color/width, blur toggle) damages affected regions.
-        let prev_items = mem.replace(mut out.fx.items, [])
-        for item in prev_items {
-            let pad = item.border_width + item.shadow_size + 4.0
-            out.scene.damage(vc.Rect { x: item.x - pad, y: item.y - pad, w: item.w + pad * 2.0, h: item.h + pad * 2.0 })
+        blur_settings_changed = snap.blur.enabled != prev_fx.blur.enabled or snap.blur.xray != prev_fx.blur.xray or snap.blur.passes != prev_fx.blur.passes or snap.blur.offset != prev_fx.blur.offset
+        if blur_settings_changed {
+            out.blur_pyr.invalidate_xray()
         }
-        for item in snap.items {
-            let pad = item.border_width + item.shadow_size + 4.0
-            out.scene.damage(vc.Rect { x: item.x - pad, y: item.y - pad, w: item.w + pad * 2.0, h: item.h + pad * 2.0 })
+        // Diff previous vs current decorations so only changed windows are damaged.
+        let prev_n = prev_fx.items.len()
+        let next_n = snap.items.len()
+        if prev_n == next_n and not blur_settings_changed {
+            for i in 0..next_n {
+                if not same_effect(prev_fx.items[i], snap.items[i]) {
+                    let b0 = effect_bounds(prev_fx.items[i])
+                    let b1 = effect_bounds(snap.items[i])
+                    out.scene.damage(b0)
+                    out.scene.damage(b1)
+                    add_fx_damage(mut out, b0)
+                    add_fx_damage(mut out, b1)
+                }
+            }
+        } else {
+            for item in prev_fx.items {
+                let b = effect_bounds(item)
+                out.scene.damage(b)
+                add_fx_damage(mut out, b)
+            }
+            for item in snap.items {
+                let b = effect_bounds(item)
+                out.scene.damage(b)
+                add_fx_damage(mut out, b)
+            }
+        }
+        // Diff closing window ghost effects.
+        let prev_cn = prev_fx.closing.len()
+        let next_cn = snap.closing.len()
+        if prev_cn == next_cn {
+            for i in 0..next_cn {
+                if not same_closing(prev_fx.closing[i], snap.closing[i]) {
+                    let b0 = closing_bounds(prev_fx.closing[i])
+                    let b1 = closing_bounds(snap.closing[i])
+                    out.scene.damage(b0)
+                    out.scene.damage(b1)
+                    add_fx_damage(mut out, b0)
+                    add_fx_damage(mut out, b1)
+                }
+            }
+        } else {
+            for cf in prev_fx.closing {
+                let b = closing_bounds(cf)
+                out.scene.damage(b)
+                add_fx_damage(mut out, b)
+            }
+            for cf in snap.closing {
+                let b = closing_bounds(cf)
+                out.scene.damage(b)
+                add_fx_damage(mut out, b)
+            }
         }
         out.fx = snap
         out.fx_gen = out.fx.generation
-        out.fx_dirty = true
     }
 
-    var any_blur = false
-    if out.fx.blur.enabled {
-        for item in out.fx.items {
-            if item.blur and item.blur_opacity > 0.01 {
-                any_blur = true
-                break
-            }
-        }
-    }
-    out.has_active_blur = any_blur
-
-    out.last_ps.clear()
     out.gen += 1
     let gen = out.gen
     var order = mem.replace(mut self.order, [])
     order.clear()
+    var used: List[bool] = []
+    for _ in 0..out.fx.items.len() {
+        used.push(false)
+    }
+    var any_blur = false
+    var first_window_idx = -1
+    let blur_enabled = out.fx.blur.enabled
+
     for p in placements {
+        let pi = out.last_ps.len()
         out.last_ps.push(p)
+        let fi = find_effect_unused(out.fx, p, used)
+        if fi >= 0 {
+            used[fi] = true
+            if first_window_idx < 0 {
+                first_window_idx = pi
+            }
+        }
+        out.ps_fx.push(fi)
         guard let Some(t) = self.texs.get(p.tex) else {
             continue
+        }
+        if blur_enabled and fi >= 0 {
+            let ef = out.fx.items[fi]
+            if ef.blur and ef.blur_opacity > 0.01 and surface_translucent(p, t) {
+                any_blur = true
+            }
         }
         let v = to_view(p, t)
         if let Some((id, seen_gen, _)) = out.by_key.get(p.key) {
@@ -275,6 +467,9 @@ pub fn PastelRenderer.layout(mut self, o: int, placements: &[types.Placement]) {
             order.push(id)
         }
     }
+    out.has_active_blur = any_blur
+    out.first_window_idx = first_window_idx
+
     var rm_keys = mem.replace(mut self.rm_keys, [])
     var rm_ids = mem.replace(mut self.rm_ids, [])
     rm_keys.clear()
@@ -293,9 +488,88 @@ pub fn PastelRenderer.layout(mut self, o: int, placements: &[types.Placement]) {
         out.scene.remove_many(rm_ids)
     }
     out.scene.reorder(order)
-    if not out.scene.idle() {
-        out.fx_dirty = true
+
+    // Diff previous vs current placements for partial damage on the effects path
+    // and invalidate cached X-Ray blur ONLY if a backdrop/wallpaper layer below managed windows changed.
+    var backdrop_changed = false
+    let new_len = out.last_ps.len()
+    let old_len = prev_ps.len()
+    let same_len = new_len == old_len
+    if same_len {
+        for i in 0..new_len {
+            let a = prev_ps[i]
+            let b = out.last_ps[i]
+            if not same_placement(a, b) {
+                if let Some(ta) = self.texs.get(a.tex) {
+                    let pfi = if i < prev_ps_fx.len() { prev_ps_fx[i] } else { -1 }
+                    add_fx_damage(mut out, placement_rect(a, ta).grow(placement_pad(a, prev_fx, pfi)))
+                }
+                if let Some(tb) = self.texs.get(b.tex) {
+                    add_fx_damage(mut out, placement_rect(b, tb).grow(placement_pad(b, out.fx, out.ps_fx[i])))
+                }
+                if first_window_idx > 0 and i < first_window_idx {
+                    backdrop_changed = true
+                }
+            }
+        }
+    } else {
+        // Placements were added/removed/reordered: damage only entries whose position/content changed.
+        for i in 0..old_len {
+            let a = prev_ps[i]
+            var matched = false
+            for j in 0..new_len {
+                if out.last_ps[j].key == a.key {
+                    matched = true
+                    if i != j or not same_placement(a, out.last_ps[j]) {
+                        if let Some(ta) = self.texs.get(a.tex) {
+                            let pfi = if i < prev_ps_fx.len() { prev_ps_fx[i] } else { -1 }
+                            add_fx_damage(mut out, placement_rect(a, ta).grow(placement_pad(a, prev_fx, pfi)))
+                        }
+                        if (prev_first_win > 0 and i < prev_first_win) or (first_window_idx > 0 and j < first_window_idx) {
+                            backdrop_changed = true
+                        }
+                    }
+                    break
+                }
+            }
+            if not matched {
+                if let Some(ta) = self.texs.get(a.tex) {
+                    let pfi = if i < prev_ps_fx.len() { prev_ps_fx[i] } else { -1 }
+                    add_fx_damage(mut out, placement_rect(a, ta).grow(placement_pad(a, prev_fx, pfi)))
+                }
+                if prev_first_win > 0 and i < prev_first_win {
+                    backdrop_changed = true
+                }
+            }
+        }
+        for j in 0..new_len {
+            let b = out.last_ps[j]
+            var matched = false
+            for i in 0..old_len {
+                if prev_ps[i].key == b.key {
+                    matched = true
+                    if i != j or not same_placement(prev_ps[i], b) {
+                        if let Some(tb) = self.texs.get(b.tex) {
+                            add_fx_damage(mut out, placement_rect(b, tb).grow(placement_pad(b, out.fx, out.ps_fx[j])))
+                        }
+                    }
+                    break
+                }
+            }
+            if not matched {
+                if let Some(tb) = self.texs.get(b.tex) {
+                    add_fx_damage(mut out, placement_rect(b, tb).grow(placement_pad(b, out.fx, out.ps_fx[j])))
+                }
+                if first_window_idx > 0 and j < first_window_idx {
+                    backdrop_changed = true
+                }
+            }
+        }
     }
+    if backdrop_changed {
+        out.blur_pyr.invalidate_xray()
+    }
+
     self.order = order
     self.rm_keys = rm_keys
     self.rm_ids = rm_ids
@@ -307,21 +581,57 @@ pub fn PastelRenderer.commit(mut self, key: u64, rects: &[(i32, i32, i32, i32)])
         guard let Some((id, _, _)) = self.outputs[o].by_key.get(key) else {
             continue
         }
-        self.outputs[o].fx_dirty = true
         if rects.is_empty() {
             self.outputs[o].scene.commit(id, None)
         }
         for r in rects {
             self.outputs[o].scene.commit(id, Some(vc.Rect { x: f32(r.0), y: f32(r.1), w: f32(r.2), h: f32(r.3) }))
         }
+        var out = mem.replace(mut self.outputs[o], blank_output())
+        if not out.overlay_keys.contains(key) {
+            for pi in 0..out.last_ps.len() {
+                let p = out.last_ps[pi]
+                if p.key != key {
+                    continue
+                }
+                if let Some(t) = self.texs.get(p.tex) {
+                    let pr = placement_rect(p, t)
+                    if rects.is_empty() {
+                        add_fx_damage(mut out, pr)
+                    } else {
+                        let tw = max(f32(t.width()), 1.0)
+                        let th = max(f32(t.height()), 1.0)
+                        let sx = pr.w / tw
+                        let sy = pr.h / th
+                        for r in rects {
+                            let dr = draw2d.Rect {
+                                x: pr.x + f32(r.0) * sx - 1.0,
+                                y: pr.y + f32(r.1) * sy - 1.0,
+                                w: f32(r.2) * sx + 2.0,
+                                h: f32(r.3) * sy + 2.0,
+                            }.intersect(pr)
+                            add_fx_damage(mut out, dr)
+                        }
+                    }
+                    // A wallpaper / background layer commit below managed windows invalidates X-Ray cache.
+                    if out.first_window_idx > 0 and pi < out.first_window_idx {
+                        out.blur_pyr.invalidate_xray()
+                    }
+                }
+                break
+            }
+        }
+        self.outputs[o] = out
     }
 }
 
 pub fn PastelRenderer.damage_all(mut self) {
     for o in 0..self.outputs.len() {
-        self.outputs[o].scene.damage_all()
-        self.outputs[o].blur_pyr.invalidate_xray()
-        self.outputs[o].fx_dirty = true
+        var out = mem.replace(mut self.outputs[o], blank_output())
+        out.scene.damage_all()
+        out.blur_pyr.invalidate_xray()
+        add_fx_damage(mut out, screen_rect(out))
+        self.outputs[o] = out
     }
 }
 
@@ -329,9 +639,12 @@ pub fn PastelRenderer.idle(self, o: int) -> bool {
     guard o < self.outputs.len() and self.outputs[o].alive else {
         return true
     }
-    let need_fx = not self.outputs[o].fx.items.is_empty() and (self.outputs[o].has_active_blur or self.outputs[o].fx.items.any(fn(it) => it.border_width > 0.0))
+    let need_fx = need_effects_path(self.outputs[o])
+    if need_fx != self.outputs[o].fx_prev_used {
+        return false
+    }
     if need_fx {
-        return not self.outputs[o].fx_dirty
+        return self.outputs[o].fx_pending.is_empty()
     }
     return self.outputs[o].scene.idle()
 }
@@ -346,9 +659,12 @@ pub fn PastelRenderer.visible(self, o: int, key: u64) -> bool {
     return self.outputs[o].scene.visible(id)
 }
 
-/// Preserve zero-copy direct scanout whenever no active blur or overlay sits on top.
+/// Preserve zero-copy direct scanout whenever no active blur, border, or closing animation sits on top.
 pub fn PastelRenderer.scanout(self, o: int) -> Option[u64] {
-    guard o < self.outputs.len() and not self.outputs[o].has_active_blur else {
+    guard o < self.outputs.len() and not self.outputs[o].has_active_blur and self.outputs[o].fx.closing.is_empty() else {
+        return None
+    }
+    if self.outputs[o].fx.items.any(fn(it) => it.border_width > 0.0) {
         return None
     }
     guard let Some(id) = self.outputs[o].scene.scanout() else {
@@ -396,15 +712,33 @@ pub fn PastelRenderer.set_overlays(mut self, o: int, keys: &[u64]) {
     guard o < self.outputs.len() and self.outputs[o].alive else {
         return
     }
+    var out = mem.replace(mut self.outputs[o], blank_output())
     var ids = mem.replace(mut self.ov_ids, [])
     ids.clear()
     for key in keys {
-        if let Some((id, _, _)) = self.outputs[o].by_key.get(key) {
+        if let Some((id, _, _)) = out.by_key.get(key) {
             ids.push(id)
         }
     }
-    self.outputs[o].scene.set_overlays(ids)
+    out.scene.set_overlays(ids)
+    // Track promoted overlay keys for the effects path and damage any overlay entry/exit transition.
+    var next_keys: List[u64] = []
+    for k in keys {
+        next_keys.push(k)
+    }
+    for pi in 0..out.last_ps.len() {
+        let p = out.last_ps[pi]
+        let was = out.overlay_keys.contains(p.key)
+        let now = next_keys.contains(p.key)
+        if was != now {
+            if let Some(t) = self.texs.get(p.tex) {
+                add_fx_damage(mut out, placement_rect(p, t).grow(placement_pad(p, out.fx, out.ps_fx[pi])))
+            }
+        }
+    }
+    out.overlay_keys = next_keys
     self.ov_ids = ids
+    self.outputs[o] = out
 }
 
 // ------------------------------------------------------------- textures
@@ -588,41 +922,74 @@ pub fn PastelRenderer.drop_target(mut self, key: u64) {
     }
 }
 
-/// Draw `out` into `dst` with GPU SDF hollow borders and Dual-Kawase frosted-glass blur.
-fn PastelRenderer.render_with_effects(mut self, mut out: Output, mut cv: draw2d.Canvas, pipes: blur.BlurPipelines, mut e: gpu.Encoder, dst: gpu.Texture) -> Result[(), str] {
+/// Expand any rect in `reg` that overlaps `target` by `pad`, clamped to `screen`.
+fn expand_region_for(mut reg: vc.Region, target: draw2d.Rect, pad: f32, screen: draw2d.Rect) {
+    guard reg.overlaps(target) else {
+        return
+    }
+    var extra: List[draw2d.Rect] = []
+    for d in reg.rects() {
+        if d.overlaps(target) {
+            extra.push(d.grow(pad).intersect(screen))
+        }
+    }
+    for r in extra {
+        reg.add(r)
+    }
+}
+
+/// Draw `out` into `dst` clipped to `area` with GPU SDF hollow borders, Dual-Kawase blur,
+/// closing-window fade ghosts, occlusion culling, and hardware overlay exclusion.
+fn PastelRenderer.render_with_effects(mut self, mut out: Output, mut cv: draw2d.Canvas, pipes: blur.BlurPipelines, mut e: gpu.Encoder, dst: gpu.Texture, area: vc.Region, capture_xray: bool) -> Result[(), str] {
     let w = dst.width()
     let h = dst.height()
     let screen = draw2d.Rect { w: f32(w), h: f32(h) }
-    let none: List[draw2d.Rect] = []
     let blur_cfg = out.fx.blur
+    let clips = area.rects()
+    let ps_len = out.last_ps.len()
 
-    // Track which effects were matched to a placement so borders/blur draw in exact Z-order.
-    var used: List[bool] = []
-    for _ in 0..out.fx.items.len() {
-        used.push(false)
-    }
-
-    // Acquire all imported dmabuf textures up front once.
-    for p in out.last_ps {
-        if let Some(t) = self.texs.get(p.tex) {
-            e.acquire(t)
+    // Acquire only client textures that are actually sampled on the primary plane.
+    var acquired: List[bool] = []
+    for pi in 0..ps_len {
+        let p = out.last_ps[pi]
+        var use_tex = false
+        if not out.overlay_keys.contains(p.key) {
+            if let Some(t) = self.texs.get(p.tex) {
+                let fi = if pi < out.ps_fx.len() { out.ps_fx[pi] } else { -1 }
+                let bounds = placement_rect(p, t).grow(placement_pad(p, out.fx, fi))
+                if area.overlaps(bounds) {
+                    e.acquire(t)
+                    use_tex = true
+                }
+            }
         }
+        acquired.push(use_tex)
     }
 
     cv.clear()
     cv.rect(screen, out.background)
-    var flushed_any = false
+    var xray_captured = not capture_xray
 
-    let ps_len = out.last_ps.len()
     for pi in 0..ps_len {
+        // Capture X-Ray blur right before the first managed window so only background + wallpaper
+        // layers enter the X-Ray cache (never opaque application windows).
+        if not xray_captured and out.first_window_idx >= 0 and pi >= out.first_window_idx {
+            try cv.draw(mut self.dev, mut e, gpu.Pass { target: dst, load: gpu.Load.Keep }, clips)
+            cv.clear()
+            discard try out.blur_pyr.ensure_xray(mut self.dev, pipes, mut e, dst, w, h, blur_cfg.passes, blur_cfg.offset, out.background)
+            xray_captured = true
+        }
         let p = out.last_ps[pi]
         guard let Some(t) = self.texs.get(p.tex) else {
             continue
         }
+        let fi = if pi < out.ps_fx.len() { out.ps_fx[pi] } else { -1 }
         let v = to_view(p, t)
-        let pw = if v.w > 0.0 { v.w } else if not v.src.is_empty() { v.src.w } else { f32(t.width()) }
-        let ph = if v.h > 0.0 { v.h } else if not v.src.is_empty() { v.src.h } else { f32(t.height()) }
-        let r = draw2d.Rect { x: v.x, y: v.y, w: pw, h: ph }
+        let r = placement_rect(p, t)
+        let bounds = r.grow(placement_pad(p, out.fx, fi))
+        guard area.overlaps(bounds) else {
+            continue
+        }
         let src_rect = if v.src.is_empty() {
             draw2d.Rect { w: 1.0, h: 1.0 }
         } else {
@@ -631,19 +998,16 @@ fn PastelRenderer.render_with_effects(mut self, mut out: Output, mut cv: draw2d.
             let pic = if v.transform.swaps() { vec2(th, tw) } else { vec2(tw, th) }
             draw2d.Rect { x: v.src.x / pic.x, y: v.src.y / pic.y, w: v.src.w / pic.x, h: v.src.h / pic.y }
         }
+        let is_hw_overlay = out.overlay_keys.contains(p.key)
 
-        let fi = find_effect(out.fx, p)
-        if fi >= 0 and not used[fi] {
-            used[fi] = true
+        if fi >= 0 and fi < out.fx.items.len() {
             let ef = out.fx.items[fi]
 
-            // If this placement needs backdrop blur:
+            // If this placement needs backdrop blur and overlaps damaged area:
             // - X-Ray mode: reuse cached blurred background/wallpaper (0 extra steady-state passes).
             // - Live mode (or overlay/floating): flush layers below into `dst` and run Dual-Kawase blur.
-            if blur_cfg.enabled and ef.blur and ef.blur_opacity > 0.01 {
-                let load = if flushed_any { gpu.Load.Keep } else { gpu.Load.Clear }
-                try cv.draw(mut self.dev, mut e, gpu.Pass { target: dst, load, clear: [out.background.x, out.background.y, out.background.z, out.background.w] }, none)
-                flushed_any = true
+            if not is_hw_overlay and blur_cfg.enabled and ef.blur and ef.blur_opacity > 0.01 and surface_translucent(p, t) and area.overlaps(r) {
+                try cv.draw(mut self.dev, mut e, gpu.Pass { target: dst, load: gpu.Load.Keep }, clips)
                 cv.clear()
                 let use_xray = blur_cfg.xray and ef.blur_xray and not ef.is_overlay
                 let blurred = if use_xray {
@@ -651,34 +1015,71 @@ fn PastelRenderer.render_with_effects(mut self, mut out: Output, mut cv: draw2d.
                 } else {
                     try out.blur_pyr.blur_from(mut self.dev, pipes, mut e, dst, w, h, blur_cfg.passes, blur_cfg.offset)
                 }
-                blur.composite(pipes, mut e, blurred, dst, r, ef.radius, ef.blur_opacity)
+                blur.composite_clips(pipes, mut e, blurred, dst, r, ef.radius, ef.blur_opacity, clips)
             }
 
-            if ef.shadow_size > 0.0 {
-                let sc = vec4(ef.shadow_color.x, ef.shadow_color.y, ef.shadow_color.z, ef.shadow_color.w * v.opacity)
-                cv.shadow(r, sc, ef.radius, ef.shadow_size)
+            if not is_hw_overlay {
+                if ef.shadow_size > 0.0 {
+                    let sc = vec4(ef.shadow_color.x, ef.shadow_color.y, ef.shadow_color.z, ef.shadow_color.w * v.opacity)
+                    cv.shadow(r, sc, ef.radius, ef.shadow_size)
+                }
+                cv.texture(t, r, src_rect, v.transform, vec4(1.0, 1.0, 1.0, v.opacity), ef.radius)
+                if not surface_translucent(p, t) {
+                    let opq = if t.opaque() { r } else { draw2d.Rect { x: r.x + p.opaque.x, y: r.y + p.opaque.y, w: p.opaque.w, h: p.opaque.h }.intersect(r) }
+                    cv.opaque(opq)
+                }
             }
-            cv.texture(t, r, src_rect, v.transform, vec4(1.0, 1.0, 1.0, v.opacity), ef.radius)
             if ef.border_width > 0.0 {
                 let bw = ef.border_width
                 let br = draw2d.Rect { x: r.x - bw, y: r.y - bw, w: r.w + bw * 2.0, h: r.h + bw * 2.0 }
                 let bc = vec4(ef.border_color.x, ef.border_color.y, ef.border_color.z, ef.border_color.w * v.opacity)
                 cv.border(br, bc, ef.radius, bw)
             }
-        } else {
+        } else if not is_hw_overlay {
             if v.shadow > 0.0 {
                 cv.shadow(r, vec4(0.0, 0.0, 0.0, 0.45 * v.opacity), v.radius, v.shadow)
             }
             cv.texture(t, r, src_rect, v.transform, vec4(1.0, 1.0, 1.0, v.opacity), v.radius)
+            if not surface_translucent(p, t) {
+                let opq = if t.opaque() { r } else { draw2d.Rect { x: r.x + p.opaque.x, y: r.y + p.opaque.y, w: p.opaque.w, h: p.opaque.h }.intersect(r) }
+                cv.opaque(opq)
+            }
         }
     }
 
-    let final_load = if flushed_any { gpu.Load.Keep } else { gpu.Load.Clear }
-    try cv.draw(mut self.dev, mut e, gpu.Pass { target: dst, load: final_load, clear: [out.background.x, out.background.y, out.background.z, out.background.w] }, none)
+    // Draw closing-window fade+scale ghost frames driven by `[animation].window-close`.
+    for cf in out.fx.closing {
+        guard cf.opacity > 0.005 else {
+            continue
+        }
+        let b = closing_bounds(cf)
+        guard area.overlaps(b) else {
+            continue
+        }
+        let r = draw2d.Rect { x: cf.x, y: cf.y, w: cf.w, h: cf.h }
+        if cf.shadow_size > 0.0 {
+            let sc = vec4(cf.shadow_color.x, cf.shadow_color.y, cf.shadow_color.z, cf.shadow_color.w * cf.opacity)
+            cv.shadow(r, sc, cf.radius, cf.shadow_size)
+        }
+        if cf.fill_color.w > 0.001 {
+            let fc = vec4(cf.fill_color.x, cf.fill_color.y, cf.fill_color.z, cf.fill_color.w * cf.opacity)
+            cv.round_rect(r, fc, cf.radius)
+        }
+        if cf.border_width > 0.0 {
+            let bw = cf.border_width
+            let br = draw2d.Rect { x: r.x - bw, y: r.y - bw, w: r.w + bw * 2.0, h: r.h + bw * 2.0 }
+            let bc = vec4(cf.border_color.x, cf.border_color.y, cf.border_color.z, cf.border_color.w * cf.opacity)
+            cv.border(br, bc, cf.radius, bw)
+        }
+    }
 
-    for p in out.last_ps {
-        if let Some(t) = self.texs.get(p.tex) {
-            e.release(t)
+    try cv.draw(mut self.dev, mut e, gpu.Pass { target: dst, load: gpu.Load.Keep }, clips)
+
+    for pi in 0..ps_len {
+        if acquired[pi] {
+            if let Some(t) = self.texs.get(out.last_ps[pi].tex) {
+                e.release(t)
+            }
         }
     }
     return Ok(())
@@ -686,7 +1087,8 @@ fn PastelRenderer.render_with_effects(mut self, mut out: Output, mut cv: draw2d.
 
 /// Draw output `o` into target `key` (`age` frames old).
 /// Uses partial-damage `vk_compose.Scene.render` on the fast path (no borders/blur),
-/// and `render_with_effects` when GPU borders or Dual-Kawase blur are active.
+/// and partial-damage `render_with_effects` (with buffer-age tracking and blur kernel
+/// damage expansion) when GPU borders or Dual-Kawase blur are active.
 pub fn PastelRenderer.render(mut self, o: int, key: u64, age: u32) -> Result[Option[int], str] {
     try self.flush_uploads()
     guard o < self.outputs.len() else {
@@ -701,12 +1103,15 @@ pub fn PastelRenderer.render(mut self, o: int, key: u64, age: u32) -> Result[Opt
     var canvas = cv
     var e = try self.dev.encoder()
     var out = mem.replace(mut self.outputs[o], blank_output())
-    let need_fx = not out.fx.items.is_empty() and (out.has_active_blur or out.fx.items.any(fn(it) => it.border_width > 0.0))
+    let need_fx = need_effects_path(out)
 
     var drew = false
     var err_msg = ""
     var ok = true
     if not need_fx {
+        if out.fx_prev_used {
+            out.scene.damage_all()
+        }
         match out.scene.render(mut self.dev, mut canvas, mut e, gpu.Frame.new(t, age)) {
             Ok(d) => drew = d
             Err(err) => {
@@ -714,22 +1119,92 @@ pub fn PastelRenderer.render(mut self, o: int, key: u64, age: u32) -> Result[Opt
                 err_msg = err
             }
         }
-        out.fx_dirty = false
-    } else if not out.fx_dirty and age == 1 {
-        drew = false
+        out.fx_pending.clear()
+        out.fx_prev_used = false
     } else {
-        if let Some(pipes) = self.blur_pipes {
-            match self.render_with_effects(mut out, mut canvas, pipes, mut e, t) {
-                Ok => {
-                    drew = true
-                    out.fx_dirty = false
+        let screen = screen_rect(out)
+        let switched = not out.fx_prev_used
+        if switched {
+            add_fx_damage(mut out, screen)
+        }
+        // Check if an active X-Ray blur needs a full-screen background pass to populate its cache,
+        // or if live-blurred regions require kernel-radius damage expansion.
+        var need_full_xray = false
+        var live_blur_rects: List[draw2d.Rect] = []
+        if out.fx.blur.enabled {
+            for pi in 0..out.last_ps.len() {
+                let fi = if pi < out.ps_fx.len() { out.ps_fx[pi] } else { -1 }
+                guard fi >= 0 and fi < out.fx.items.len() else {
+                    continue
                 }
-                Err(err) => {
-                    ok = false
-                    err_msg = err
+                let ef = out.fx.items[fi]
+                guard ef.blur and ef.blur_opacity > 0.01 else {
+                    continue
+                }
+                let p = out.last_ps[pi]
+                guard not out.overlay_keys.contains(p.key) else {
+                    continue
+                }
+                guard let Some(ptex) = self.texs.get(p.tex) else {
+                    continue
+                }
+                guard surface_translucent(p, ptex) else {
+                    continue
+                }
+                let use_xray = out.fx.blur.xray and ef.blur_xray and not ef.is_overlay
+                if use_xray {
+                    if not out.blur_pyr.xray_valid or out.blur_pyr.xray_bg != out.background {
+                        need_full_xray = true
+                    }
+                } else {
+                    live_blur_rects.push(placement_rect(p, ptex))
                 }
             }
         }
+        if need_full_xray {
+            add_fx_damage(mut out, screen)
+        }
+        let blur_pad = blur.kernel_radius(out.fx.blur.passes, out.fx.blur.offset)
+        var pending = mem.replace(mut out.fx_pending, vc.Region.new())
+        for br in live_blur_rects {
+            expand_region_for(mut pending, br, blur_pad, screen)
+        }
+
+        let age_i = int(age)
+        var area = mem.replace(mut out.fx_area, vc.Region.new())
+        area.clear()
+        if age_i == 0 or age_i > out.fx_history.len() + 1 or switched or need_full_xray {
+            area.add(screen)
+        } else {
+            area.add_region(pending)
+            for i in 0..age_i - 1 {
+                area.add_region(out.fx_history[i])
+            }
+        }
+        for br in live_blur_rects {
+            expand_region_for(mut area, br, blur_pad, screen)
+        }
+
+        var hist_entry = if out.fx_history.len() >= fx_history_len { out.fx_history.pop().unwrap() } else { vc.Region.new() }
+        hist_entry.clear()
+        hist_entry.add_region(pending)
+        out.fx_history.insert(0, hist_entry)
+        pending.clear()
+        out.fx_pending = pending
+        out.fx_prev_used = true
+
+        if not area.is_empty() {
+            if let Some(pipes) = self.blur_pipes {
+                match self.render_with_effects(mut out, mut canvas, pipes, mut e, t, area, need_full_xray) {
+                    Ok => drew = true
+                    Err(err) => {
+                        ok = false
+                        err_msg = err
+                    }
+                }
+            }
+        }
+        out.fx_area = area
     }
 
     self.outputs[o] = out
@@ -940,8 +1415,12 @@ pub fn PastelRenderer.changed(self, o: int, mut out: List[(i32, i32, i32, i32)])
     guard o < self.outputs.len() else {
         return
     }
-    if self.outputs[o].has_active_blur {
-        // Full-frame damage when frosted blur is active (ensures no dirty seam artifacts).
+    if self.outputs[o].fx_prev_used {
+        if not self.outputs[o].fx_history.is_empty() {
+            for r in self.outputs[o].fx_history[0].rects() {
+                out.push((i32(r.x), i32(r.y), i32(r.w), i32(r.h)))
+            }
+        }
         return
     }
     for r in self.outputs[o].scene.changed() {

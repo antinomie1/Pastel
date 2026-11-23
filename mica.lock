@@ -4,63 +4,63 @@ version = 1
 [[package]]
 name = "libdrm_sys"
 version = "0.1.0"
-source = "git+https://github.com/antinomie1/luminaria.git?dir=sys/libdrm_sys#704359680f7ede4ed2ca61644a719be5b59b70e7"
+source = "git+https://github.com/antinomie1/luminaria.git?dir=sys/libdrm_sys#e0c8bef35d8dbbe6c68ae093a03935e31532a7be"
 
 [[package]]
 name = "libinput_sys"
 version = "0.1.0"
-source = "git+https://github.com/antinomie1/luminaria.git?dir=sys/libinput_sys#704359680f7ede4ed2ca61644a719be5b59b70e7"
+source = "git+https://github.com/antinomie1/luminaria.git?dir=sys/libinput_sys#e0c8bef35d8dbbe6c68ae093a03935e31532a7be"
 dependencies = ["libudev_sys"]
 
 [[package]]
 name = "libseat_sys"
 version = "0.1.0"
-source = "git+https://github.com/antinomie1/luminaria.git?dir=sys/libseat_sys#704359680f7ede4ed2ca61644a719be5b59b70e7"
+source = "git+https://github.com/antinomie1/luminaria.git?dir=sys/libseat_sys#e0c8bef35d8dbbe6c68ae093a03935e31532a7be"
 
 [[package]]
 name = "libudev_sys"
 version = "0.1.0"
-source = "git+https://github.com/antinomie1/luminaria.git?dir=sys/libudev_sys#704359680f7ede4ed2ca61644a719be5b59b70e7"
+source = "git+https://github.com/antinomie1/luminaria.git?dir=sys/libudev_sys#e0c8bef35d8dbbe6c68ae093a03935e31532a7be"
 
 [[package]]
 name = "luminaria"
 version = "0.1.0"
-source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria#704359680f7ede4ed2ca61644a719be5b59b70e7"
+source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria#e0c8bef35d8dbbe6c68ae093a03935e31532a7be"
 dependencies = ["libdrm_sys", "luminaria_backend", "luminaria_compose", "luminaria_proto", "luminaria_server", "luminaria_types", "luminaria_wire"]
 
 [[package]]
 name = "luminaria_backend"
 version = "0.1.0"
-source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria_backend#704359680f7ede4ed2ca61644a719be5b59b70e7"
+source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria_backend#e0c8bef35d8dbbe6c68ae093a03935e31532a7be"
 dependencies = ["libdrm_sys", "libinput_sys", "libseat_sys", "libudev_sys", "luminaria_proto", "luminaria_types", "luminaria_wire", "xkbcommon_sys"]
 
 [[package]]
 name = "luminaria_compose"
 version = "0.1.0"
-source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria_compose#704359680f7ede4ed2ca61644a719be5b59b70e7"
+source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria_compose#e0c8bef35d8dbbe6c68ae093a03935e31532a7be"
 dependencies = ["luminaria_types", "vk_compose", "vk_draw2d", "vk_gpu"]
 
 [[package]]
 name = "luminaria_proto"
 version = "0.1.0"
-source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria_proto#704359680f7ede4ed2ca61644a719be5b59b70e7"
+source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria_proto#e0c8bef35d8dbbe6c68ae093a03935e31532a7be"
 dependencies = ["luminaria_wire"]
 
 [[package]]
 name = "luminaria_server"
 version = "0.1.0"
-source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria_server#704359680f7ede4ed2ca61644a719be5b59b70e7"
+source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria_server#e0c8bef35d8dbbe6c68ae093a03935e31532a7be"
 dependencies = ["luminaria_proto", "luminaria_types", "luminaria_wire"]
 
 [[package]]
 name = "luminaria_types"
 version = "0.1.0"
-source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria_types#704359680f7ede4ed2ca61644a719be5b59b70e7"
+source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria_types#e0c8bef35d8dbbe6c68ae093a03935e31532a7be"
 
 [[package]]
 name = "luminaria_wire"
 version = "0.1.0"
-source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria_wire#704359680f7ede4ed2ca61644a719be5b59b70e7"
+source = "git+https://github.com/antinomie1/luminaria.git?dir=luminaria_wire#e0c8bef35d8dbbe6c68ae093a03935e31532a7be"
 
 [[package]]
 name = "pastel"
@@ -133,8 +133,8 @@ dependencies = ["raw_window_handle", "vk"]
 [[package]]
 name = "xkbcommon_sys"
 version = "0.1.0"
-source = "git+https://github.com/antinomie1/luminaria.git?dir=sys/xkbcommon_sys#704359680f7ede4ed2ca61644a719be5b59b70e7"
+source = "git+https://github.com/antinomie1/luminaria.git?dir=sys/xkbcommon_sys#e0c8bef35d8dbbe6c68ae093a03935e31532a7be"
 
 [git]
-"https://github.com/antinomie1/luminaria.git" = "704359680f7ede4ed2ca61644a719be5b59b70e7"
+"https://github.com/antinomie1/luminaria.git" = "e0c8bef35d8dbbe6c68ae093a03935e31532a7be"
 "https://github.com/antinomie1/vk.git" = "b5720245a8b9b819107016058733630f3e7501cf"

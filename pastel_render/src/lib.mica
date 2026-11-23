@@ -10,8 +10,10 @@ pub import anim_state
 
 pub type BlurSettings = effects.BlurSettings
 pub type WindowEffect = effects.WindowEffect
+pub type ClosingEffect = effects.ClosingEffect
 pub type OutputEffects = effects.OutputEffects
 pub type EffectSheet = effects.EffectSheet
 pub type PastelRenderer = renderer.PastelRenderer
 pub type OverlayImage = overlay.OverlayImage
 pub type AnimState = anim_state.AnimState
+pub type ClosingFrame = anim_state.ClosingFrame

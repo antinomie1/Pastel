@@ -1,17 +1,44 @@
-// Process spawning (autostart, keybind commands, and optional xwayland-satellite).
+// Process spawning (autostart, keybind commands, session env export, and configurable xwayland-satellite).
 
+import std.env
+import std.fs
 import std.io
 import std.process
+import std.signal
+import std.time
+import pastel_config as cfg
 
-/// Spawn a shell command detached in the background with WAYLAND_DISPLAY,
-/// PASTEL_SOCKET, and an optional XDG_ACTIVATION_TOKEN.
-pub fn spawn_shell(cmd: str, wayland_display: str, pastel_socket: str, token: str) {
-    guard not cmd.trim().is_empty() else {
+/// Single-quote a string safely for POSIX `sh -c`.
+fn shell_quote(s: str) -> str {
+    var out = "'"
+    for i in 0..s.len() {
+        let ch = s.slice(i, i + 1)
+        if ch == "'" {
+            out += "'\\''"
+        } else {
+            out += ch
+        }
+    }
+    out += "'"
+    return out
+}
+
+/// Spawn a shell command detached in the background with Wayland/Pastel session variables
+/// (`WAYLAND_DISPLAY`, `XDG_CURRENT_DESKTOP`, `XDG_SESSION_TYPE`, `PASTEL_SOCKET`,
+/// optional `DISPLAY`, and optional `XDG_ACTIVATION_TOKEN`).
+/// Commands are grouped in a subshell `( ... ) </dev/null >/dev/null 2>&1 &` so compound
+/// pipelines containing `;` never block the compositor event loop.
+pub fn spawn_shell(cmd: str, wayland_display: str, pastel_socket: str, xwayland_display: str, token: str) {
+    let trimmed = cmd.trim()
+    guard not trimmed.is_empty() else {
         return
     }
-    var c = process.command("sh").args(["-c", "{cmd} &"]).env("WAYLAND_DISPLAY", wayland_display)
+    var c = process.command("sh").args(["-c", "( {trimmed} ) </dev/null >/dev/null 2>&1 &"]).env("WAYLAND_DISPLAY", wayland_display).env("XDG_CURRENT_DESKTOP", "pastel").env("XDG_SESSION_TYPE", "wayland")
     if not pastel_socket.is_empty() {
         c = c.env("PASTEL_SOCKET", pastel_socket)
+    }
+    if not xwayland_display.is_empty() {
+        c = c.env("DISPLAY", xwayland_display)
     }
     if not token.is_empty() {
         c = c.env("XDG_ACTIVATION_TOKEN", token)
@@ -19,18 +46,96 @@ pub fn spawn_shell(cmd: str, wayland_display: str, pastel_socket: str, token: st
     discard c.status()
 }
 
-/// Launch `xwayland-satellite` in the background if configured and available.
-pub fn start_xwayland(bin_path: str, wayland_display: str) {
-    guard not bin_path.trim().is_empty() else {
-        return
+fn pick_x11_display(preferred: str) -> (str, str) {
+    let pref = preferred.trim()
+    if not pref.is_empty() and pref.starts_with(":") {
+        let num = pref.slice(1, pref.len())
+        return (pref, "/tmp/.X11-unix/X{num}")
     }
-    let check = process.command("sh").args(["-c", "command -v {bin_path} >/dev/null 2>&1"]).status()
+    for n in 0..32 {
+        let sock = "/tmp/.X11-unix/X{n}"
+        if not fs.exists(sock) {
+            return (":{n}", sock)
+        }
+    }
+    return ("", "")
+}
+
+/// Launch `xwayland-satellite` according to `[xwayland]` config and wait briefly for its
+/// X11 Unix socket to become ready (up to `ready_timeout_ms`) so X11 autostart clients never race.
+/// Returns `(DISPLAY, pid)` (or `("", 0)` if disabled or unavailable).
+pub fn start_xwayland(xcfg: cfg.XWaylandConfig, wayland_display: str) -> (str, int) {
+    guard xcfg.enabled else {
+        return ("", 0)
+    }
+    let trimmed = xcfg.path.trim()
+    guard not trimmed.is_empty() else {
+        return ("", 0)
+    }
+    let qbin = shell_quote(trimmed)
+    let check = process.command("sh").args(["-c", "command -v {qbin} >/dev/null 2>&1"]).status()
     guard let Ok(code) = check else {
-        return
+        return ("", 0)
     }
     guard code == 0 else {
+        return ("", 0)
+    }
+    let (disp, sock_path) = pick_x11_display(xcfg.display)
+    guard not disp.is_empty() else {
+        io.eprint("pastel: xwayland-satellite skipped (no free display :0..:31)")
+        return ("", 0)
+    }
+    let qdisp = shell_quote(disp)
+    let script = "{qbin} {qdisp} </dev/null >/dev/null 2>&1 & printf '%s' \"$!\""
+    var pid = 0
+    if let Ok(out) = process.command("sh").args(["-c", script]).env("WAYLAND_DISPLAY", wayland_display).output() {
+        if let Some(p) = out.stdout.trim().to_int() {
+            pid = p
+        }
+    }
+    if pid <= 0 {
+        io.eprint("pastel: failed to launch {trimmed} {disp}")
+        return ("", 0)
+    }
+    // Wait briefly for xwayland-satellite to bind `/tmp/.X11-unix/X<n>`, aborting early if the child exited.
+    let timeout_ms = max(xcfg.ready_timeout_ms, 0)
+    if timeout_ms > 0 and not sock_path.is_empty() {
+        let deadline = time.now_ns() + timeout_ms * 1000000
+        while not fs.exists(sock_path) and time.now_ns() < deadline {
+            if signal.send(pid, 0).is_err() {
+                io.eprint("pastel: {trimmed} {disp} exited before X11 socket was ready")
+                return ("", 0)
+            }
+            time.sleep_ms(10)
+        }
+    }
+    io.eprint("pastel: started {trimmed} {disp} (pid={pid}) on {wayland_display}")
+    return (disp, pid)
+}
+
+/// Terminate the `xwayland-satellite` child started by this compositor session, if any.
+pub fn stop_xwayland(pid: int) {
+    if pid > 0 {
+        discard signal.send(pid, signal.terminate)
+    }
+}
+
+/// Export session environment to D-Bus / systemd user activation when running a real session,
+/// so `xdg-desktop-portal` and screen-sharing clients pick up `WAYLAND_DISPLAY` automatically.
+pub fn export_session_env(wayland_display: str, xwayland_display: str, nested: bool) {
+    guard not nested else {
         return
     }
-    discard process.command("sh").args(["-c", "{bin_path} >/dev/null 2>&1 &"]).env("WAYLAND_DISPLAY", wayland_display).status()
-    io.eprint("pastel: started {bin_path} on {wayland_display}")
+    guard env.get("DBUS_SESSION_BUS_ADDRESS").map(fn(s) => not s.is_empty()).unwrap_or(false) else {
+        return
+    }
+    var vars = "WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE"
+    if not xwayland_display.is_empty() {
+        vars += " DISPLAY"
+    }
+    var c = process.command("sh").args(["-c", "( command -v dbus-update-activation-environment >/dev/null 2>&1 && dbus-update-activation-environment --systemd {vars} ) </dev/null >/dev/null 2>&1 &"]).env("WAYLAND_DISPLAY", wayland_display).env("XDG_CURRENT_DESKTOP", "pastel").env("XDG_SESSION_TYPE", "wayland")
+    if not xwayland_display.is_empty() {
+        c = c.env("DISPLAY", xwayland_display)
+    }
+    discard c.status()
 }

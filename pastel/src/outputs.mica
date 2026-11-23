@@ -1,36 +1,66 @@
-// Output management, mode parsing, multi-monitor sync, and input device configuration.
+// Output management, rotation-invariant scale computation, mode parsing, multi-monitor sync, and input device config.
 
 import luminaria as lum
 import pastel_core as core
 import pastel_config as cfg
 import compositor
 
-fn parse_mode(spec: str) -> Option[lum.Mode] {
+/// Rotation-invariant output scale derived from physical mode area vs logical area:
+/// works identically for 0°, 90°, 180°, and 270° rotated outputs.
+pub fn output_scale(ow: f64, oh: f64, mode: lum.Mode) -> f64 {
+    guard ow > 0.0 and oh > 0.0 and mode.width > 0 and mode.height > 0 else {
+        return 1.0
+    }
+    let ratio = (f64(mode.width) * f64(mode.height)) / (ow * oh)
+    return max(ratio.sqrt(), 0.5)
+}
+
+/// Parse `"WIDTHxHEIGHT"` or `"WIDTHxHEIGHT@HZ"`. When `@HZ` is omitted, selects the highest
+/// refresh rate matching `(width, height)` from `available_modes` (falling back to 60 Hz).
+fn parse_mode(spec: str, available_modes: &[lum.Mode]) -> Option[lum.Mode] {
     let s = spec.trim()
     guard not s.is_empty() else {
         return None
     }
     var dim = ""
-    var mhz: i32 = 60000
+    var explicit_mhz: Option[i32] = None
     if let Some(parts) = s.split_once("@") {
-        dim = parts.left.clone()
-        if let Some(hz) = parts.right.to_float() {
-            mhz = i32((hz * 1000.0).round())
+        dim = parts.left.trim()
+        guard let Some(hz) = parts.right.trim().to_float() else {
+            return None
         }
+        guard hz > 0.0 and hz <= 1000.0 else {
+            return None
+        }
+        explicit_mhz = Some(i32((hz * 1000.0).round()))
     } else {
         dim = s
     }
     guard let Some(wh) = dim.split_once("x") else {
         return None
     }
-    guard let Some(w) = wh.left.to_int() else {
+    guard let Some(w) = wh.left.trim().to_int() else {
         return None
     }
-    guard let Some(h) = wh.right.to_int() else {
+    guard let Some(h) = wh.right.trim().to_int() else {
         return None
     }
     guard w > 0 and h > 0 else {
         return None
+    }
+    var mhz: i32 = 60000
+    if let Some(m) = explicit_mhz {
+        mhz = m
+    } else {
+        var best: i32 = 0
+        for am in available_modes {
+            if am.width == i32(w) and am.height == i32(h) and am.refresh_mhz > best {
+                best = am.refresh_mhz
+            }
+        }
+        if best > 0 {
+            mhz = best
+        }
     }
     return Some(lum.Mode { width: i32(w), height: i32(h), refresh_mhz: mhz })
 }
@@ -50,7 +80,7 @@ pub fn apply_output_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: comp
         return
     }
     p.d.enable(so, true)
-    if let Some(m) = parse_mode(oc.mode) {
+    if let Some(m) = parse_mode(oc.mode, desc.modes) {
         p.d.set_mode(so, m)
     }
     if let Some(sc) = oc.scale {
@@ -79,7 +109,7 @@ pub fn sync_outputs[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.
         let (ux, uy, uw, uh) = p.d.usable(so)
         p.desktop.add_monitor(oid, desc.name, core.Rect.new(fx, fy, fw, fh), core.Rect.new(ux, uy, uw, uh))
     }
-    // Remove disappeared monitors, migrating any open windows safely.
+    // Remove disappeared monitors, migrating any open windows safely and pruning animation state.
     var gone: List[u64] = []
     for m in p.desktop.monitors {
         if not live_ids.contains(m.id) {
@@ -88,25 +118,57 @@ pub fn sync_outputs[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.
     }
     for oid in gone {
         p.desktop.remove_monitor(oid)
+        p.anims.remove_output(oid)
         if let Some(so) = p.out_by_id.remove(oid) {
             discard p.id_by_out.remove(so)
         }
     }
 }
 
+pub fn active_output_scale[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R]) -> f64 {
+    if not p.desktop.monitors.is_empty() and p.desktop.active_monitor < p.desktop.monitors.len() {
+        let oid = p.desktop.monitors[p.desktop.active_monitor].id
+        if let Some(so) = p.out_by_id.get(oid) {
+            let (_, _, ow, oh) = p.d.output_rect(so)
+            let desc = p.d.output_desc(so)
+            return output_scale(ow, oh, desc.mode)
+        }
+    }
+    let outs = p.d.outputs()
+    if not outs.is_empty() {
+        let (_, _, ow, oh) = p.d.output_rect(outs[0])
+        let desc = p.d.output_desc(outs[0])
+        return output_scale(ow, oh, desc.mode)
+    }
+    return 1.0
+}
+
 pub fn on_output_added[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], so: lum.Output) {
     apply_output_config(mut p, so)
     sync_outputs(mut p)
+    if (active_output_scale(p) - p.overlay_scale).abs() > 0.05 {
+        p.rebuild_overlay()
+    }
+    p.sync_focus()
     p.needs_layout = true
 }
 
 pub fn on_output_changed[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], so: lum.Output) {
+    discard so
     sync_outputs(mut p)
+    if (active_output_scale(p) - p.overlay_scale).abs() > 0.05 {
+        p.rebuild_overlay()
+    }
     p.needs_layout = true
 }
 
 pub fn on_output_removed[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], so: lum.Output) {
+    discard so
     sync_outputs(mut p)
+    if (active_output_scale(p) - p.overlay_scale).abs() > 0.05 {
+        p.rebuild_overlay()
+    }
+    p.sync_focus()
     p.needs_layout = true
 }
 
@@ -120,8 +182,9 @@ pub fn apply_input_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compo
     })
 }
 
-pub fn apply_keymap[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) {
-    if not p.cfg.input.layout.is_empty() or not p.cfg.input.variant.is_empty() or not p.cfg.input.options.is_empty() {
+pub fn apply_keymap[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], force: bool) {
+    let has_custom = not p.cfg.input.layout.is_empty() or not p.cfg.input.variant.is_empty() or not p.cfg.input.options.is_empty()
+    if force or has_custom {
         discard p.d.set_keymap(lum.Names {
             layout: p.cfg.input.layout.clone(),
             variant: p.cfg.input.variant.clone(),

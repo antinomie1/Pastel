@@ -2,6 +2,7 @@
 
 import pastel_core as core
 import traits
+import column
 import scrolling
 
 /// A floating window with explicit logical geometry.
@@ -59,12 +60,24 @@ pub fn Workspace.focused(self) -> Option[u64] {
     return None
 }
 
+pub fn Workspace.column_width_for(self, id: u64) -> Option[f64] {
+    return self.strip.column_width_for(id)
+}
+
 pub fn Workspace.insert_tiled(mut self, id: u64, width_hint: f64) {
+    self.fullscreen = None
     self.strip.insert(id, width_hint)
     self.focus_floating = false
 }
 
+pub fn Workspace.insert_column(mut self, take col: column.Column) {
+    self.fullscreen = None
+    self.strip.insert_column(col)
+    self.focus_floating = false
+}
+
 pub fn Workspace.insert_floating(mut self, id: u64, rect: core.Rect) {
+    self.fullscreen = None
     self.floating.push(FloatingWin { id, rect })
     self.focus_floating = true
 }
@@ -89,6 +102,9 @@ pub fn Workspace.remove(mut self, id: u64) -> bool {
 }
 
 pub fn Workspace.focus_window(mut self, id: u64) -> bool {
+    if self.fullscreen.is_some() and self.fullscreen != Some(id) {
+        self.fullscreen = None
+    }
     let fi = self.find_floating(id)
     if fi >= 0 {
         if fi != self.floating.len() - 1 {
@@ -106,6 +122,7 @@ pub fn Workspace.focus_window(mut self, id: u64) -> bool {
 }
 
 pub fn Workspace.switch_focus_layer(mut self) -> Option[u64] {
+    self.fullscreen = None
     if self.focus_floating {
         if not self.strip.is_empty() {
             self.focus_floating = false
@@ -114,6 +131,10 @@ pub fn Workspace.switch_focus_layer(mut self) -> Option[u64] {
         self.focus_floating = true
     }
     return self.focused()
+}
+
+pub fn Workspace.set_column_maximized(mut self, id: u64, on: bool) -> bool {
+    return self.strip.set_column_maximized(id, on)
 }
 
 pub fn Workspace.move_floating(mut self, id: u64, dx: f64, dy: f64) -> bool {
@@ -138,27 +159,42 @@ pub fn Workspace.resize_floating(mut self, id: u64, dx: f64, dy: f64, w: f64, h:
     return true
 }
 
-/// Compute all targets for this workspace (tiled, then floating, then fullscreen).
-pub fn Workspace.compute(mut self, ws_idx: int, full_rect: core.Rect, usable_rect: core.Rect, gap: f64, center: traits.CenterMode, mut out: List[traits.TileTarget]) {
+/// Compute all targets for this workspace split into strict Z-order layers:
+/// `tiled_out` -> `float_out` -> `full_out`.
+/// When a window is fullscreen on this workspace, only that fullscreen window is emitted
+/// (at `full_rect`, above all layers) so occluded windows never bleed over it and direct
+/// scanout can activate cleanly.
+pub fn Workspace.compute_layers(mut self, monitor_idx: int, ws_idx: int, is_active_monitor: bool, full_rect: core.Rect, usable_rect: core.Rect, gap: f64, center: traits.CenterMode, mut tiled_out: List[traits.TileTarget], mut float_out: List[traits.TileTarget], mut full_out: List[traits.TileTarget]) {
+    if let Some(fs_id) = self.fullscreen {
+        full_out.push(traits.TileTarget {
+            id: fs_id,
+            rect: full_rect,
+            focused: is_active_monitor,
+            floating: false,
+            fullscreen: true,
+            maximized: false,
+            monitor_idx,
+            workspace_idx: ws_idx,
+        })
+        return
+    }
     let active_win = self.focused().unwrap_or(0)
-    let start = out.len()
-    self.strip.compute(usable_rect, gap, center, mut out)
-    for i in start..out.len() {
-        out[i].workspace_idx = ws_idx
-        out[i].focused = out[i].id == active_win
-        if self.fullscreen == Some(out[i].id) {
-            out[i].rect = full_rect
-            out[i].fullscreen = true
-        }
+    let start = tiled_out.len()
+    self.strip.compute(usable_rect, gap, center, mut tiled_out)
+    for i in start..tiled_out.len() {
+        tiled_out[i].monitor_idx = monitor_idx
+        tiled_out[i].workspace_idx = ws_idx
+        tiled_out[i].focused = is_active_monitor and tiled_out[i].id == active_win
     }
     for f in self.floating {
-        let is_fs = self.fullscreen == Some(f.id)
-        out.push(traits.TileTarget {
+        float_out.push(traits.TileTarget {
             id: f.id,
-            rect: if is_fs { full_rect } else { f.rect },
-            focused: f.id == active_win,
-            floating: not is_fs,
-            fullscreen: is_fs,
+            rect: f.rect,
+            focused: is_active_monitor and f.id == active_win,
+            floating: true,
+            fullscreen: false,
+            maximized: false,
+            monitor_idx,
             workspace_idx: ws_idx,
         })
     }

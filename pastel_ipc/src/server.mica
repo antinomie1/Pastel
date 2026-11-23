@@ -5,6 +5,9 @@ import std.fs
 import std.net
 import std.json
 
+let max_in_buf = 65536
+let max_out_buf = 262144
+
 /// Decoded IPC client request.
 pub enum Request {
     Action(str)
@@ -53,6 +56,7 @@ pub fn encode_event(kind: str, take detail: json.Value) -> str {
 struct Peer {
     conn: net.Conn
     buf: str = ""
+    outbuf: str = ""
     subscribed: bool = false
 }
 
@@ -119,7 +123,7 @@ pub fn IpcServer.read_lines(mut self, fd: int) -> (List[str], bool) {
                     break
                 }
                 self.peers[i].buf += chunk
-                if self.peers[i].buf.len() > 65536 {
+                if self.peers[i].buf.len() > max_in_buf {
                     closed = true
                     break
                 }
@@ -150,21 +154,58 @@ pub fn IpcServer.mark_subscribed(mut self, fd: int) {
     }
 }
 
+/// Drain buffered outgoing bytes for peer `i` without blocking. Returns `false` on fatal peer error.
+fn IpcServer.flush_peer(mut self, i: int) -> bool {
+    guard i >= 0 and i < self.peers.len() else {
+        return false
+    }
+    while not self.peers[i].outbuf.is_empty() {
+        match self.peers[i].conn.write_some(self.peers[i].outbuf, 0) {
+            Ok(n) => {
+                if n <= 0 {
+                    return false
+                }
+                if n >= self.peers[i].outbuf.len() {
+                    self.peers[i].outbuf = ""
+                } else {
+                    self.peers[i].outbuf = self.peers[i].outbuf.slice(n, self.peers[i].outbuf.len())
+                }
+            }
+            Err(e) => {
+                if e.kind == net.IoKind.WouldBlock {
+                    return true
+                }
+                return false
+            }
+        }
+    }
+    return true
+}
+
 pub fn IpcServer.send(mut self, fd: int, payload: str) -> bool {
     let i = self.find_peer(fd)
     guard i >= 0 else {
         return false
     }
-    return self.peers[i].conn.write(payload).is_ok()
+    if self.peers[i].outbuf.len() + payload.len() > max_out_buf {
+        return false
+    }
+    self.peers[i].outbuf += payload
+    return self.flush_peer(i)
 }
 
-/// Broadcast a JSON-line event to all subscribed peers, returning fds of disconnected peers.
+/// Broadcast a JSON-line event to all subscribed peers, returning fds of disconnected/stalled peers.
 pub fn IpcServer.broadcast(mut self, payload: str) -> List[int] {
     var dropped: List[int] = []
     for i in 0..self.peers.len() {
         if self.peers[i].subscribed {
-            if self.peers[i].conn.write(payload).is_err() {
+            if self.peers[i].outbuf.len() + payload.len() > max_out_buf {
                 dropped.push(self.peers[i].conn.fd)
+            } else {
+                self.peers[i].outbuf += payload
+                if not self.flush_peer(i) {
+                    dropped.push(self.peers[i].conn.fd)
+                }
             }
         }
     }

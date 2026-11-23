@@ -57,8 +57,17 @@ pub fn Config.resolve_window(self, app_id: str, title: str) -> schema.ResolvedWi
             if let Some(fl) = rule.floating {
                 r.floating = Some(fl)
             }
+            if let Some(fs) = rule.fullscreen {
+                r.fullscreen = Some(fs)
+            }
+            if let Some(mx) = rule.maximized {
+                r.maximized = Some(mx)
+            }
             if let Some(ws) = rule.workspace {
                 r.workspace = Some(ws)
+            }
+            if not rule.monitor.is_empty() {
+                r.monitor = rule.monitor.clone()
             }
         }
     }
@@ -165,6 +174,23 @@ fn parse_xwayland(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
         match k {
             "enabled" => cfg.xwayland.enabled = try expect_bool(d, c, "xwayland.enabled")
             "path" => cfg.xwayland.path = try expect_str(d, c, "xwayland.path")
+            "display" => {
+                let disp = try expect_str(d, c, "xwayland.display")
+                let trimmed = disp.trim()
+                if not trimmed.is_empty() {
+                    guard trimmed.starts_with(":") and trimmed.slice(1, trimmed.len()).to_int().map(fn(v) => v >= 0 and v <= 999).unwrap_or(false) else {
+                        return Err("xwayland.display: invalid display '{disp}' (expected e.g. \":0\")")
+                    }
+                }
+                cfg.xwayland.display = trimmed
+            }
+            "ready-timeout-ms" => {
+                let v = try expect_int(d, c, "xwayland.ready-timeout-ms")
+                guard v >= 0 and v <= 10000 else {
+                    return Err("xwayland.ready-timeout-ms must be in 0..10000")
+                }
+                cfg.xwayland.ready_timeout_ms = v
+            }
             _ => { return Err("unknown key 'xwayland.{k}'") }
         }
     }
@@ -182,6 +208,7 @@ fn parse_input(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
             "mod" => cfg.input.mod_key = try schema.ModKey.from_str(try expect_str(d, c, "input.mod"))
             "nested-mod" => cfg.input.nested_mod = try schema.ModKey.from_str(try expect_str(d, c, "input.nested-mod"))
             "focus-follows-mouse" => cfg.input.focus_follows_mouse = try expect_bool(d, c, "input.focus-follows-mouse")
+            "warp-mouse-to-focus" => cfg.input.warp_mouse_to_focus = try expect_bool(d, c, "input.warp-mouse-to-focus")
             "repeat-rate" => {
                 let v = try expect_int(d, c, "input.repeat-rate")
                 guard v >= 1 and v <= 200 else {
@@ -424,6 +451,38 @@ fn parse_binds(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
     return Ok(())
 }
 
+fn validate_mode(spec: str, path: str) -> Result[(), str] {
+    let s = spec.trim()
+    guard not s.is_empty() else {
+        return Ok(())
+    }
+    var dim = ""
+    if let Some(parts) = s.split_once("@") {
+        dim = parts.left.trim()
+        guard let Some(hz) = parts.right.trim().to_float() else {
+            return Err("{path}: invalid refresh rate in mode '{spec}'")
+        }
+        guard hz > 0.0 and hz <= 1000.0 else {
+            return Err("{path}: refresh rate must be in (0, 1000] Hz")
+        }
+    } else {
+        dim = s
+    }
+    guard let Some(wh) = dim.split_once("x") else {
+        return Err("{path}: invalid mode '{spec}' (expected WIDTHxHEIGHT or WIDTHxHEIGHT@HZ)")
+    }
+    guard let Some(w) = wh.left.trim().to_int() else {
+        return Err("{path}: invalid width in mode '{spec}'")
+    }
+    guard let Some(h) = wh.right.trim().to_int() else {
+        return Err("{path}: invalid height in mode '{spec}'")
+    }
+    guard w > 0 and h > 0 else {
+        return Err("{path}: width and height must be positive in mode '{spec}'")
+    }
+    return Ok(())
+}
+
 fn parse_outputs(d: toml.Doc, arr: int, mut cfg: Config) -> Result[(), str] {
     guard d.kind(arr) == toml.Kind.Array else {
         return Err("[[output]]: expected array of tables")
@@ -439,7 +498,11 @@ fn parse_outputs(d: toml.Doc, arr: int, mut cfg: Config) -> Result[(), str] {
             let k = d.key(c)
             match k {
                 "name" => o.name = try expect_str(d, c, "output[{idx}].name")
-                "mode" => o.mode = try expect_str(d, c, "output[{idx}].mode")
+                "mode" => {
+                    let m = try expect_str(d, c, "output[{idx}].mode")
+                    try validate_mode(m, "output[{idx}].mode")
+                    o.mode = m
+                }
                 "scale" => {
                     let v = try expect_num(d, c, "output[{idx}].scale")
                     guard v >= 0.5 and v <= 4.0 else {
@@ -513,6 +576,8 @@ fn parse_window_rules(d: toml.Doc, arr: int, mut cfg: Config) -> Result[(), str]
                     r.default_width = Some(v)
                 }
                 "floating" => r.floating = Some(try expect_bool(d, c, "window-rule[{idx}].floating"))
+                "fullscreen" => r.fullscreen = Some(try expect_bool(d, c, "window-rule[{idx}].fullscreen"))
+                "maximized" => r.maximized = Some(try expect_bool(d, c, "window-rule[{idx}].maximized"))
                 "workspace" => {
                     let v = try expect_int(d, c, "window-rule[{idx}].workspace")
                     guard v >= 1 and v <= 99 else {
@@ -520,6 +585,7 @@ fn parse_window_rules(d: toml.Doc, arr: int, mut cfg: Config) -> Result[(), str]
                     }
                     r.workspace = Some(v)
                 }
+                "monitor" => r.monitor = try expect_str(d, c, "window-rule[{idx}].monitor")
                 _ => { return Err("unknown key 'window-rule[{idx}].{k}'") }
             }
         }

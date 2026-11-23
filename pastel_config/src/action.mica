@@ -22,11 +22,14 @@ pub enum Action {
     CyclePresetWidth
     SetColumnWidth(f64)
     AdjustColumnWidth(f64)
+    AdjustWindowHeight(f64)
     MaximizeColumn
     CenterColumn
     ToggleFullscreen
     ToggleFloating
     SwitchFocusFloating
+    MoveFloating(f64, f64)
+    ResizeFloating(f64, f64)
     FocusWorkspace(int)
     FocusWorkspaceUp
     FocusWorkspaceDown
@@ -35,8 +38,12 @@ pub enum Action {
     MoveWindowToWorkspaceDown
     FocusMonitorLeft
     FocusMonitorRight
+    FocusMonitorUp
+    FocusMonitorDown
     MoveWindowToMonitorLeft
     MoveWindowToMonitorRight
+    MoveWindowToMonitorUp
+    MoveWindowToMonitorDown
     Spawn(str)
 }
 
@@ -88,7 +95,46 @@ pub fn Action.parse(raw: str) -> Result[Action, str] {
         guard let Some(v) = arg.to_float() else {
             return Err("invalid width delta '{arg}'")
         }
+        guard v >= -1.0 and v <= 1.0 else {
+            return Err("column width delta must be in -1.0..1.0")
+        }
         return Ok(Action.AdjustColumnWidth(v))
+    }
+    if s.starts_with("adjust-window-height ") {
+        let arg = s.slice(21, s.len()).trim()
+        guard let Some(v) = arg.to_float() else {
+            return Err("invalid height delta '{arg}'")
+        }
+        guard v >= -2.0 and v <= 2.0 else {
+            return Err("window height delta must be in -2.0..2.0")
+        }
+        return Ok(Action.AdjustWindowHeight(v))
+    }
+    if s.starts_with("move-floating ") {
+        let rest = s.slice(14, s.len()).trim()
+        guard let Some(parts) = rest.split_once(" ") else {
+            return Err("move-floating requires '<dx> <dy>'")
+        }
+        guard let Some(dx) = parts.left.trim().to_float() else {
+            return Err("invalid dx '{parts.left}'")
+        }
+        guard let Some(dy) = parts.right.trim().to_float() else {
+            return Err("invalid dy '{parts.right}'")
+        }
+        return Ok(Action.MoveFloating(dx, dy))
+    }
+    if s.starts_with("resize-floating ") {
+        let rest = s.slice(16, s.len()).trim()
+        guard let Some(parts) = rest.split_once(" ") else {
+            return Err("resize-floating requires '<dw> <dh>'")
+        }
+        guard let Some(dw) = parts.left.trim().to_float() else {
+            return Err("invalid dw '{parts.left}'")
+        }
+        guard let Some(dh) = parts.right.trim().to_float() else {
+            return Err("invalid dh '{parts.right}'")
+        }
+        return Ok(Action.ResizeFloating(dw, dh))
     }
     return match s {
         "none" => Ok(Action.Noop)
@@ -120,8 +166,12 @@ pub fn Action.parse(raw: str) -> Result[Action, str] {
         "move-window-to-workspace-down" => Ok(Action.MoveWindowToWorkspaceDown)
         "focus-monitor-left" => Ok(Action.FocusMonitorLeft)
         "focus-monitor-right" => Ok(Action.FocusMonitorRight)
+        "focus-monitor-up" => Ok(Action.FocusMonitorUp)
+        "focus-monitor-down" => Ok(Action.FocusMonitorDown)
         "move-window-to-monitor-left" => Ok(Action.MoveWindowToMonitorLeft)
         "move-window-to-monitor-right" => Ok(Action.MoveWindowToMonitorRight)
+        "move-window-to-monitor-up" => Ok(Action.MoveWindowToMonitorUp)
+        "move-window-to-monitor-down" => Ok(Action.MoveWindowToMonitorDown)
         _ => Err("unknown action '{s}' (run `pastel --list-actions` for valid actions)")
     }
 }
@@ -129,9 +179,9 @@ pub fn Action.parse(raw: str) -> Result[Action, str] {
 /// Overlay section category matching Pastel's clean 4-section grouping.
 pub fn Action.category(self) -> str {
     return match self {
-        CloseWindow or FocusWindowDown or FocusWindowUp or MoveWindowDown or MoveWindowUp or ToggleFullscreen or ToggleFloating or SwitchFocusFloating => "Windows"
+        CloseWindow or FocusWindowDown or FocusWindowUp or MoveWindowDown or MoveWindowUp or AdjustWindowHeight or ToggleFullscreen or ToggleFloating or SwitchFocusFloating or MoveFloating or ResizeFloating => "Windows"
         FocusColumnLeft or FocusColumnRight or FocusColumnFirst or FocusColumnLast or MoveColumnLeft or MoveColumnRight or ConsumeIntoColumn or ExpelFromColumn or CyclePresetWidth or SetColumnWidth or AdjustColumnWidth or MaximizeColumn or CenterColumn => "Columns"
-        FocusWorkspace or FocusWorkspaceUp or FocusWorkspaceDown or MoveWindowToWorkspace or MoveWindowToWorkspaceUp or MoveWindowToWorkspaceDown or FocusMonitorLeft or FocusMonitorRight or MoveWindowToMonitorLeft or MoveWindowToMonitorRight => "Workspaces"
+        FocusWorkspace or FocusWorkspaceUp or FocusWorkspaceDown or MoveWindowToWorkspace or MoveWindowToWorkspaceUp or MoveWindowToWorkspaceDown or FocusMonitorLeft or FocusMonitorRight or FocusMonitorUp or FocusMonitorDown or MoveWindowToMonitorLeft or MoveWindowToMonitorRight or MoveWindowToMonitorUp or MoveWindowToMonitorDown => "Workspaces"
         Spawn or ToggleHotkeyOverlay or ReloadConfig or Quit => "Session"
         Noop => ""
     }
@@ -160,11 +210,14 @@ pub fn Action.label(self) -> str {
         CyclePresetWidth => "Cycle width"
         SetColumnWidth(v) => "Set width {v}"
         AdjustColumnWidth(v) => if v < 0.0 { "Shrink width" } else { "Grow width" }
+        AdjustWindowHeight(v) => if v < 0.0 { "Shrink height" } else { "Grow height" }
         MaximizeColumn => "Maximize column"
         CenterColumn => "Center column"
         ToggleFullscreen => "Fullscreen"
         ToggleFloating => "Toggle floating"
         SwitchFocusFloating => "Focus float / tile"
+        MoveFloating => "Move floating"
+        ResizeFloating => "Resize floating"
         FocusWorkspace(n) => "Workspace {n}"
         FocusWorkspaceUp => "Workspace up"
         FocusWorkspaceDown => "Workspace down"
@@ -173,8 +226,12 @@ pub fn Action.label(self) -> str {
         MoveWindowToWorkspaceDown => "Move to ws down"
         FocusMonitorLeft => "Focus monitor left"
         FocusMonitorRight => "Focus monitor right"
+        FocusMonitorUp => "Focus monitor up"
+        FocusMonitorDown => "Focus monitor down"
         MoveWindowToMonitorLeft => "Move to monitor left"
         MoveWindowToMonitorRight => "Move to monitor right"
+        MoveWindowToMonitorUp => "Move to monitor up"
+        MoveWindowToMonitorDown => "Move to monitor down"
         Spawn(cmd) => "Launch {cmd}"
     }
 }
@@ -202,11 +259,14 @@ pub fn all_actions() -> List[(str, str)] {
         ("cycle-preset-width", "Cycle through layout.preset-widths"),
         ("set-column-width <0.1..1.0>", "Set focused column width fraction"),
         ("adjust-column-width <delta>", "Adjust focused column width fraction"),
+        ("adjust-window-height <delta>", "Adjust focused window height weight in column"),
         ("maximize-column", "Toggle full-width column maximization"),
         ("center-column", "Center the focused column in the viewport"),
         ("toggle-fullscreen", "Toggle fullscreen on the focused window"),
         ("toggle-floating", "Toggle floating state on the focused window"),
         ("switch-focus-floating", "Switch focus between floating and tiled layers"),
+        ("move-floating <dx> <dy>", "Move focused floating window by logical pixels"),
+        ("resize-floating <dw> <dh>", "Resize focused floating window by logical pixels"),
         ("focus-workspace <1..99>", "Focus workspace by 1-based index"),
         ("focus-workspace-up", "Focus previous workspace"),
         ("focus-workspace-down", "Focus next workspace"),
@@ -215,8 +275,12 @@ pub fn all_actions() -> List[(str, str)] {
         ("move-window-to-workspace-down", "Move focused window to next workspace"),
         ("focus-monitor-left", "Focus monitor to the left"),
         ("focus-monitor-right", "Focus monitor to the right"),
+        ("focus-monitor-up", "Focus monitor above"),
+        ("focus-monitor-down", "Focus monitor below"),
         ("move-window-to-monitor-left", "Move focused window to left monitor"),
         ("move-window-to-monitor-right", "Move focused window to right monitor"),
+        ("move-window-to-monitor-up", "Move focused window to monitor above"),
+        ("move-window-to-monitor-down", "Move focused window to monitor below"),
         ("spawn <command>", "Spawn a shell command with WAYLAND_DISPLAY"),
     ]
 }

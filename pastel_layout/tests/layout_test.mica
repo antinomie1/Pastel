@@ -111,3 +111,113 @@ test "two default 0.5 columns fit symmetrically without clipping the old window 
     assert_eq(out[2].rect.x, 966.0)
     assert_eq(out[2].rect.right(), 1908.0)
 }
+
+test "fullscreen Z-order isolation, multi-monitor focus, 2D monitor nav, and orphan restore" {
+    var d = lay.Desktop.new(4, 10.0, 0.5, lay.CenterMode.OnOverflow)
+    d.add_monitor(1, "DP-1", core.Rect.new(0.0, 0.0, 1920.0, 1080.0), core.Rect.new(0.0, 0.0, 1920.0, 1080.0))
+    d.add_monitor(2, "DP-2", core.Rect.new(0.0, 1080.0, 1920.0, 1080.0), core.Rect.new(0.0, 1080.0, 1920.0, 1080.0))
+
+    // Add two tiled windows and one floating window on monitor 1, then fullscreen the first tiled window.
+    d.add_window(10, false, 0.5, 800.0, 600.0, None)
+    d.add_window(11, false, 0.5, 800.0, 600.0, None)
+    d.add_window(12, true, 0.5, 500.0, 400.0, None)
+    // Add a window on monitor 2 via vertical 2D navigation.
+    assert(d.focus_monitor_2d(0, 1))
+    d.add_window(20, false, 0.5, 800.0, 600.0, None)
+    assert(d.focus_monitor_2d(0, -1))
+
+    // Fullscreen window 10: monitor 1 emits ONLY fullscreen 10 (after monitor 2's tiled 20),
+    // and ONLY monitor 1's window is marked focused.
+    assert(d.set_fullscreen(10, true))
+    var out: List[lay.TileTarget] = []
+    d.compute_all(mut out)
+    assert_eq(out.len(), 2)
+    assert_eq(out[0].id, u64(20))
+    assert(not out[0].focused)
+    assert_eq(out[1].id, u64(10))
+    assert(out[1].fullscreen and out[1].focused)
+
+    // Explicit maximize targeting unfocused window 11 respects `on: bool` and targets 11's column only.
+    assert(d.set_fullscreen(10, false))
+    assert(d.set_maximized(11, true))
+    assert(not d.set_maximized(11, true))
+    d.compute_all(mut out)
+    var saw_11_max = false
+    var saw_10_max = false
+    for t in out {
+        if t.id == u64(11) {
+            saw_11_max = t.maximized
+        }
+        if t.id == u64(10) {
+            saw_10_max = t.maximized
+        }
+    }
+    assert(saw_11_max and not saw_10_max)
+
+    // Shrinking fixed workspaces migrates windows safely without dropping them.
+    assert(d.move_focused_to_workspace(4))
+    d.reconfigure(2, 10.0, 0.5, lay.CenterMode.OnOverflow)
+    assert_eq(d.monitors[0].workspaces.len(), 2)
+    assert(d.locate(12).is_some())
+
+    // Disconnecting all monitors parks windows cleanly and restores them when a monitor returns.
+    d.remove_monitor(1)
+    d.remove_monitor(2)
+    assert(d.monitors.is_empty())
+    d.add_monitor(3, "HDMI-1", core.Rect.new(0.0, 0.0, 1920.0, 1080.0), core.Rect.new(0.0, 0.0, 1920.0, 1080.0))
+    assert(d.locate(10).is_some() and d.locate(20).is_some())
+}
+
+test "sticky center-column, row weight resize, and remove active_row preservation" {
+    var strip = lay.ScrollingStrip.new()
+    let area = core.Rect.new(0.0, 0.0, 1000.0, 600.0)
+    strip.insert(1, 0.5)
+    strip.center_column()
+    var out: List[lay.TileTarget] = []
+    strip.compute(area, 10.0, lay.CenterMode.Never, mut out)
+    let centered_x = out[0].rect.x
+    assert((centered_x - 257.5).abs() < 2.0)
+    // Next frame must STAY centered instead of snapping back to x=10!
+    out.clear()
+    strip.compute(area, 10.0, lay.CenterMode.Never, mut out)
+    assert_eq(out[0].rect.x, centered_x)
+
+    // Stack 3 windows vertically and verify row weight resize & active_row preservation on removal.
+    strip.insert(2, 0.5)
+    assert(strip.consume_into_column())
+    strip.insert(3, 0.5)
+    assert(strip.consume_into_column())
+    assert_eq(strip.columns[0].windows.len(), 3)
+    assert_eq(strip.columns[0].active_row, 2)
+    assert(strip.adjust_row_weight(0.5))
+    assert(strip.remove(1))
+    // Removing row 0 shifted active_row from 2 -> 1 (still pointing to window 3).
+    assert_eq(strip.focused(), Some(u64(3)))
+}
+
+test "LayoutPolicy trait generic compute, target monitor rules, late rules, and floating keyboard move/resize" {
+    var strip = lay.ScrollingStrip.new()
+    strip.insert(1, 0.5)
+    var out: List[lay.TileTarget] = []
+    lay.compute_policy(mut strip, core.Rect.new(0.0, 0.0, 1000.0, 600.0), 10.0, lay.CenterMode.Never, mut out)
+    assert_eq(out.len(), 1)
+
+    var d = lay.Desktop.new(0, 10.0, 0.5, lay.CenterMode.Never)
+    d.add_monitor(1, "DP-1", core.Rect.new(0.0, 0.0, 1920.0, 1080.0), core.Rect.new(0.0, 0.0, 1920.0, 1080.0))
+    d.add_monitor(2, "HDMI-1", core.Rect.new(1920.0, 0.0, 1920.0, 1080.0), core.Rect.new(1920.0, 0.0, 1920.0, 1080.0))
+    d.add_window_on(50, false, 0.5, 800.0, 600.0, "HDMI-1", None)
+    assert_eq(d.locate(50).unwrap().monitor_idx, 1)
+
+    // Late rule floats window 50, moves it to DP-1, and keyboard move/resize updates its rect.
+    assert(d.apply_late_rule(50, Some(true), None, None, 0.5, "DP-1", None))
+    assert_eq(d.locate(50).unwrap().monitor_idx, 0)
+    assert(d.locate(50).unwrap().floating)
+    let before = d.monitors[0].workspaces[0].floating[0].rect
+    assert(d.move_focused_floating(40.0, -20.0))
+    assert(d.resize_focused_floating(100.0, 50.0))
+    let after = d.monitors[0].workspaces[0].floating[0].rect
+    assert_eq(after.x, before.x + 40.0)
+    assert_eq(after.y, before.y - 20.0)
+    assert_eq(after.w, before.w + 100.0)
+    assert_eq(after.h, before.h + 50.0)
+}

@@ -70,3 +70,13 @@ test "color animation smoothly interpolates" {
     assert_eq(end.r, 1.0)
     assert(not ac.is_active())
 }
+
+test "high-slowdown spring scales timeout instead of snapping at 5s" {
+    var a = core.Anim.new(0.0)
+    let sp = core.CurveSpec.spring(100.0, 1.0)
+    a.retarget(1000.0, sp, 0, true, 10.0)
+    // At 5.5s with slowdown=10 (effective stiffness=1.0), spring is still in flight and must not snap.
+    let v = a.tick(5500000000)
+    assert(a.active)
+    assert(v > 500.0 and v < 999.0)
+}

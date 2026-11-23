@@ -61,15 +61,17 @@ sheaf test --release -p pastel
 | `Mod+Shift+J` / `Mod+Shift+K` | 向下 / 上移动窗口 |
 | `Mod+[` / `Mod+]` | 将窗口并入相邻列 / 移出为新列 |
 | `Mod+R` / `Mod+F` / `Mod+C` | 循环列宽 / 最大化列 / 居中列 |
+| `Mod+Minus` / `Mod+Equal` | 缩小 / 增大列宽（`Mod+Shift+-/=` 调整列内行高） |
 | `Mod+Shift+F` | 切换全屏 |
 | `Mod+V` / `Mod+Shift+V` | 切换浮动 / 在平铺与浮动层间切换焦点 |
 | `Mod+U` / `Mod+I` | 切换上一 / 下一工作区 |
 | `Mod+1` .. `Mod+9` | 切换到工作区 1..9 |
 | `Mod+Shift+1` .. `Mod+Shift+9` | 将窗口移至工作区 1..9 |
+| `Mod+Ctrl+H/J/K/L` | 聚焦左 / 下 / 上 / 右显示器（加 `Shift` 移动窗口） |
 | `Mod+Shift+R` | 热重载配置 |
 | `Mod+Shift+E` | 退出 Pastel |
 | `Mod+滚轮` | 水平滚动列带 |
-| `Mod+左键拖动` / `Mod+右键拖动` | 移动 / 缩放浮动窗口 |
+| `Mod+左键拖动` / `Mod+右键拖动` | 移动浮动窗口或平移平铺列带 / 缩放浮动窗口 |
 | 触控板三指滑动 | 水平平移列带 / 垂直切换工作区 |
 
 ## 配置
