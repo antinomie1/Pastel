@@ -1,0 +1,5 @@
+[package]
+name = "pastel_ipc"
+version = "0.1.0"
+description = "Unix JSON-lines IPC server and client for Pastel"
+license = "BSD-2-Clause"

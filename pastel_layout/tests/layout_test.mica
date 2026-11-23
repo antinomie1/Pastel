@@ -1,0 +1,113 @@
+import pastel_core as core
+import pastel_layout as lay
+
+test "scrolling strip columns, consume/expel, presets, and viewport camera" {
+    var strip = lay.ScrollingStrip.new()
+    let area = core.Rect.new(0.0, 0.0, 1000.0, 600.0)
+    let gap = 10.0
+    strip.insert(1, 0.5)
+    strip.insert(2, 0.5)
+    strip.insert(3, 0.5)
+    assert_eq(strip.columns.len(), 3)
+    assert_eq(strip.focused(), Some(u64(3)))
+
+    var out: List[lay.TileTarget] = []
+    strip.compute(area, gap, lay.CenterMode.OnOverflow, mut out)
+    assert_eq(out.len(), 3)
+    // Column 3 should be scrolled cleanly into view!
+    assert(out[2].rect.x >= 0.0 and out[2].rect.right() <= 1000.0)
+    assert(out[2].focused)
+
+    // Consume window 3 into column 2 (vertical stack)
+    assert(strip.consume_into_column())
+    assert_eq(strip.columns.len(), 2)
+    assert_eq(strip.columns[1].windows.len(), 2)
+
+    // Expel back into its own column
+    assert(strip.expel_from_column())
+    assert_eq(strip.columns.len(), 3)
+
+    // Cycle preset widths
+    let presets: List[f64] = [0.33, 0.5, 0.67]
+    assert(strip.cycle_preset_width(presets))
+    assert((strip.columns[strip.active_col].width_frac - 0.67).abs() < 0.01)
+
+    // Toggle maximize remembers previous width
+    assert(strip.toggle_maximize_column())
+    assert(strip.columns[strip.active_col].maximized)
+    assert(strip.toggle_maximize_column())
+    assert(not strip.columns[strip.active_col].maximized)
+    assert((strip.columns[strip.active_col].width_frac - 0.67).abs() < 0.01)
+}
+
+test "dynamic vs fixed workspaces and O(1) window relocation" {
+    var d = lay.Desktop.new(0, 12.0, 0.5, lay.CenterMode.OnOverflow)
+    let r = core.Rect.new(0.0, 0.0, 1920.0, 1080.0)
+    d.add_monitor(1, "DP-1", r, r)
+    assert_eq(d.monitors[0].workspaces.len(), 1)
+
+    // Adding a window creates a spare empty workspace at the bottom (dynamic niri-style).
+    d.add_window(10, false, 0.5, 800.0, 600.0, None)
+    assert_eq(d.monitors[0].workspaces.len(), 2)
+    assert_eq(d.focused_window(), Some(u64(10)))
+
+    // Move window to workspace 2: workspace 1 becomes empty and compacts when we move on.
+    assert(d.move_focused_to_workspace(2))
+    assert_eq(d.locate(10).unwrap().workspace_idx, 0)
+    assert_eq(d.monitors[0].workspaces.len(), 2)
+
+    // Switch to fixed 9 workspaces (dwm-tag style).
+    d.reconfigure(9, 12.0, 0.5, lay.CenterMode.OnOverflow)
+    assert_eq(d.monitors[0].workspaces.len(), 9)
+    assert(d.focus_workspace(5))
+    assert_eq(d.monitors[0].active_ws, 4)
+}
+
+test "floating toggle, fullscreen, and multi-monitor migration" {
+    var d = lay.Desktop.new(0, 10.0, 0.5, lay.CenterMode.Never)
+    d.add_monitor(1, "DP-1", core.Rect.new(0.0, 0.0, 1920.0, 1080.0), core.Rect.new(0.0, 32.0, 1920.0, 1048.0))
+    d.add_monitor(2, "HDMI-1", core.Rect.new(1920.0, 0.0, 1920.0, 1080.0), core.Rect.new(1920.0, 0.0, 1920.0, 1080.0))
+    d.add_window(100, false, 0.5, 800.0, 600.0, None)
+    assert(d.toggle_floating(100))
+    assert(d.locate(100).unwrap().floating)
+    assert(d.toggle_fullscreen(100))
+    var out: List[lay.TileTarget] = []
+    d.compute_all(mut out)
+    assert_eq(out.len(), 1)
+    assert(out[0].fullscreen)
+    assert_eq(out[0].rect.y, 0.0)
+    assert_eq(out[0].rect.h, 1080.0)
+
+    // Unplugging monitor 1 migrates window 100 cleanly to monitor 2.
+    d.remove_monitor(1)
+    assert_eq(d.monitors.len(), 1)
+    assert(d.locate(100).is_some())
+}
+
+test "two default 0.5 columns fit symmetrically without clipping the old window edge" {
+    var strip = lay.ScrollingStrip.new()
+    let area = core.Rect.new(0.0, 0.0, 1920.0, 1080.0)
+    let gap = 12.0
+    strip.insert(1, 0.5)
+    strip.insert(2, 0.5)
+
+    var out: List[lay.TileTarget] = []
+    strip.compute(area, gap, lay.CenterMode.Never, mut out)
+    assert_eq(out.len(), 2)
+    assert_eq(strip.camera_x, 0.0)
+    // Old window keeps exact left gap (not clipped at x=0) and new window keeps exact right gap.
+    assert_eq(out[0].rect.x, 12.0)
+    assert_eq(out[0].rect.w, 942.0)
+    assert_eq(out[1].rect.x, 966.0)
+    assert_eq(out[1].rect.w, 942.0)
+    assert_eq(out[1].rect.right(), 1908.0)
+
+    // Opening a 3rd default 0.5 window scrolls cleanly by 1 column:
+    // window 2 sits at x=12 (unclipped) and window 3 sits at x=966 (right edge 1908).
+    strip.insert(3, 0.5)
+    out.clear()
+    strip.compute(area, gap, lay.CenterMode.Never, mut out)
+    assert_eq(out[1].rect.x, 12.0)
+    assert_eq(out[2].rect.x, 966.0)
+    assert_eq(out[2].rect.right(), 1908.0)
+}

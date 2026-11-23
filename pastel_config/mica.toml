@@ -1,0 +1,8 @@
+[package]
+name = "pastel_config"
+version = "0.1.0"
+description = "Strict TOML configuration, action registry, keybindings, and window rules for Pastel"
+license = "BSD-2-Clause"
+
+[dependencies]
+pastel_core = { workspace = true }

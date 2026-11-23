@@ -1,0 +1,88 @@
+import std.fs
+import pastel_config as cfg
+
+test "empty config yields complete defaults with square corners" {
+    let c = cfg.from_toml("").expect("empty toml")
+    assert_eq(c.window.corner_radius, 0.0)
+    assert_eq(c.window.border_width, 2.0)
+    assert(c.window.blur)
+    assert(c.window.blur_xray)
+    assert_eq(c.layout.gap, 12.0)
+    assert_eq(c.layout.preset_widths.len(), 3)
+    assert(c.overlay.at_startup)
+    assert(c.binds.len() > 20)
+}
+
+test "config.example.toml parses with zero errors" {
+    let src = match fs.read_to_str("config.example.toml") {
+        Ok(s) => s
+        Err => fs.read_to_str("../config.example.toml").expect("read example")
+    }
+    let c = cfg.from_toml(src).expect("example toml")
+    assert_eq(c.window.corner_radius, 0.0)
+    assert_eq(c.window.blur_passes, 2)
+}
+
+test "binds merge, override, and unbind cleanly" {
+    let toml = """
+    [binds]
+    "Mod+D" = "none"
+    "Mod+Return" = "spawn alacritty"
+    "Mod+B" = "spawn firefox"
+    """
+    let c = cfg.from_toml(toml).expect("parse")
+    let d_combo = cfg.KeyCombo.parse("Mod+D").unwrap()
+    let ret_combo = cfg.KeyCombo.parse("Mod+Return").unwrap()
+    let b_combo = cfg.KeyCombo.parse("Mod+B").unwrap()
+    var saw_d = false
+    var saw_alacritty = false
+    var saw_firefox = false
+    for b in c.binds {
+        if b.combo.same(d_combo) {
+            saw_d = true
+        }
+        if b.combo.same(ret_combo) {
+            match b.act {
+                Spawn(cmd) => saw_alacritty = cmd == "alacritty"
+                _ => {}
+            }
+        }
+        if b.combo.same(b_combo) {
+            match b.act {
+                Spawn(cmd) => saw_firefox = cmd == "firefox"
+                _ => {}
+            }
+        }
+    }
+    assert(not saw_d)
+    assert(saw_alacritty)
+    assert(saw_firefox)
+}
+
+test "window rules apply in order and unknown keys error" {
+    let toml = """
+    [[window-rule]]
+    app-id = "foot"
+    opacity = 0.85
+    blur = true
+
+    [[window-rule]]
+    title = "Popup"
+    opacity = 0.95
+    floating = true
+    """
+    let c = cfg.from_toml(toml).expect("rules")
+    let r = c.resolve_window("foot", "Popup Window")
+    assert((r.opacity - 0.95).abs() < 0.001)
+    assert(r.blur)
+    assert_eq(r.floating, Some(true))
+    assert(cfg.from_toml("unknown-key = 1").is_err())
+    assert(cfg.from_toml("[window]\nbogus = 2").is_err())
+}
+
+test "shifted hotkey Mod+Shift+/ matches both / and ? keysyms" {
+    let combo = cfg.KeyCombo.parse("Mod+Shift+/").expect("combo")
+    assert(combo.matches(u32(0x002f), true, false, false, true, cfg.ModKey.Super))
+    assert(combo.matches(u32(0x003f), true, false, false, true, cfg.ModKey.Super))
+    assert(not combo.matches(u32(0x002f), false, false, false, true, cfg.ModKey.Super))
+}

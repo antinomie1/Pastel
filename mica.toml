@@ -1,0 +1,24 @@
+[workspace]
+members = [
+    "pastel_core",
+    "pastel_config",
+    "pastel_layout",
+    "pastel_render",
+    "pastel_ipc",
+    "pastel",
+]
+
+[workspace.dependencies]
+luminaria = { git = "https://github.com/antinomie1/luminaria.git", dir = "luminaria" }
+luminaria_types = { git = "https://github.com/antinomie1/luminaria.git", dir = "luminaria_types" }
+luminaria_compose = { git = "https://github.com/antinomie1/luminaria.git", dir = "luminaria_compose" }
+luminaria_wire = { git = "https://github.com/antinomie1/luminaria.git", dir = "luminaria_wire" }
+luminaria_proto = { git = "https://github.com/antinomie1/luminaria.git", dir = "luminaria_proto" }
+vk_gpu = { git = "https://github.com/antinomie1/vk.git", dir = "vk_gpu" }
+vk_draw2d = { git = "https://github.com/antinomie1/vk.git", dir = "vk_draw2d" }
+vk_compose = { git = "https://github.com/antinomie1/vk.git", dir = "vk_compose" }
+pastel_core = { path = "pastel_core" }
+pastel_config = { path = "pastel_config" }
+pastel_layout = { path = "pastel_layout" }
+pastel_render = { path = "pastel_render" }
+pastel_ipc = { path = "pastel_ipc" }

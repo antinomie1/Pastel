@@ -1,0 +1,18 @@
+// pastel_core: geometry, colors, pluggable curves, and analytical animations.
+
+pub import geom
+pub import color
+pub import curve
+pub import anim
+
+pub type Point = geom.Point
+pub type Size = geom.Size
+pub type Rect = geom.Rect
+pub type Color = color.Color
+pub type EaseKind = curve.EaseKind
+pub type Ease = curve.Ease
+pub type Spring = curve.Spring
+pub type CurveSpec = curve.CurveSpec
+pub type Anim = anim.Anim
+pub type AnimRect = anim.AnimRect
+pub type AnimColor = anim.AnimColor

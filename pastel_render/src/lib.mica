@@ -1,0 +1,17 @@
+// pastel_render: pluggable Vulkan renderer (Dual-Kawase blur, GPU SDF borders),
+// zero-dep visually consistent hotkey overlay, and animation state manager.
+
+pub import effects
+pub import blur
+pub import renderer
+pub import font
+pub import overlay
+pub import anim_state
+
+pub type BlurSettings = effects.BlurSettings
+pub type WindowEffect = effects.WindowEffect
+pub type OutputEffects = effects.OutputEffects
+pub type EffectSheet = effects.EffectSheet
+pub type PastelRenderer = renderer.PastelRenderer
+pub type OverlayImage = overlay.OverlayImage
+pub type AnimState = anim_state.AnimState

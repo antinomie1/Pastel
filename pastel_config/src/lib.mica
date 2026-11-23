@@ -1,0 +1,54 @@
+// pastel_config: strict TOML configuration, actions, keybindings, and window rules.
+
+import std.env
+import std.fs
+import std.path
+pub import schema
+pub import action
+pub import keys
+pub import parse
+
+pub type Config = parse.Config
+pub type Action = action.Action
+pub type Binding = keys.Binding
+pub type KeyCombo = keys.KeyCombo
+pub type ModMask = keys.ModMask
+pub type ModKey = schema.ModKey
+pub type CenterFocus = schema.CenterFocus
+pub type OutputConfig = schema.OutputConfig
+pub type InputConfig = schema.InputConfig
+pub type LayoutConfig = schema.LayoutConfig
+pub type WindowConfig = schema.WindowConfig
+pub type AnimationConfig = schema.AnimationConfig
+pub type OverlayConfig = schema.OverlayConfig
+pub type WindowRule = schema.WindowRule
+pub type ResolvedWindow = schema.ResolvedWindow
+
+/// Default configuration path (`$XDG_CONFIG_HOME/pastel/config.toml` or `~/.config/pastel/config.toml`).
+pub fn default_path() -> str {
+    if let Some(xdg) = env.get("XDG_CONFIG_HOME") {
+        if not xdg.is_empty() {
+            return path.join(path.join(xdg, "pastel"), "config.toml")
+        }
+    }
+    if let Some(home) = env.get("HOME") {
+        if not home.is_empty() {
+            return path.join(path.join(path.join(home, ".config"), "pastel"), "config.toml")
+        }
+    }
+    return "config.toml"
+}
+
+/// Load and validate `Config` from `file_path`. Missing files return `Config.default()`.
+pub fn load(file_path: str) -> Result[Config, str] {
+    if not fs.exists(file_path) {
+        return Ok(Config.default())
+    }
+    let src = try fs.read_to_str(file_path).map_err(fn(e) => "read '{file_path}': {e}")
+    return parse.parse_toml(src)
+}
+
+/// Parse TOML source text directly.
+pub fn from_toml(src: str) -> Result[Config, str] {
+    return parse.parse_toml(src)
+}

@@ -1,0 +1,140 @@
+// Window, workspace, focus-ring, and overlay animation state evaluated at vblank_ns.
+
+import std.collections.map
+import pastel_core as core
+import pastel_config as cfg
+
+/// Per-window animated channels.
+pub struct WindowAnim {
+    pub rect: core.AnimRect
+    pub opacity: core.Anim
+    pub scale: core.Anim
+    pub border_color: core.AnimColor
+    pub initialized: bool = false
+}
+
+/// Output-level animated channels (workspace vertical slide + hotkey overlay).
+pub struct OutputAnim {
+    pub ws_offset_y: core.Anim
+    pub last_ws: int = 0
+}
+
+/// Complete animation state for the compositor.
+pub struct AnimState {
+    pub windows: map.Map[u64, WindowAnim]
+    pub outputs: map.Map[u64, OutputAnim]
+    pub overlay_alpha: core.Anim
+    pub overlay_slide: core.Anim
+    pub active: bool = false
+}
+
+pub fn AnimState.new() -> AnimState {
+    return AnimState {
+        windows: map.Map.new(),
+        outputs: map.Map.new(),
+        overlay_alpha: core.Anim.unit(0.0),
+        overlay_slide: core.Anim.new(0.0),
+        active: false,
+    }
+}
+
+/// Register a newly opened window with a subtle niri-style open animation (scale + fade).
+pub fn AnimState.open_window(mut self, id: u64, target: core.Rect, target_opacity: f32, focused: bool, ac: cfg.AnimationConfig, wc: cfg.WindowConfig, now_ns: int) {
+    let border = if focused { wc.active_color } else { wc.inactive_color }
+    var wa = WindowAnim {
+        rect: core.AnimRect.new(target),
+        opacity: core.Anim.unit(if ac.enabled { 0.0 } else { f64(target_opacity) }),
+        scale: core.Anim.unit(if ac.enabled { 0.94 } else { 1.0 }),
+        border_color: core.AnimColor.new(border),
+        initialized: true,
+    }
+    wa.opacity.retarget(f64(target_opacity), ac.window_open, now_ns, ac.enabled, ac.slowdown)
+    wa.scale.retarget(1.0, ac.window_open, now_ns, ac.enabled, ac.slowdown)
+    discard self.windows.insert(id, wa)
+}
+
+/// Update targets for an existing window (or initialize it on first sight).
+pub fn AnimState.update_window(mut self, id: u64, target: core.Rect, target_opacity: f32, focused: bool, ac: cfg.AnimationConfig, wc: cfg.WindowConfig, now_ns: int) {
+    let want_border = if focused { wc.active_color } else { wc.inactive_color }
+    guard let Some(cur) = self.windows.get(id) else {
+        self.open_window(id, target, target_opacity, focused, ac, wc, now_ns)
+        return
+    }
+    var wa = cur
+    wa.rect.retarget(target, ac.window_movement, now_ns, ac.enabled, ac.slowdown)
+    wa.opacity.retarget(f64(target_opacity), ac.window_open, now_ns, ac.enabled, ac.slowdown)
+    wa.border_color.retarget(want_border, ac.focus_ring, now_ns, ac.enabled, ac.slowdown)
+    discard self.windows.insert(id, wa)
+}
+
+/// Trigger a vertical workspace switch slide animation on `output_id`.
+pub fn AnimState.switch_workspace(mut self, output_id: u64, new_ws: int, viewport_h: f64, ac: cfg.AnimationConfig, now_ns: int) {
+    var oa = self.outputs.get(output_id).unwrap_or(OutputAnim { ws_offset_y: core.Anim.new(0.0), last_ws: 0 })
+    if oa.last_ws != new_ws {
+        let dir = if new_ws > oa.last_ws { 1.0 } else { -1.0 }
+        let start = if ac.enabled { dir * min(viewport_h * 0.35, 320.0) } else { 0.0 }
+        oa.ws_offset_y.snap(start)
+        oa.ws_offset_y.retarget(0.0, ac.workspace_switch, now_ns, ac.enabled, ac.slowdown)
+        oa.last_ws = new_ws
+        discard self.outputs.insert(output_id, oa)
+    }
+}
+
+/// Show or hide the hotkey overlay smoothly (matching pastel-rs: slides upward 12px as alpha 0->1).
+pub fn AnimState.set_overlay(mut self, visible: bool, ac: cfg.AnimationConfig, now_ns: int) {
+    let target_a = if visible { 1.0 } else { 0.0 }
+    self.overlay_alpha.retarget(target_a, ac.overlay, now_ns, ac.enabled, ac.slowdown)
+}
+
+pub fn AnimState.remove_window(mut self, id: u64) {
+    discard self.windows.remove(id)
+}
+
+/// Evaluate window `id` at `now_ns`, returning `(rect, scale, opacity, border_color)` and advancing state.
+pub fn AnimState.tick_window(mut self, id: u64, now_ns: int) -> Option[(core.Rect, f32, f32, core.Color)] {
+    guard let Some(cur) = self.windows.get(id) else {
+        return None
+    }
+    var wa = cur
+    let r = wa.rect.tick(now_ns)
+    let op = f32(wa.opacity.tick(now_ns))
+    let sc = f32(wa.scale.tick(now_ns))
+    let bc = wa.border_color.tick(now_ns)
+    if wa.rect.is_active() or wa.opacity.active or wa.scale.active or wa.border_color.is_active() {
+        self.active = true
+    }
+    discard self.windows.insert(id, wa)
+    return Some((r, sc, op, bc))
+}
+
+/// Evaluate workspace vertical slide offset for `output_id` at `now_ns`.
+pub fn AnimState.tick_output_y(mut self, output_id: u64, now_ns: int) -> f64 {
+    guard let Some(cur) = self.outputs.get(output_id) else {
+        return 0.0
+    }
+    var oa = cur
+    let y = oa.ws_offset_y.tick(now_ns)
+    if oa.ws_offset_y.active {
+        self.active = true
+    }
+    discard self.outputs.insert(output_id, oa)
+    return y
+}
+
+/// Evaluate overlay `(alpha, slide_y)` at `now_ns` (`slide_y = (1 - alpha) * 12.0`).
+pub fn AnimState.tick_overlay(mut self, now_ns: int) -> (f32, f64) {
+    let a = self.overlay_alpha.tick(now_ns).clamp(0.0, 1.0)
+    if self.overlay_alpha.active {
+        self.active = true
+    }
+    return (f32(a), (1.0 - a) * 12.0)
+}
+
+/// Reset per-frame activity accumulator before ticking all visible elements.
+pub fn AnimState.begin_frame(mut self) {
+    self.active = false
+}
+
+pub fn AnimState.is_active(self) -> bool {
+    return self.active
+}

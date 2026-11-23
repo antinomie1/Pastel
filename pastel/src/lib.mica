@@ -1,0 +1,8 @@
+// pastel library surface (re-exported for integration tests & embedding).
+
+pub import compositor
+pub import input
+pub import windows
+pub import outputs
+pub import reload
+pub import spawn

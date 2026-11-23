@@ -1,0 +1,94 @@
+# Pastel configuration file. Copy to ~/.config/pastel/config.toml.
+#
+# Every option below shows its default value. An empty file produces a complete
+# working desktop, so you only need to specify values you want to change.
+# Unknown keys are rejected with an error.
+
+# Desktop background color (#RRGGBB or #RRGGBBAA).
+# For an image wallpaper, autostart a layer-shell tool such as `swaybg`.
+background = "#1e2028"
+
+# Shell commands executed once at startup (with WAYLAND_DISPLAY set).
+autostart = []
+
+# Optional X11 compatibility via xwayland-satellite (launched on demand).
+[xwayland]
+enabled = true
+path = "xwayland-satellite"
+
+# Per-monitor configuration. Add as many [[output]] blocks as needed.
+# [[output]]
+# name = "DP-1"
+# mode = "2560x1440@144"
+# scale = 1.5
+# position = [0, 0]
+# vrr = false
+# enabled = true
+
+[input]
+mod = "super"                 # Meaning of `Mod` on DRM/bare-metal
+nested-mod = "alt"            # Meaning of `Mod` when nested in another Wayland session
+focus-follows-mouse = false
+repeat-rate = 25
+repeat-delay = 600
+tap-to-click = true
+natural-scroll = false
+accel = 0.0                   # Pointer acceleration (-1.0 .. 1.0)
+left-handed = false
+layout = ""                   # XKB layout, e.g. "us" or "us,de" (empty = system default)
+variant = ""                  # XKB variant
+options = ""                  # XKB options, e.g. "ctrl:nocaps"
+
+[layout]
+type = "scrolling"
+gap = 12.0                    # Gap between columns, windows, and screen edges (logical px)
+default-width = 0.5           # Initial column width fraction (0.1 .. 1.0)
+preset-widths = [0.3333333333333333, 0.5, 0.6666666666666666]
+center-focus = "never"        # "never", "on-overflow", "always"
+workspaces = 0                # 0 = dynamic (niri-style); >0 = fixed count (dwm-style, e.g. 9)
+
+[window]
+corner-radius = 0.0           # Square corners by default (set > 0.0 for rounded corners)
+border-width = 2.0            # Hollow SDF focus ring width in logical px (0.0 disables)
+active-color = "#a6c8ff"      # Focused window border & accent color
+inactive-color = "#4a4f5c"    # Unfocused window border color
+shadow-color = "#00000060"    # Drop shadow RGBA color
+shadow-size = 18.0            # Drop shadow spread in logical px (0.0 disables)
+opacity = 1.0                 # Default window opacity (0.0 .. 1.0)
+blur = true                   # Enable Dual-Kawase backdrop blur behind translucent windows
+blur-xray = true              # Blur only background/wallpaper (0 extra steady-state passes)
+blur-passes = 2               # Dual-Kawase pyramid depth (1..4; 2 is fast & smooth)
+blur-offset = 2.0             # Dual-Kawase sample offset
+
+[animation]
+enabled = true
+slowdown = 1.0                # > 1.0 slows animations, < 1.0 speeds them up
+# Curves can be a spring { stiffness, damping } or timed ease { ms, easing }.
+# Supported easings: linear, out-quad, out-cubic, out-quint, out-expo, in-out-cubic.
+window-movement = { stiffness = 800.0, damping = 1.0 }
+workspace-switch = { stiffness = 900.0, damping = 1.0 }
+window-open = { ms = 160.0, easing = "out-cubic" }
+window-close = { ms = 140.0, easing = "out-quad" }
+focus-ring = { ms = 120.0, easing = "out-cubic" }
+overlay = { ms = 140.0, easing = "out-cubic" }
+
+[overlay]
+at-startup = true             # Display hotkey overlay when Pastel launches
+font = "sans-serif"           # Fontconfig font family for the hotkey overlay
+opacity = 0.92                # Overlay panel opacity (inherits [window] border, radius, blur & colors)
+
+# Merged over default keybindings. Set an entry to "none" to unbind it.
+# Run `pastel --list-actions` for all valid action names.
+[binds]
+# "Mod+Return" = "spawn foot"
+# "Mod+D" = "spawn fuzzel"
+# "Mod+B" = "spawn firefox"
+
+# Per-window rules (case-sensitive substring match on app-id and/or title).
+# Later matching rules override earlier ones.
+# [[window-rule]]
+# app-id = "foot"
+# opacity = 0.88
+# blur = true
+# default-width = 0.5
+# floating = false

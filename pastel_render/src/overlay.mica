@@ -1,0 +1,286 @@
+// Hotkey Overlay rasterizer matching pastel-rs's clean, airy typography and layout:
+// translucent frosted panel, crisp TrueType/OpenType text, no keycap boxes or clutter,
+// outer border/corners/shadow/blur inherited directly from `[window]`.
+
+import pastel_core as core
+import pastel_config as cfg
+import font
+
+let font_size: f32 = 11.0
+let title_size: f32 = 15.0
+let padding_px: i32 = 28
+let column_gap_px: i32 = 44
+let key_gap_px: i32 = 20
+let section_gap_px: i32 = 14
+let line_gap_px: i32 = 5
+let keys_per_row: int = 3
+
+/// Rasterized hotkey overlay texture ready for `Display.image` (premultiplied RGBA8).
+pub struct OverlayImage {
+    pub width: i32
+    pub height: i32
+    pub scale: i32
+    pub pixels: List[u8]
+}
+
+struct Row {
+    keys: str
+    title: str
+}
+
+struct Group {
+    title: str
+    rows: List[Row]
+}
+
+fn split_label(label: str) -> (str, str) {
+    if let Some(pos) = label.rfind(" + ") {
+        return (label.slice(0, pos), label.slice(pos + 3, label.len()))
+    }
+    return ("", label.clone())
+}
+
+/// Fold `["Super + H", "Super + Left"]` into `"Super + H / Left"`.
+fn fold_labels(labels: &[str]) -> str {
+    guard not labels.is_empty() else {
+        return ""
+    }
+    let (prefix, _) = split_label(labels[0])
+    var same_prefix = not prefix.is_empty()
+    for l in labels {
+        let (p, _) = split_label(l)
+        if p != prefix {
+            same_prefix = false
+            break
+        }
+    }
+    let shown = min(labels.len(), keys_per_row)
+    var text = ""
+    if same_prefix {
+        text = "{prefix} + "
+        for i in 0..shown {
+            if i > 0 {
+                text += " / "
+            }
+            let (_, k) = split_label(labels[i])
+            text += k
+        }
+    } else {
+        for i in 0..shown {
+            if i > 0 {
+                text += " / "
+            }
+            text += labels[i]
+        }
+    }
+    if labels.len() > keys_per_row {
+        text += " …"
+    }
+    return text
+}
+
+fn build_groups(c: cfg.Config, effective_mod: cfg.ModKey) -> List[Group] {
+    let sections = ["Windows", "Columns", "Workspaces", "Session"]
+    let mod_name = match effective_mod {
+        Super => "Super"
+        Alt => "Alt"
+        Ctrl => "Ctrl"
+    }
+    var groups: List[Group] = []
+    for sec in sections {
+        var titles: List[str] = []
+        var keys_list: List[List[str]] = []
+        var saw_ws_focus = false
+        var saw_ws_move = false
+        for b in c.binds {
+            if b.act.category() != sec {
+                continue
+            }
+            if sec == "Workspaces" {
+                match b.act {
+                    FocusWorkspace => {
+                        if not saw_ws_focus {
+                            saw_ws_focus = true
+                            titles.push("Workspace 1..9")
+                            keys_list.push(["{mod_name} + 1..9"])
+                        }
+                        continue
+                    }
+                    MoveWindowToWorkspace => {
+                        if not saw_ws_move {
+                            saw_ws_move = true
+                            titles.push("Move to workspace 1..9")
+                            keys_list.push(["{mod_name} + Shift + 1..9"])
+                        }
+                        continue
+                    }
+                    _ => {}
+                }
+            }
+            let title = b.act.label()
+            let key_label = b.combo.format_for(effective_mod)
+            var found = -1
+            for i in 0..titles.len() {
+                if titles[i] == title {
+                    found = i
+                    break
+                }
+            }
+            if found >= 0 {
+                keys_list[found].push(key_label)
+            } else {
+                titles.push(title)
+                keys_list.push([key_label])
+            }
+        }
+        if not titles.is_empty() {
+            var rows: List[Row] = []
+            for i in 0..titles.len() {
+                rows.push(Row { keys: fold_labels(keys_list[i]), title: titles[i].clone() })
+            }
+            groups.push(Group { title: sec.clone(), rows })
+        }
+    }
+    return groups
+}
+
+/// Split whole sections evenly across two columns (never splitting a section).
+fn split_columns(take groups: List[Group]) -> List[List[Group]] {
+    var total_rows = 0
+    for g in groups {
+        total_rows += g.rows.len()
+    }
+    let half = total_rows / 2
+    var seen = 0
+    var split = groups.len()
+    for i, g in groups {
+        seen += g.rows.len()
+        if seen > half {
+            split = i + 1
+            break
+        }
+    }
+    let max_split = max(groups.len() - 1, 1)
+    if split > max_split {
+        split = max_split
+    }
+    if split > groups.len() {
+        split = groups.len()
+    }
+    var col_a: List[Group] = []
+    var col_b: List[Group] = []
+    for i, g in take groups {
+        if i < split {
+            col_a.push(g)
+        } else {
+            col_b.push(g)
+        }
+    }
+    var out: List[List[Group]] = [col_a]
+    if not col_b.is_empty() {
+        out.push(col_b)
+    }
+    return out
+}
+
+fn column_height(col: &[Group], line: i32, sec_gap: i32) -> i32 {
+    var rows = 0
+    for g in col {
+        rows += g.rows.len() + 1
+    }
+    return i32(rows) * line + sec_gap * i32(max(col.len() - 1, 0))
+}
+
+fn whole(val: i32, scale: i32) -> i32 {
+    return (val + scale - 1) / scale * scale
+}
+
+/// Rasterize the hotkey overlay using real system TrueType/OpenType fonts (`[overlay].font`)
+/// with pastel-rs's exact clean panel appearance and typography.
+pub fn render_hotkey_overlay(c: cfg.Config, effective_mod: cfg.ModKey, scale_f: f64) -> Option[OverlayImage] {
+    let sc = i32(max(scale_f.round(), 1.0))
+    let times = f32(sc)
+    guard let Some(b_font) = font.Font.open(c.overlay.font, font_size * times) else {
+        return None
+    }
+    var body = b_font
+    defer body.close()
+    guard let Some(h_font) = font.Font.open(c.overlay.font, title_size * times) else {
+        return None
+    }
+    var heading = h_font
+    defer heading.close()
+
+    let pad = padding_px * sc
+    let key_gap = key_gap_px * sc
+    let col_gap = column_gap_px * sc
+    let sec_gap = section_gap_px * sc
+    let line = body.height() + line_gap_px * sc
+    let cols = split_columns(build_groups(c, effective_mod))
+
+    var key_widths: List[i32] = []
+    var text_widths: List[i32] = []
+    for col in cols {
+        var kw: i32 = 0
+        var tw: i32 = 0
+        for g in col {
+            for r in g.rows {
+                kw = max(kw, body.measure(r.keys))
+                tw = max(tw, body.measure(r.title))
+            }
+        }
+        key_widths.push(kw)
+        text_widths.push(tw)
+    }
+
+    var inner: i32 = 0
+    for i in 0..cols.len() {
+        inner += key_widths[i] + key_gap + text_widths[i]
+    }
+    let gaps = col_gap * i32(max(cols.len() - 1, 0))
+    let width = whole(inner + gaps + 2 * pad, sc)
+    let header_h = heading.height() + sec_gap
+    var tallest: i32 = 0
+    for col in cols {
+        tallest = max(tallest, column_height(col, line, sec_gap))
+    }
+    let height = whole(header_h + tallest + 2 * pad, sc)
+
+    // Panel premultiplied RGBA8: `[19, 21, 27, 209]` (matching pastel-rs exactly).
+    let total = int(width) * int(height)
+    var px: List[u8] = List.with_cap(total * 4)
+    for _ in 0..total {
+        px.push(19)
+        px.push(21)
+        px.push(27)
+        px.push(209)
+    }
+
+    let text_ink = core.Color.rgb(0.92, 0.93, 0.95)
+    let dim_ink = core.Color.rgb(0.60, 0.63, 0.70)
+    let accent = c.window.active_color.with_alpha(1.0)
+    let max_x = width - pad
+
+    // Title
+    heading.draw(mut px, width, height, pad, pad + heading.ascent(), "Hotkeys", text_ink, max_x)
+
+    // Two clean columns: section header in dim gray, keys in active accent, descriptions in bright text.
+    var left = pad
+    for ci, col in cols {
+        var y = pad + header_h + body.ascent()
+        for g in col {
+            body.draw(mut px, width, height, left, y, g.title, dim_ink, max_x)
+            y += line
+            for r in g.rows {
+                body.draw(mut px, width, height, left, y, r.keys, accent, max_x)
+                let tx = left + key_widths[ci] + key_gap
+                body.draw(mut px, width, height, tx, y, r.title, text_ink, max_x)
+                y += line
+            }
+            y += sec_gap
+        }
+        left += key_widths[ci] + key_gap + text_widths[ci] + col_gap
+    }
+
+    return Some(OverlayImage { width, height, scale: sc, pixels: px })
+}

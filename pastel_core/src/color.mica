@@ -1,0 +1,140 @@
+// Straight-alpha RGBA colors, hex parsing, blending, and premultiplication.
+
+/// An RGBA color in straight 0.0..1.0 sRGB space.
+pub struct Color {
+    pub r: f32 = 0.0
+    pub g: f32 = 0.0
+    pub b: f32 = 0.0
+    pub a: f32 = 1.0
+}
+
+fn hex_nibble(ch: u8) -> Option[u32] {
+    if ch >= 48 and ch <= 57 {
+        return Some(u32(ch - 48))
+    }
+    if ch >= 97 and ch <= 102 {
+        return Some(u32(ch - 87))
+    }
+    if ch >= 65 and ch <= 70 {
+        return Some(u32(ch - 55))
+    }
+    return None
+}
+
+fn hex_byte(s: str, i: int) -> Option[u32] {
+    guard let Some(hi) = hex_nibble(s[i]) else {
+        return None
+    }
+    guard let Some(lo) = hex_nibble(s[i + 1]) else {
+        return None
+    }
+    return Some((hi << 4) | lo)
+}
+
+/// Parse `#RGB`, `#RGBA`, `#RRGGBB`, or `#RRGGBBAA` (leading `#` optional).
+pub fn Color.from_hex(text: str) -> Result[Color, str] {
+    let t = text.trim()
+    let s = if t.starts_with("#") { t.slice(1, t.len()) } else { t }
+    let n = s.len()
+    if n == 3 or n == 4 {
+        guard let Some(r) = hex_nibble(s[0]) else {
+            return Err("invalid hex color '{text}'")
+        }
+        guard let Some(g) = hex_nibble(s[1]) else {
+            return Err("invalid hex color '{text}'")
+        }
+        guard let Some(b) = hex_nibble(s[2]) else {
+            return Err("invalid hex color '{text}'")
+        }
+        var a: u32 = 15
+        if n == 4 {
+            guard let Some(aa) = hex_nibble(s[3]) else {
+                return Err("invalid hex color '{text}'")
+            }
+            a = aa
+        }
+        return Ok(Color { r: f32(r * 17) / 255.0, g: f32(g * 17) / 255.0, b: f32(b * 17) / 255.0, a: f32(a * 17) / 255.0 })
+    }
+    if n == 6 or n == 8 {
+        guard let Some(r) = hex_byte(s, 0) else {
+            return Err("invalid hex color '{text}'")
+        }
+        guard let Some(g) = hex_byte(s, 2) else {
+            return Err("invalid hex color '{text}'")
+        }
+        guard let Some(b) = hex_byte(s, 4) else {
+            return Err("invalid hex color '{text}'")
+        }
+        var a: u32 = 255
+        if n == 8 {
+            guard let Some(aa) = hex_byte(s, 6) else {
+                return Err("invalid hex color '{text}'")
+            }
+            a = aa
+        }
+        return Ok(Color { r: f32(r) / 255.0, g: f32(g) / 255.0, b: f32(b) / 255.0, a: f32(a) / 255.0 })
+    }
+    return Err("invalid hex color '{text}': expected #RGB, #RGBA, #RRGGBB, or #RRGGBBAA")
+}
+
+pub fn Color.rgb(r: f32, g: f32, b: f32) -> Color {
+    return Color { r, g, b, a: 1.0 }
+}
+
+pub fn Color.rgba(r: f32, g: f32, b: f32, a: f32) -> Color {
+    return Color { r, g, b, a }
+}
+
+pub fn Color.with_alpha(self, a: f32) -> Color {
+    return Color { r: self.r, g: self.g, b: self.b, a: a.clamp(0.0, 1.0) }
+}
+
+/// Straight-alpha RGBA vec4 (for `vk_draw2d` shapes and borders).
+pub fn Color.as_vec4(self) -> vec4 {
+    return vec4(self.r, self.g, self.b, self.a)
+}
+
+/// Premultiplied RGBA vec4 (for `luminaria` backgrounds and `vk_compose`).
+pub fn Color.premul(self) -> vec4 {
+    return vec4(self.r * self.a, self.g * self.a, self.b * self.a, self.a)
+}
+
+/// Premultiplied `[4]f32` array (for `luminaria.Options.background`).
+pub fn Color.premul_array(self) -> [4]f32 {
+    return [self.r * self.a, self.g * self.a, self.b * self.a, self.a]
+}
+
+/// Linear interpolation between `self` and `other`.
+pub fn Color.lerp(self, other: Color, t: f32) -> Color {
+    let k = t.clamp(0.0, 1.0)
+    return Color {
+        r: self.r + (other.r - self.r) * k,
+        g: self.g + (other.g - self.g) * k,
+        b: self.b + (other.b - self.b) * k,
+        a: self.a + (other.a - self.a) * k,
+    }
+}
+
+/// Relative perceived luminance (0.0 dark .. 1.0 bright).
+pub fn Color.luminance(self) -> f32 {
+    return 0.2126 * self.r + 0.7152 * self.g + 0.0722 * self.b
+}
+
+/// Premultiplied 8-bit RGBA bytes for `Display.image` uploads.
+pub fn Color.to_rgba8_premul(self) -> [4]u8 {
+    let a = self.a.clamp(0.0, 1.0)
+    let r = u8((self.r.clamp(0.0, 1.0) * a * 255.0 + 0.5).clamp(0.0, 255.0))
+    let g = u8((self.g.clamp(0.0, 1.0) * a * 255.0 + 0.5).clamp(0.0, 255.0))
+    let b = u8((self.b.clamp(0.0, 1.0) * a * 255.0 + 0.5).clamp(0.0, 255.0))
+    let au = u8((a * 255.0 + 0.5).clamp(0.0, 255.0))
+    return [r, g, b, au]
+}
+
+/// Straight 8-bit RGBA bytes.
+pub fn Color.to_rgba8(self) -> [4]u8 {
+    let r = u8((self.r.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
+    let g = u8((self.g.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
+    let b = u8((self.b.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
+    let a = u8((self.a.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
+    return [r, g, b, a]
+}

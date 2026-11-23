@@ -1,0 +1,96 @@
+// Thread-safe Visual Effect Sheet shared between the compositor loop and PastelRenderer.
+
+import std.sync
+import pastel_core as core
+
+/// Dual-Kawase blur parameters.
+pub struct BlurSettings {
+    pub enabled: bool = true
+    pub xray: bool = true
+    pub passes: int = 2
+    pub offset: f32 = 2.0
+}
+
+/// Visual decoration attached to a window or overlay in output-pixel coordinates.
+pub struct WindowEffect {
+    /// Non-zero for compositor images (e.g. hotkey overlay: `(1<<63) | (idx<<32) | gen`).
+    /// Zero for client windows (matched by output-pixel geometry).
+    pub key: u64 = 0
+    pub x: f32 = 0.0
+    pub y: f32 = 0.0
+    pub w: f32 = 0.0
+    pub h: f32 = 0.0
+    /// Corner radius in output pixels (0.0 = crisp square corners).
+    pub radius: f32 = 0.0
+    /// Hollow border width in output pixels (0.0 disables).
+    pub border_width: f32 = 0.0
+    /// Straight-alpha RGBA border color.
+    pub border_color: vec4 = zeroed()
+    /// Soft drop shadow spread in output pixels.
+    pub shadow_size: f32 = 0.0
+    /// Straight-alpha RGBA shadow color.
+    pub shadow_color: vec4 = zeroed()
+    /// Enable frosted-glass backdrop blur behind this element.
+    pub blur: bool = false
+    /// True = blur only background/wallpaper (X-Ray); false = live backdrop blur.
+    pub blur_xray: bool = true
+    /// Blur backdrop opacity (0..1, follows window/overlay fade animation).
+    pub blur_opacity: f32 = 1.0
+    /// True when this element is a floating window or overlay (drawn above tiled windows).
+    pub is_overlay: bool = false
+}
+
+/// Per-output visual state pushed from the compositor before each layout update.
+pub struct OutputEffects {
+    pub background: vec4 = zeroed()
+    pub blur: BlurSettings = BlurSettings {}
+    pub items: List[WindowEffect] = []
+    pub generation: u64 = 0
+}
+
+pub struct SheetData {
+    pub outputs: List[OutputEffects] = []
+    pub generation: u64 = 0
+}
+
+/// Cloneable shared handle to the DWM visual effect sheet.
+pub struct EffectSheet {
+    inner: sync.Mutex[SheetData]
+}
+
+pub fn EffectSheet.new() -> EffectSheet {
+    return EffectSheet { inner: sync.mutex(SheetData {}) }
+}
+
+pub fn EffectSheet.clone(self) -> EffectSheet {
+    return EffectSheet { inner: self.inner.clone() }
+}
+
+/// Update output `o`'s effects atomically, bumping the sheet generation.
+pub fn EffectSheet.set_output(self, o: int, bg: core.Color, blur: BlurSettings, take items: List[WindowEffect]) {
+    let bgv = bg.premul()
+    let copy = items
+    self.inner.write(fn(mut s: SheetData) {
+        while s.outputs.len() <= o {
+            s.outputs.push(OutputEffects {})
+        }
+        s.generation += 1
+        s.outputs[o] = OutputEffects {
+            background: bgv,
+            blur,
+            items: copy.clone(),
+            generation: s.generation,
+        }
+    })
+}
+
+/// Snapshot output `o`'s current effect list.
+pub fn EffectSheet.snapshot(self, o: int) -> OutputEffects {
+    var out = OutputEffects {}
+    self.inner.read(fn(s: SheetData) {
+        if o >= 0 and o < s.outputs.len() {
+            out = s.outputs[o].clone()
+        }
+    })
+    return out
+}

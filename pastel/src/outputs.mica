@@ -1,0 +1,131 @@
+// Output management, mode parsing, multi-monitor sync, and input device configuration.
+
+import luminaria as lum
+import pastel_core as core
+import pastel_config as cfg
+import compositor
+
+fn parse_mode(spec: str) -> Option[lum.Mode] {
+    let s = spec.trim()
+    guard not s.is_empty() else {
+        return None
+    }
+    var dim = ""
+    var mhz: i32 = 60000
+    if let Some(parts) = s.split_once("@") {
+        dim = parts.left.clone()
+        if let Some(hz) = parts.right.to_float() {
+            mhz = i32((hz * 1000.0).round())
+        }
+    } else {
+        dim = s
+    }
+    guard let Some(wh) = dim.split_once("x") else {
+        return None
+    }
+    guard let Some(w) = wh.left.to_int() else {
+        return None
+    }
+    guard let Some(h) = wh.right.to_int() else {
+        return None
+    }
+    guard w > 0 and h > 0 else {
+        return None
+    }
+    return Some(lum.Mode { width: i32(w), height: i32(h), refresh_mhz: mhz })
+}
+
+pub fn output_id(o: lum.Output) -> u64 {
+    return (u64(o.id.index) << 32) | u64(o.id.gen)
+}
+
+/// Apply matching `[[output]]` configuration rules to a single luminaria output.
+pub fn apply_output_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], so: lum.Output) {
+    let desc = p.d.output_desc(so)
+    guard let Some(oc) = p.cfg.output_for(desc.name) else {
+        return
+    }
+    if not oc.enabled {
+        p.d.enable(so, false)
+        return
+    }
+    p.d.enable(so, true)
+    if let Some(m) = parse_mode(oc.mode) {
+        p.d.set_mode(so, m)
+    }
+    if let Some(sc) = oc.scale {
+        p.d.set_scale(so, sc)
+    }
+    if let Some(px) = oc.pos_x {
+        let py = oc.pos_y.unwrap_or(0.0)
+        p.d.set_position(so, px, py)
+    }
+    if let Some(vrr) = oc.vrr {
+        p.d.set_vrr(so, vrr)
+    }
+}
+
+/// Synchronize all live luminaria outputs into `p.desktop`.
+pub fn sync_outputs[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) {
+    let live = p.d.outputs()
+    var live_ids: List[u64] = []
+    for so in live {
+        let oid = output_id(so)
+        live_ids.push(oid)
+        discard p.out_by_id.insert(oid, so)
+        discard p.id_by_out.insert(so, oid)
+        let desc = p.d.output_desc(so)
+        let (fx, fy, fw, fh) = p.d.output_rect(so)
+        let (ux, uy, uw, uh) = p.d.usable(so)
+        p.desktop.add_monitor(oid, desc.name, core.Rect.new(fx, fy, fw, fh), core.Rect.new(ux, uy, uw, uh))
+    }
+    // Remove disappeared monitors, migrating any open windows safely.
+    var gone: List[u64] = []
+    for m in p.desktop.monitors {
+        if not live_ids.contains(m.id) {
+            gone.push(m.id)
+        }
+    }
+    for oid in gone {
+        p.desktop.remove_monitor(oid)
+        if let Some(so) = p.out_by_id.remove(oid) {
+            discard p.id_by_out.remove(so)
+        }
+    }
+}
+
+pub fn on_output_added[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], so: lum.Output) {
+    apply_output_config(mut p, so)
+    sync_outputs(mut p)
+    p.needs_layout = true
+}
+
+pub fn on_output_changed[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], so: lum.Output) {
+    sync_outputs(mut p)
+    p.needs_layout = true
+}
+
+pub fn on_output_removed[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], so: lum.Output) {
+    sync_outputs(mut p)
+    p.needs_layout = true
+}
+
+pub fn apply_input_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], dev: u32) {
+    p.d.configure_input(dev, lum.InputConfig {
+        tap: p.cfg.input.tap_to_click,
+        natural_scroll: p.cfg.input.natural_scroll,
+        accel: p.cfg.input.accel,
+        left_handed: p.cfg.input.left_handed,
+        disabled: false,
+    })
+}
+
+pub fn apply_keymap[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) {
+    if not p.cfg.input.layout.is_empty() or not p.cfg.input.variant.is_empty() or not p.cfg.input.options.is_empty() {
+        discard p.d.set_keymap(lum.Names {
+            layout: p.cfg.input.layout.clone(),
+            variant: p.cfg.input.variant.clone(),
+            options: p.cfg.input.options.clone(),
+        })
+    }
+}

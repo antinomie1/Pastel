@@ -1,0 +1,18 @@
+// pastel_layout: pluggable scrolling-tiling layout engine, workspaces, and multi-monitor desktop.
+
+pub import traits
+pub import column
+pub import scrolling
+pub import workspace
+pub import desktop
+
+pub type TileTarget = traits.TileTarget
+pub type CenterMode = traits.CenterMode
+pub type WindowSlot = column.WindowSlot
+pub type Column = column.Column
+pub type ScrollingStrip = scrolling.ScrollingStrip
+pub type FloatingWin = workspace.FloatingWin
+pub type Workspace = workspace.Workspace
+pub type WindowLoc = desktop.WindowLoc
+pub type Monitor = desktop.Monitor
+pub type Desktop = desktop.Desktop

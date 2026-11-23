@@ -1,0 +1,440 @@
+// Niri-like infinite horizontal scrolling strip implementing LayoutPolicy.
+
+import pastel_core as core
+import traits
+import column
+
+/// Horizontal strip of columns with a logical viewport camera.
+pub struct ScrollingStrip {
+    pub columns: List[column.Column] = []
+    pub active_col: int = 0
+    /// Horizontal scroll offset of the viewport in strip-local logical pixels.
+    pub camera_x: f64 = 0.0
+    /// Pending explicit center request (set by `center_column`).
+    pub force_center: bool = false
+    /// True while user is manually panning (suppresses auto-snap until pan_end).
+    pub manual_pan: bool = false
+}
+
+pub fn ScrollingStrip.new() -> ScrollingStrip {
+    return ScrollingStrip {}
+}
+
+pub fn ScrollingStrip.is_empty(self) -> bool {
+    return self.columns.is_empty()
+}
+
+pub fn ScrollingStrip.window_count(self) -> int {
+    var n = 0
+    for c in self.columns {
+        n += c.windows.len()
+    }
+    return n
+}
+
+/// Insert a new window as a fresh column right after the active column.
+pub fn ScrollingStrip.insert(mut self, id: u64, width_hint: f64) {
+    let col = column.Column.single(id, width_hint)
+    if self.columns.is_empty() {
+        self.columns.push(col)
+        self.active_col = 0
+    } else {
+        let at = min(self.active_col + 1, self.columns.len())
+        self.columns.insert(at, col)
+        self.active_col = at
+    }
+    self.manual_pan = false
+}
+
+/// Remove window `id` from whichever column owns it.
+pub fn ScrollingStrip.remove(mut self, id: u64) -> bool {
+    for ci in 0..self.columns.len() {
+        let ri = self.columns[ci].find(id)
+        if ri >= 0 {
+            discard self.columns[ci].windows.remove(ri)
+            if self.columns[ci].windows.is_empty() {
+                discard self.columns.remove(ci)
+                if self.columns.is_empty() {
+                    self.active_col = 0
+                    self.camera_x = 0.0
+                } else if self.active_col >= self.columns.len() {
+                    self.active_col = self.columns.len() - 1
+                } else if ci < self.active_col {
+                    self.active_col -= 1
+                }
+            } else if self.columns[ci].active_row >= self.columns[ci].windows.len() {
+                self.columns[ci].active_row = self.columns[ci].windows.len() - 1
+            }
+            return true
+        }
+    }
+    return false
+}
+
+pub fn ScrollingStrip.contains(self, id: u64) -> bool {
+    for c in self.columns {
+        if c.find(id) >= 0 {
+            return true
+        }
+    }
+    return false
+}
+
+pub fn ScrollingStrip.focused(self) -> Option[u64] {
+    guard not self.columns.is_empty() else {
+        return None
+    }
+    let ci = self.active_col.clamp(0, self.columns.len() - 1)
+    return self.columns[ci].active_id()
+}
+
+pub fn ScrollingStrip.focus_window(mut self, id: u64) -> bool {
+    for ci in 0..self.columns.len() {
+        let ri = self.columns[ci].find(id)
+        if ri >= 0 {
+            self.active_col = ci
+            self.columns[ci].active_row = ri
+            self.manual_pan = false
+            return true
+        }
+    }
+    return false
+}
+
+pub fn ScrollingStrip.focus_first(mut self) -> Option[u64] {
+    guard not self.columns.is_empty() else {
+        return None
+    }
+    self.active_col = 0
+    self.manual_pan = false
+    return self.focused()
+}
+
+pub fn ScrollingStrip.focus_last(mut self) -> Option[u64] {
+    guard not self.columns.is_empty() else {
+        return None
+    }
+    self.active_col = self.columns.len() - 1
+    self.manual_pan = false
+    return self.focused()
+}
+
+/// Move focus horizontally (`dx`: -1 left, +1 right) or vertically (`dy`: -1 up, +1 down).
+pub fn ScrollingStrip.focus_dir(mut self, dx: int, dy: int) -> Option[u64] {
+    guard not self.columns.is_empty() else {
+        return None
+    }
+    if dx != 0 {
+        let next = (self.active_col + dx).clamp(0, self.columns.len() - 1)
+        if next != self.active_col {
+            self.active_col = next
+            self.manual_pan = false
+        }
+    }
+    if dy != 0 {
+        let ci = self.active_col
+        let n = self.columns[ci].windows.len()
+        if n > 1 {
+            self.columns[ci].active_row = (self.columns[ci].active_row + dy).clamp(0, n - 1)
+        }
+    }
+    return self.focused()
+}
+
+/// Move the active column horizontally (`dx`) or active window vertically (`dy`).
+pub fn ScrollingStrip.move_dir(mut self, dx: int, dy: int) -> bool {
+    guard not self.columns.is_empty() else {
+        return false
+    }
+    if dx != 0 {
+        let target = self.active_col + dx
+        guard target >= 0 and target < self.columns.len() else {
+            return false
+        }
+        self.columns.swap(self.active_col, target)
+        self.active_col = target
+        self.manual_pan = false
+        return true
+    }
+    if dy != 0 {
+        let ci = self.active_col
+        let ri = self.columns[ci].active_row
+        let target = ri + dy
+        guard target >= 0 and target < self.columns[ci].windows.len() else {
+            return false
+        }
+        self.columns[ci].windows.swap(ri, target)
+        self.columns[ci].active_row = target
+        return true
+    }
+    return false
+}
+
+/// Pull the active window into the left adjacent column (or absorb the right column if at index 0).
+pub fn ScrollingStrip.consume_into_column(mut self) -> bool {
+    guard self.columns.len() >= 2 else {
+        return false
+    }
+    if self.active_col > 0 {
+        let ci = self.active_col
+        let ri = self.columns[ci].active_row
+        let slot = self.columns[ci].windows.remove(ri)
+        if self.columns[ci].windows.is_empty() {
+            discard self.columns.remove(ci)
+        } else if self.columns[ci].active_row >= self.columns[ci].windows.len() {
+            self.columns[ci].active_row = self.columns[ci].windows.len() - 1
+        }
+        let target_col = ci - 1
+        self.columns[target_col].windows.push(slot)
+        self.columns[target_col].active_row = self.columns[target_col].windows.len() - 1
+        self.active_col = target_col
+        self.manual_pan = false
+        return true
+    }
+    // Active column is 0: pull top window of column 1 into column 0.
+    let slot = self.columns[1].windows.remove(0)
+    if self.columns[1].windows.is_empty() {
+        discard self.columns.remove(1)
+    } else if self.columns[1].active_row >= self.columns[1].windows.len() {
+        self.columns[1].active_row = self.columns[1].windows.len() - 1
+    }
+    self.columns[0].windows.push(slot)
+    self.columns[0].active_row = self.columns[0].windows.len() - 1
+    self.manual_pan = false
+    return true
+}
+
+/// Expel the active window out of a multi-window column into a new column to the right.
+pub fn ScrollingStrip.expel_from_column(mut self) -> bool {
+    guard not self.columns.is_empty() else {
+        return false
+    }
+    let ci = self.active_col
+    guard self.columns[ci].windows.len() > 1 else {
+        return false
+    }
+    let ri = self.columns[ci].active_row
+    let slot = self.columns[ci].windows.remove(ri)
+    if self.columns[ci].active_row >= self.columns[ci].windows.len() {
+        self.columns[ci].active_row = self.columns[ci].windows.len() - 1
+    }
+    let frac = self.columns[ci].width_frac
+    self.columns.insert(ci + 1, column.Column.single(slot.id, frac))
+    self.active_col = ci + 1
+    self.manual_pan = false
+    return true
+}
+
+/// Cycle the active column's width through `presets`.
+pub fn ScrollingStrip.cycle_preset_width(mut self, presets: &[f64]) -> bool {
+    guard not self.columns.is_empty() and not presets.is_empty() else {
+        return false
+    }
+    let ci = self.active_col
+    let cur = self.columns[ci].width_frac
+    self.columns[ci].maximized = false
+    var next = presets[0]
+    for i in 0..presets.len() {
+        if (presets[i] - cur).abs() < 0.02 {
+            next = presets[(i + 1) % presets.len()]
+            break
+        }
+        if presets[i] > cur + 0.02 {
+            next = presets[i]
+            break
+        }
+    }
+    self.columns[ci].width_frac = next.clamp(0.1, 1.0)
+    self.columns[ci].saved_width = self.columns[ci].width_frac
+    self.manual_pan = false
+    return true
+}
+
+pub fn ScrollingStrip.set_column_width(mut self, frac: f64) -> bool {
+    guard not self.columns.is_empty() else {
+        return false
+    }
+    let ci = self.active_col
+    let w = frac.clamp(0.1, 1.0)
+    self.columns[ci].maximized = false
+    self.columns[ci].width_frac = w
+    self.columns[ci].saved_width = w
+    self.manual_pan = false
+    return true
+}
+
+pub fn ScrollingStrip.adjust_column_width(mut self, delta: f64) -> bool {
+    guard not self.columns.is_empty() else {
+        return false
+    }
+    let ci = self.active_col
+    let w = (self.columns[ci].width_frac + delta).clamp(0.1, 1.0)
+    self.columns[ci].maximized = false
+    self.columns[ci].width_frac = w
+    self.columns[ci].saved_width = w
+    self.manual_pan = false
+    return true
+}
+
+pub fn ScrollingStrip.toggle_maximize_column(mut self) -> bool {
+    guard not self.columns.is_empty() else {
+        return false
+    }
+    let ci = self.active_col
+    if self.columns[ci].maximized {
+        self.columns[ci].maximized = false
+        self.columns[ci].width_frac = self.columns[ci].saved_width
+    } else {
+        self.columns[ci].saved_width = self.columns[ci].width_frac
+        self.columns[ci].maximized = true
+    }
+    self.manual_pan = false
+    return true
+}
+
+pub fn ScrollingStrip.center_column(mut self) {
+    self.force_center = true
+    self.manual_pan = false
+}
+
+/// Pan viewport horizontally by `dx` logical pixels (touchpad swipe / Mod+Scroll).
+pub fn ScrollingStrip.pan(mut self, dx: f64) {
+    self.camera_x += dx
+    self.manual_pan = true
+}
+
+/// Finish manual panning and clamp camera smoothly to strip bounds.
+pub fn ScrollingStrip.pan_end(mut self, area: core.Rect, gap: f64) {
+    self.manual_pan = false
+    guard not self.columns.is_empty() else {
+        self.camera_x = 0.0
+        return
+    }
+    let total = self.strip_width(area.w, gap)
+    let max_cam = max(total - area.w, 0.0)
+    self.camera_x = self.camera_x.clamp(0.0, max_cam)
+    // Focus whichever column is closest to viewport center.
+    let mid = self.camera_x + area.w * 0.5
+    var x = gap
+    var best = self.active_col
+    var best_dist = 1.0e18
+    for i, c in self.columns {
+        let cw = c.effective_width(area.w, gap)
+        let cx = x + cw * 0.5
+        let d = (cx - mid).abs()
+        if d < best_dist {
+            best_dist = d
+            best = i
+        }
+        x += cw + gap
+    }
+    self.active_col = best
+}
+
+fn ScrollingStrip.strip_width(self, viewport_w: f64, gap: f64) -> f64 {
+    if self.columns.is_empty() {
+        return 0.0
+    }
+    var x = gap
+    for c in self.columns {
+        x += c.effective_width(viewport_w, gap) + gap
+    }
+    return x
+}
+
+/// Compute global target rects for every tiled window in the strip, updating `camera_x`.
+pub fn ScrollingStrip.compute(mut self, area: core.Rect, gap: f64, center: traits.CenterMode, mut out: List[traits.TileTarget]) {
+    guard not self.columns.is_empty() else {
+        self.camera_x = 0.0
+        self.force_center = false
+        return
+    }
+    let n = self.columns.len()
+    let active = self.active_col.clamp(0, n - 1)
+    self.active_col = active
+
+    // First pass: find column X positions and total strip width.
+    var col_x: List[f64] = List.with_cap(n)
+    var col_w: List[f64] = List.with_cap(n)
+    var cur_x = gap
+    for c in self.columns {
+        let cw = c.effective_width(area.w, gap)
+        col_x.push(cur_x)
+        col_w.push(cw)
+        cur_x += cw + gap
+    }
+    let total_w = cur_x
+
+    // Update viewport camera unless actively being dragged.
+    if not self.manual_pan {
+        let ax = col_x[active]
+        let aw = col_w[active]
+        let left_bound = ax - gap
+        let right_bound = ax + aw + gap
+        let centered = ax + aw * 0.5 - area.w * 0.5
+        if self.force_center or center == traits.CenterMode.Always {
+            self.camera_x = centered
+        } else if center == traits.CenterMode.OnOverflow {
+            // Minimal scroll so focused column fits cleanly; only center if the
+            // column itself exceeds the viewport width.
+            if aw + gap * 2.0 > area.w {
+                self.camera_x = centered
+            } else if left_bound < self.camera_x {
+                self.camera_x = left_bound
+            } else if right_bound > self.camera_x + area.w {
+                self.camera_x = right_bound - area.w
+            }
+        } else {
+            // Minimal scroll so focused column fits in view (niri default).
+            if left_bound < self.camera_x {
+                self.camera_x = left_bound
+            } else if right_bound > self.camera_x + area.w {
+                self.camera_x = right_bound - area.w
+            }
+        }
+        if total_w <= area.w {
+            if center == traits.CenterMode.Always or self.force_center {
+                self.camera_x = centered
+            } else {
+                self.camera_x = 0.0
+            }
+        } else {
+            let max_cam = total_w - area.w
+            self.camera_x = self.camera_x.clamp(0.0, max_cam)
+        }
+    } else {
+        let max_cam = max(total_w - area.w, 0.0)
+        self.camera_x = self.camera_x.clamp(-area.w * 0.25, max_cam + area.w * 0.25)
+    }
+    self.force_center = false
+
+    // Second pass: emit per-window targets inside each column.
+    let active_win = self.focused().unwrap_or(0)
+    for ci in 0..n {
+        let rows = self.columns[ci].windows.len()
+        guard rows > 0 else {
+            continue
+        }
+        let avail_h = max(area.h - gap * f64(rows + 1), f64(rows) * 32.0)
+        let tot_w = self.columns[ci].total_weight()
+        var y = area.y + gap
+        let wx = area.x + col_x[ci] - self.camera_x
+        let ww = col_w[ci]
+        for ri in 0..rows {
+            let slot = self.columns[ci].windows[ri]
+            let wh = if ri == rows - 1 {
+                max(area.y + area.h - gap - y, 32.0)
+            } else {
+                (avail_h * (max(slot.weight, 0.1) / tot_w)).round()
+            }
+            out.push(traits.TileTarget {
+                id: slot.id,
+                rect: core.Rect.new(wx, y, ww, wh),
+                focused: slot.id == active_win,
+                floating: false,
+                fullscreen: false,
+            })
+            y += wh + gap
+        }
+    }
+}

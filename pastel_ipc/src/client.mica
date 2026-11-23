@@ -1,0 +1,50 @@
+// Blocking Unix socket IPC client for `pastel msg`.
+
+import std.json
+import std.net
+
+/// Send a single JSON request line and read back one JSON response line.
+pub fn request(sock_path: str, req: json.Value) -> Result[str, str] {
+    let conn = try net.unix_connect(sock_path).map_err(fn(e) => "connect '{sock_path}': {e}")
+    defer conn.close()
+    let line = json.encode(req) + "\n"
+    discard try conn.write(line).map_err(fn(e) => "write ipc: {e}")
+    guard let Some(resp) = try conn.read_line().map_err(fn(e) => "read ipc: {e}") else {
+        return Err("compositor closed IPC connection")
+    }
+    return Ok(resp)
+}
+
+/// Dispatch an action string (`pastel msg <action>`).
+pub fn send_action(sock_path: str, act: str) -> Result[str, str] {
+    let req = json.obj().with("cmd", json.Value.Str("action")).with("action", json.Value.Str(act.clone()))
+    return request(sock_path, req)
+}
+
+/// Query full compositor state JSON (`pastel msg --state`).
+pub fn query_state(sock_path: str) -> Result[str, str] {
+    let req = json.obj().with("cmd", json.Value.Str("state"))
+    return request(sock_path, req)
+}
+
+/// Subscribe to newline-delimited JSON events, invoking `on_line` for each event.
+pub fn subscribe(sock_path: str, on_line: fn(str)) -> Result[(), str] {
+    let conn = try net.unix_connect(sock_path).map_err(fn(e) => "connect '{sock_path}': {e}")
+    defer conn.close()
+    let req = json.obj().with("cmd", json.Value.Str("subscribe"))
+    discard try conn.write(json.encode(req) + "\n").map_err(fn(e) => "write ipc: {e}")
+    while true {
+        match conn.read_line() {
+            Ok(Some(line)) => {
+                if not line.is_empty() {
+                    on_line(line)
+                }
+            }
+            Ok(None) => {
+                break
+            }
+            Err(e) => { return Err("read ipc stream: {e}") }
+        }
+    }
+    return Ok(())
+}

@@ -1,0 +1,54 @@
+import std.fs
+import std.json
+import std.path
+import std.sync
+import std.time
+import pastel_ipc as ipc
+
+test "IPC server handles action, state query, and subscriber broadcasts" {
+    let dir = fs.create_temp_dir("pastel-ipc-test").expect("temp dir")
+    let sock = path.join(dir, "pastel-test.sock")
+    var srv = ipc.IpcServer.open(sock).expect("open ipc")
+    defer srv.close()
+
+    // Spawn a client sending an action request in a background thread.
+    let ch: sync.Chan[str] = sync.chan(1)
+    let ch_c = ch.clone()
+    let h = go {
+        let r = ipc.client.send_action(sock, "focus-workspace 2").expect("client reply")
+        discard ch_c.send(r)
+    }
+
+    var handled = false
+    for _ in 0..100 {
+        let fds = srv.accept_all()
+        for fd in fds {
+            for _ in 0..50 {
+                let (lines, _) = srv.read_lines(fd)
+                for line in lines {
+                    match ipc.server.decode_request(line).expect("decode") {
+                        Action(act) => {
+                            assert_eq(act, "focus-workspace 2")
+                            assert(srv.send(fd, ipc.server.encode_ok()))
+                            handled = true
+                        }
+                        _ => panic("unexpected request")
+                    }
+                }
+                if handled {
+                    break
+                }
+                time.sleep_ms(2)
+            }
+        }
+        if handled {
+            break
+        }
+        time.sleep_ms(2)
+    }
+    assert(handled)
+    h.join()
+    let resp = ch.recv().unwrap()
+    let v = json.parse(resp).expect("json")
+    assert_eq(v.get_bool("ok"), Some(true))
+}

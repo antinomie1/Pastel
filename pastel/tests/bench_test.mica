@@ -1,0 +1,214 @@
+// Performance, latency, and frame-pacing benchmark suite for Pastel.
+// Run in release mode: `sheaf test --release -p pastel`.
+
+import std.env
+import std.fs
+import std.io
+import std.os
+import std.time
+import luminaria as lum
+import luminaria_types.stats as stats
+import pastel_core as core
+import pastel_config as cfg
+import pastel_layout as lay
+import pastel_render as ren
+
+test "benchmark: layout, analytical springs, overlay rasterization, and 240Hz headless Vulkan frame latency" {
+    // 1. Scrolling-tiling layout throughput (100 columns / 100 windows).
+    var desk = lay.Desktop.new(0, 12.0, 0.5, lay.CenterMode.OnOverflow)
+    let area = core.Rect.new(0.0, 0.0, 2560.0, 1440.0)
+    desk.add_monitor(1, "DP-1", area, area)
+    for i in 1..=100 {
+        desk.add_window(u64(i), false, 0.5, 1280.0, 1400.0, None)
+    }
+    var scratch: List[lay.TileTarget] = []
+    let lay_iters = 5000
+    let t_lay0 = time.now_ns()
+    for r in 0..lay_iters {
+        desk.monitors[0].workspaces[0].strip.active_col = r % 100
+        desk.compute_all(mut scratch)
+    }
+    let lay_ns = (time.now_ns() - t_lay0) / lay_iters
+    assert_eq(scratch.len(), 100)
+
+    // 2. Analytical ODE spring animation throughput (100 active 4-channel windows).
+    let c = cfg.Config.default()
+    var anims = ren.AnimState.new()
+    for i in 1..=100 {
+        anims.open_window(u64(i), core.Rect.new(f64(i * 40), 12.0, 640.0, 1400.0), 0.9, i == 1, c.animation, c.window, 0)
+        anims.update_window(u64(i), core.Rect.new(f64(i * 40) - 500.0, 12.0, 640.0, 1400.0), 0.9, i == 2, c.animation, c.window, 1000000)
+    }
+    let anim_iters = 2000
+    let t_an0 = time.now_ns()
+    for r in 0..anim_iters {
+        let now = 2000000 + r * 4000000
+        anims.begin_frame()
+        for i in 1..=100 {
+            discard anims.tick_window(u64(i), now)
+        }
+    }
+    let anim_ns = (time.now_ns() - t_an0) / anim_iters
+
+    // 3. TrueType/OpenType hotkey overlay cold rasterization time.
+    let t_ov0 = time.now_ns()
+    let ov = ren.overlay.render_hotkey_overlay(c, cfg.ModKey.Super, 1.0).expect("overlay")
+    let ov_us = (time.now_ns() - t_ov0) / 1000
+    assert(ov.width > 300)
+
+    io.print("bench layout (100 windows): {lay_ns} ns/frame ({lay_ns / 1000} us)")
+    io.print("bench springs (100 windows x 7 ch): {anim_ns} ns/frame ({anim_ns / 1000} us)")
+    io.print("bench hotkey overlay rasterize ({ov.width}x{ov.height}): {ov_us} us")
+
+    // 4. Full headless 1280x720@240Hz Vulkan composition with PastelRenderer (50 windows, 1000Hz input).
+    let dir = fs.create_temp_dir("pastel-bench").expect("temp dir")
+    discard env.set("XDG_RUNTIME_DIR", dir)
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(comp_ren) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped GPU bench: no Vulkan device")
+        return
+    }
+    let mode = lum.Mode { width: 1280, height: 720, refresh_mhz: 240000 }
+    let opts = lum.Options { backend: lum.Kind.Headless, headless: [mode], title: "Pastel-Bench" }
+    let be = lum.backend.Backend.open(lum.backend.Options { kind: lum.Kind.Headless, headless: [mode] }).expect("headless")
+    var d = lum.display.Display.with(opts, be, comp_ren).expect("display")
+
+    var px: List[u8] = []
+    for _ in 0..200 * 150 {
+        px.push(40)
+        px.push(80)
+        px.push(120)
+        px.push(255)
+    }
+    var imgs: List[lum.Image] = []
+    for _ in 0..50 {
+        imgs.push(d.image(200, 150, px, true).expect("image"))
+    }
+    let so = d.outputs()[0]
+    let warm = 20
+    let frames = 240
+    var n = 0
+    var step = 0
+    d.timer(1, 0)
+    d.timer(10000, 1)
+    var timed_out = false
+    while n < warm + frames and not timed_out {
+        guard let Some(e) = d.next().expect("next") else {
+            break
+        }
+        match e {
+            Frame => {
+                n += 1
+                if n == warm {
+                    d.reset_stats()
+                }
+            }
+            Timer(k) => {
+                if k == 1 {
+                    timed_out = true
+                } else {
+                    step += 1
+                    let x = f64(step % 1000)
+                    d.layout(fn(mut l) {
+                        for i in 0..49 {
+                            l.image(imgs[i], f64((i % 10) * 120), f64((i / 10) * 140), 200.0, 150.0, lum.Style { radius: 0.0, shadow: 16.0 })
+                        }
+                        l.image(imgs[49], x, 300.0, 200.0, 150.0, lum.Style { radius: 0.0, shadow: 16.0 })
+                    })
+                    d.inject(lum.types.Input.MotionAbsolute(u32(step), 0, (x + 100.0) / 1280.0, 375.0 / 720.0))
+                    d.timer(1, 0)
+                }
+            }
+            _ => d.accept(e)
+        }
+    }
+    let s = d.stats(so)
+    let p50_us = stats.percentile(s.frame_ns, 50) / 1000
+    let p95_us = stats.percentile(s.frame_ns, 95) / 1000
+    let p99_us = stats.percentile(s.frame_ns, 99) / 1000
+    let int_p99_us = stats.percentile(s.intervals, 99) / 1000
+    io.print("bench 240Hz GPU (50 windows, 1000Hz drag): frames={s.frames} p50={p50_us}us p95={p95_us}us p99={p99_us}us interval_p99={int_p99_us}us missed={s.missed}")
+    assert(not timed_out)
+    assert(s.frames >= frames - 2)
+    assert_eq(s.failed, 0)
+    // Strict performance gates: layout < 50us, springs < 50us, overlay < 20ms, frame p99 < 10ms.
+    assert(lay_ns < 50000)
+    assert(anim_ns < 50000)
+    assert(ov_us < 20000)
+    assert(p99_us < 10000)
+    // 5. Dual-Kawase frosted-glass blur + GPU SDF square border frame latency (1280x720, 4 translucent windows).
+    let blur_sheet = ren.EffectSheet.new()
+    var br = ren.PastelRenderer.open(false, blur_sheet.clone()).expect("blur renderer")
+    br.add_output(0, 1280, 720, vec4(0.118, 0.125, 0.157, 1.0))
+    let bts = br.targets(lum.types.Want { width: 1280, height: 720, format: lum.types.buffer.xrgb8888, count: 1, export: false }).expect("blur target")
+    let btkey = bts[0].key
+    var wpx: List[u8] = []
+    for _ in 0..320 * 320 {
+        wpx.push(40)
+        wpx.push(60)
+        wpx.push(90)
+        wpx.push(210)
+    }
+    var bps: List[lum.types.Placement] = []
+    var befs: List[ren.WindowEffect] = []
+    for i in 0..4 {
+        let k = (u64(1) << 63) | u64(i + 10)
+        assert(br.image(k, 320, 320, lum.types.buffer.abgr8888, wpx, 320 * 4))
+        let x = f32(40 + i * 300)
+        bps.push(lum.types.Placement { key: k, tex: k, x, y: 120.0, w: 320.0, h: 480.0, opacity: 0.85 })
+        befs.push(ren.WindowEffect {
+            key: k,
+            x,
+            y: 120.0,
+            w: 320.0,
+            h: 480.0,
+            radius: 0.0,
+            border_width: 2.0,
+            border_color: vec4(0.651, 0.784, 1.0, 1.0),
+            shadow_size: 18.0,
+            shadow_color: vec4(0.0, 0.0, 0.0, 0.376),
+            blur: true,
+            blur_xray: true,
+            blur_opacity: 0.85,
+            is_overlay: false,
+        })
+    }
+    blur_sheet.set_output(0, core.Color.rgb(0.118, 0.125, 0.157), ren.BlurSettings { enabled: true, xray: true, passes: 2, offset: 2.0 }, befs.clone())
+    br.layout(0, bps)
+    // Warmup + measure 60 frames with X-Ray Dual-Kawase blur + SDF borders
+    for _ in 0..5 {
+        br.damage_all()
+        discard br.render(0, btkey, 0).expect("warm blur")
+    }
+    let t_bx0 = time.now_ns()
+    for _ in 0..60 {
+        br.damage_all()
+        let fd = br.render(0, btkey, 0).expect("xray blur")
+        if let Some(f) = fd {
+            if f >= 0 {
+                os.close(f)
+            }
+        }
+    }
+    let bx_us = (time.now_ns() - t_bx0) / (60 * 1000)
+    // Measure 60 frames with Live Dual-Kawase blur + SDF borders
+    blur_sheet.set_output(0, core.Color.rgb(0.118, 0.125, 0.157), ren.BlurSettings { enabled: true, xray: false, passes: 2, offset: 2.0 }, befs)
+    br.layout(0, bps)
+    let t_bl0 = time.now_ns()
+    for _ in 0..60 {
+        br.damage_all()
+        let fd = br.render(0, btkey, 0).expect("live blur")
+        if let Some(f) = fd {
+            if f >= 0 {
+                os.close(f)
+            }
+        }
+    }
+    let bl_us = (time.now_ns() - t_bl0) / (60 * 1000)
+    io.print("bench 1280x720 SDF borders + Dual-Kawase blur (4 windows): xray={bx_us}us/frame live={bl_us}us/frame")
+    br.drop_target(btkey)
+    br.close()
+
+    for img in imgs {
+        d.drop_image(img)
+    }
+}

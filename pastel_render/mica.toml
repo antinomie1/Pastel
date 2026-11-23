@@ -1,0 +1,14 @@
+[package]
+name = "pastel_render"
+version = "0.1.0"
+description = "Pluggable Vulkan renderer with Dual-Kawase blur, GPU SDF borders, hotkey overlay, and animation state for Pastel"
+license = "BSD-2-Clause"
+
+[dependencies]
+pastel_core = { workspace = true }
+pastel_config = { workspace = true }
+luminaria_types = { workspace = true }
+luminaria_compose = { workspace = true }
+vk_gpu = { workspace = true }
+vk_draw2d = { workspace = true }
+vk_compose = { workspace = true }

@@ -1,0 +1,72 @@
+import pastel_core as core
+
+test "geometry intersection and inset" {
+    let a = core.Rect.new(10.0, 20.0, 100.0, 80.0)
+    let b = core.Rect.new(60.0, 50.0, 100.0, 80.0)
+    assert(a.overlaps(b))
+    let inter = a.intersect(b)
+    assert_eq(inter.x, 60.0)
+    assert_eq(inter.y, 50.0)
+    assert_eq(inter.w, 50.0)
+    assert_eq(inter.h, 50.0)
+    let ins = a.inset(5.0)
+    assert_eq(ins.w, 90.0)
+    assert_eq(ins.h, 70.0)
+}
+
+test "hex color parsing and premultiplication" {
+    let c = core.Color.from_hex("#a6c8ff").expect("valid hex")
+    assert((c.r - 166.0 / 255.0).abs() < 0.001)
+    assert((c.g - 200.0 / 255.0).abs() < 0.001)
+    assert((c.b - 1.0).abs() < 0.001)
+    assert_eq(c.a, 1.0)
+    let c2 = core.Color.from_hex("#ff000080").expect("valid rgba")
+    assert(c2.a > 0.49 and c2.a < 0.51)
+    let pm = c2.premul()
+    assert(pm.x > 0.49 and pm.x < 0.51)
+    assert(core.Color.from_hex("#zz").is_err())
+}
+
+test "analytical spring settles and preserves momentum on retarget" {
+    var a = core.Anim.new(0.0)
+    let sp = core.CurveSpec.spring(800.0, 1.0)
+    a.retarget(500.0, sp, 0, true, 1.0)
+    assert(a.active)
+    // Mid-flight at 40 ms: moving positively with positive velocity.
+    let (p1, v1) = a.sample(40000000)
+    assert(p1 > 50.0 and p1 < 490.0)
+    assert(v1 > 100.0)
+    // Retarget mid-flight to 1000.0: velocity is preserved!
+    a.retarget(1000.0, sp, 40000000, true, 1.0)
+    assert((a.x0 - p1).abs() < 1e-6)
+    assert((a.v0 - v1).abs() < 1e-6)
+    // Settles cleanly well within 1 second.
+    let end = a.tick(1000000000)
+    assert_eq(end, 1000.0)
+    assert(not a.active)
+}
+
+test "timed ease and slowdown" {
+    var a = core.Anim.unit(0.0)
+    let ea = core.CurveSpec.ease(100.0, core.EaseKind.OutCubic)
+    a.retarget(1.0, ea, 0, true, 2.0)
+    // With slowdown = 2.0, duration is 200 ms; at 100 ms we are at t = 0.5 -> 1 - 0.125 = 0.875.
+    let v = a.tick(100000000)
+    assert((v - 0.875).abs() < 0.001)
+    assert(a.active)
+    let end = a.tick(200000000)
+    assert_eq(end, 1.0)
+    assert(not a.active)
+}
+
+test "color animation smoothly interpolates" {
+    let c0 = core.Color.from_hex("#000000").unwrap()
+    let c1 = core.Color.from_hex("#ffffff").unwrap()
+    var ac = core.AnimColor.new(c0)
+    ac.retarget(c1, core.CurveSpec.ease(100.0, core.EaseKind.Linear), 0, true, 1.0)
+    let mid = ac.tick(50000000)
+    assert((mid.r - 0.5).abs() < 0.01)
+    let end = ac.tick(100000000)
+    assert_eq(end.r, 1.0)
+    assert(not ac.is_active())
+}

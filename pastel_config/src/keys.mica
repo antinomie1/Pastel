@@ -1,0 +1,296 @@
+// Keysym name lookup, Mod+Key parsing, default bindings, and event matching.
+
+import action
+import schema
+
+/// Normalized modifier flags for a keybinding.
+pub struct ModMask {
+    pub uses_mod: bool = false
+    pub shift: bool = false
+    pub ctrl: bool = false
+    pub alt: bool = false
+    pub logo: bool = false
+}
+
+/// A parsed key combination.
+pub struct KeyCombo {
+    pub mods: ModMask = ModMask {}
+    pub sym: u32 = 0
+    /// Canonical display string for the hotkey overlay (e.g. `Mod+Shift+/`).
+    pub display: str = ""
+}
+
+/// A single keybinding mapping a key combination to an Action.
+pub struct Binding {
+    pub combo: KeyCombo
+    pub act: action.Action
+}
+
+/// Map a key name (case-insensitive for named keys, case-sensitive for single letters)
+/// to its XKB keysym value.
+pub fn name_to_sym(raw: str) -> Option[u32] {
+    let s = raw.trim()
+    guard not s.is_empty() else {
+        return None
+    }
+    if s.len() == 1 {
+        let b = s[0]
+        // Letters normalize to lowercase XKB keysym (Shift is tracked via modifiers).
+        if b >= 65 and b <= 90 {
+            return Some(u32(b + 32))
+        }
+        if b >= 32 and b <= 126 {
+            return Some(u32(b))
+        }
+    }
+    let lo = s.to_lower()
+    return match lo {
+        "return" or "enter" => Some(u32(0xff0d))
+        "escape" or "esc" => Some(u32(0xff1b))
+        "tab" => Some(u32(0xff09))
+        "space" => Some(u32(0x0020))
+        "backspace" => Some(u32(0xff08))
+        "delete" or "del" => Some(u32(0xffff))
+        "left" => Some(u32(0xff51))
+        "up" => Some(u32(0xff52))
+        "right" => Some(u32(0xff53))
+        "down" => Some(u32(0xff54))
+        "home" => Some(u32(0xff50))
+        "end" => Some(u32(0xff57))
+        "page_up" or "pageup" or "prior" => Some(u32(0xff55))
+        "page_down" or "pagedown" or "next" => Some(u32(0xff56))
+        "slash" => Some(u32(0x002f))
+        "question" => Some(u32(0x003f))
+        "bracketleft" => Some(u32(0x005b))
+        "bracketright" => Some(u32(0x005d))
+        "minus" => Some(u32(0x002d))
+        "equal" => Some(u32(0x003d))
+        "plus" => Some(u32(0x002b))
+        "comma" => Some(u32(0x002c))
+        "period" => Some(u32(0x002e))
+        "semicolon" => Some(u32(0x003b))
+        "grave" => Some(u32(0x0060))
+        "f1" => Some(u32(0xffbe))
+        "f2" => Some(u32(0xffbf))
+        "f3" => Some(u32(0xffc0))
+        "f4" => Some(u32(0xffc1))
+        "f5" => Some(u32(0xffc2))
+        "f6" => Some(u32(0xffc3))
+        "f7" => Some(u32(0xffc4))
+        "f8" => Some(u32(0xffc5))
+        "f9" => Some(u32(0xffc6))
+        "f10" => Some(u32(0xffc7))
+        "f11" => Some(u32(0xffc8))
+        "f12" => Some(u32(0xffc9))
+        "xf86audioraisevolume" => Some(u32(0x1008ff13))
+        "xf86audiolowervolume" => Some(u32(0x1008ff11))
+        "xf86audiomute" => Some(u32(0x1008ff12))
+        "xf86monbrightnessup" => Some(u32(0x1008ff02))
+        "xf86monbrightnessdown" => Some(u32(0x1008ff03))
+        "print" => Some(u32(0xff61))
+        _ => None
+    }
+}
+
+/// Normalize shifted XKB keysyms back to their base key so `Mod+Shift+/` matches `?`
+/// and `Mod+Shift+1` matches `!`, regardless of keyboard shift translation.
+pub fn normalize_sym(sym: u32) -> u32 {
+    if sym >= 65 and sym <= 90 {
+        return sym + 32
+    }
+    return match sym {
+        63 => u32(0x002f) // ? -> /
+        33 => u32(0x0031) // ! -> 1
+        64 => u32(0x0032) // @ -> 2
+        35 => u32(0x0033) // # -> 3
+        36 => u32(0x0034) // $ -> 4
+        37 => u32(0x0035) // % -> 5
+        94 => u32(0x0036) // ^ -> 6
+        38 => u32(0x0037) // & -> 7
+        42 => u32(0x0038) // * -> 8
+        40 => u32(0x0039) // ( -> 9
+        41 => u32(0x0030) // ) -> 0
+        123 => u32(0x005b) // { -> [
+        125 => u32(0x005d) // } -> ]
+        95 => u32(0x002d) // _ -> -
+        43 => u32(0x003d) // + -> =
+        65056 => u32(0xff09) // ISO_Left_Tab -> Tab
+        _ => sym
+    }
+}
+
+/// Parse a key combination string such as `"Mod+Shift+/"` or `"Mod+Return"`.
+pub fn KeyCombo.parse(spec: str) -> Result[KeyCombo, str] {
+    let trimmed = spec.trim()
+    guard not trimmed.is_empty() else {
+        return Err("empty key specification")
+    }
+    let parts = trimmed.split("+")
+    var mods = ModMask {}
+    var sym: u32 = 0
+    var key_name = ""
+    for i, raw in parts {
+        let p = raw.trim()
+        if i < parts.len() - 1 {
+            match p.to_lower() {
+                "mod" => mods.uses_mod = true
+                "shift" => mods.shift = true
+                "ctrl" or "control" => mods.ctrl = true
+                "alt" => mods.alt = true
+                "super" or "logo" or "meta" => mods.logo = true
+                _ => { return Err("unknown modifier '{p}' in key spec '{spec}'") }
+            }
+        } else {
+            guard let Some(s) = name_to_sym(p) else {
+                return Err("unknown key '{p}' in key spec '{spec}'")
+            }
+            sym = normalize_sym(s)
+            key_name = p
+        }
+    }
+    // Canonical display label
+    var disp = ""
+    if mods.uses_mod {
+        disp += "Mod+"
+    }
+    if mods.ctrl {
+        disp += "Ctrl+"
+    }
+    if mods.alt {
+        disp += "Alt+"
+    }
+    if mods.logo {
+        disp += "Super+"
+    }
+    if mods.shift {
+        disp += "Shift+"
+    }
+    disp += if key_name.len() == 1 { key_name.to_upper() } else { key_name }
+    return Ok(KeyCombo { mods, sym, display: disp })
+}
+
+/// Format this combo for the hotkey overlay with the active `Mod` resolved
+/// (e.g. `"Super + Return"` on DRM, `"Alt + Shift + /"` when nested).
+pub fn KeyCombo.format_for(self, effective_mod: schema.ModKey) -> str {
+    var parts: List[str] = []
+    var has_ctrl = self.mods.ctrl
+    var has_alt = self.mods.alt
+    var has_logo = self.mods.logo
+    if self.mods.uses_mod {
+        match effective_mod {
+            Super => has_logo = true
+            Alt => has_alt = true
+            Ctrl => has_ctrl = true
+        }
+    }
+    if has_logo {
+        parts.push("Super")
+    }
+    if has_ctrl {
+        parts.push("Ctrl")
+    }
+    if has_alt {
+        parts.push("Alt")
+    }
+    if self.mods.shift {
+        parts.push("Shift")
+    }
+    // Extract base key name from canonical `display`.
+    let segs = self.display.split("+")
+    let key = if segs.is_empty() { self.display.clone() } else { segs[segs.len() - 1].clone() }
+    parts.push(key)
+    var out = ""
+    for i, p in parts {
+        if i > 0 {
+            out += " + "
+        }
+        out += p
+    }
+    return out
+}
+
+/// Whether two key combos represent the same logical binding.
+pub fn KeyCombo.same(self, other: KeyCombo) -> bool {
+    return self.sym == other.sym and self.mods == other.mods
+}
+
+/// Match an incoming key press against this combo under the active `effective_mod`.
+pub fn KeyCombo.matches(self, sym: u32, shift: bool, ctrl: bool, alt: bool, logo: bool, effective_mod: schema.ModKey) -> bool {
+    guard normalize_sym(sym) == self.sym else {
+        return false
+    }
+    var want_shift = self.mods.shift
+    var want_ctrl = self.mods.ctrl
+    var want_alt = self.mods.alt
+    var want_logo = self.mods.logo
+    if self.mods.uses_mod {
+        match effective_mod {
+            Super => want_logo = true
+            Alt => want_alt = true
+            Ctrl => want_ctrl = true
+        }
+    }
+    return shift == want_shift and ctrl == want_ctrl and alt == want_alt and logo == want_logo
+}
+
+fn bind(spec: str, take act: action.Action) -> Binding {
+    return Binding { combo: KeyCombo.parse(spec).unwrap(), act }
+}
+
+/// Complete niri-style default keybinding table.
+pub fn default_bindings() -> List[Binding] {
+    return [
+        bind("Mod+Shift+/", action.Action.ToggleHotkeyOverlay),
+        bind("Mod+Return", action.Action.Spawn("foot")),
+        bind("Mod+D", action.Action.Spawn("fuzzel")),
+        bind("Mod+Q", action.Action.CloseWindow),
+        bind("Mod+H", action.Action.FocusColumnLeft),
+        bind("Mod+L", action.Action.FocusColumnRight),
+        bind("Mod+Left", action.Action.FocusColumnLeft),
+        bind("Mod+Right", action.Action.FocusColumnRight),
+        bind("Mod+J", action.Action.FocusWindowDown),
+        bind("Mod+K", action.Action.FocusWindowUp),
+        bind("Mod+Down", action.Action.FocusWindowDown),
+        bind("Mod+Up", action.Action.FocusWindowUp),
+        bind("Mod+Home", action.Action.FocusColumnFirst),
+        bind("Mod+End", action.Action.FocusColumnLast),
+        bind("Mod+Shift+H", action.Action.MoveColumnLeft),
+        bind("Mod+Shift+L", action.Action.MoveColumnRight),
+        bind("Mod+Shift+J", action.Action.MoveWindowDown),
+        bind("Mod+Shift+K", action.Action.MoveWindowUp),
+        bind("Mod+[", action.Action.ConsumeIntoColumn),
+        bind("Mod+]", action.Action.ExpelFromColumn),
+        bind("Mod+R", action.Action.CyclePresetWidth),
+        bind("Mod+Minus", action.Action.AdjustColumnWidth(-0.1)),
+        bind("Mod+Equal", action.Action.AdjustColumnWidth(0.1)),
+        bind("Mod+F", action.Action.MaximizeColumn),
+        bind("Mod+C", action.Action.CenterColumn),
+        bind("Mod+Shift+F", action.Action.ToggleFullscreen),
+        bind("Mod+V", action.Action.ToggleFloating),
+        bind("Mod+Shift+V", action.Action.SwitchFocusFloating),
+        bind("Mod+U", action.Action.FocusWorkspaceUp),
+        bind("Mod+I", action.Action.FocusWorkspaceDown),
+        bind("Mod+Shift+U", action.Action.MoveWindowToWorkspaceUp),
+        bind("Mod+Shift+I", action.Action.MoveWindowToWorkspaceDown),
+        bind("Mod+1", action.Action.FocusWorkspace(1)),
+        bind("Mod+2", action.Action.FocusWorkspace(2)),
+        bind("Mod+3", action.Action.FocusWorkspace(3)),
+        bind("Mod+4", action.Action.FocusWorkspace(4)),
+        bind("Mod+5", action.Action.FocusWorkspace(5)),
+        bind("Mod+6", action.Action.FocusWorkspace(6)),
+        bind("Mod+7", action.Action.FocusWorkspace(7)),
+        bind("Mod+8", action.Action.FocusWorkspace(8)),
+        bind("Mod+9", action.Action.FocusWorkspace(9)),
+        bind("Mod+Shift+1", action.Action.MoveWindowToWorkspace(1)),
+        bind("Mod+Shift+2", action.Action.MoveWindowToWorkspace(2)),
+        bind("Mod+Shift+3", action.Action.MoveWindowToWorkspace(3)),
+        bind("Mod+Shift+4", action.Action.MoveWindowToWorkspace(4)),
+        bind("Mod+Shift+5", action.Action.MoveWindowToWorkspace(5)),
+        bind("Mod+Shift+6", action.Action.MoveWindowToWorkspace(6)),
+        bind("Mod+Shift+7", action.Action.MoveWindowToWorkspace(7)),
+        bind("Mod+Shift+8", action.Action.MoveWindowToWorkspace(8)),
+        bind("Mod+Shift+9", action.Action.MoveWindowToWorkspace(9)),
+        bind("Mod+Shift+R", action.Action.ReloadConfig),
+        bind("Mod+Shift+E", action.Action.Quit),
+    ]
+}

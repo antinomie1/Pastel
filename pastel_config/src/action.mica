@@ -1,0 +1,222 @@
+// Action enum, parser, human-readable overlay labels, and --list-actions registry.
+
+/// Every bindable and IPC-dispatchable compositor action.
+pub enum Action {
+    Noop
+    Quit
+    ReloadConfig
+    ToggleHotkeyOverlay
+    CloseWindow
+    FocusColumnLeft
+    FocusColumnRight
+    FocusColumnFirst
+    FocusColumnLast
+    FocusWindowDown
+    FocusWindowUp
+    MoveColumnLeft
+    MoveColumnRight
+    MoveWindowDown
+    MoveWindowUp
+    ConsumeIntoColumn
+    ExpelFromColumn
+    CyclePresetWidth
+    SetColumnWidth(f64)
+    AdjustColumnWidth(f64)
+    MaximizeColumn
+    CenterColumn
+    ToggleFullscreen
+    ToggleFloating
+    SwitchFocusFloating
+    FocusWorkspace(int)
+    FocusWorkspaceUp
+    FocusWorkspaceDown
+    MoveWindowToWorkspace(int)
+    MoveWindowToWorkspaceUp
+    MoveWindowToWorkspaceDown
+    FocusMonitorLeft
+    FocusMonitorRight
+    MoveWindowToMonitorLeft
+    MoveWindowToMonitorRight
+    Spawn(str)
+}
+
+/// Parse an action string from `[binds]` or `pastel msg <action>`.
+pub fn Action.parse(raw: str) -> Result[Action, str] {
+    let s = raw.trim()
+    guard not s.is_empty() else {
+        return Err("empty action")
+    }
+    if s.starts_with("spawn ") {
+        let cmd = s.slice(6, s.len()).trim()
+        guard not cmd.is_empty() else {
+            return Err("spawn requires a command")
+        }
+        return Ok(Action.Spawn(cmd))
+    }
+    if s.starts_with("focus-workspace ") {
+        let arg = s.slice(16, s.len()).trim()
+        guard let Some(n) = arg.to_int() else {
+            return Err("invalid workspace index '{arg}'")
+        }
+        guard n >= 1 and n <= 99 else {
+            return Err("workspace index must be between 1 and 99")
+        }
+        return Ok(Action.FocusWorkspace(n))
+    }
+    if s.starts_with("move-window-to-workspace ") {
+        let arg = s.slice(25, s.len()).trim()
+        guard let Some(n) = arg.to_int() else {
+            return Err("invalid workspace index '{arg}'")
+        }
+        guard n >= 1 and n <= 99 else {
+            return Err("workspace index must be between 1 and 99")
+        }
+        return Ok(Action.MoveWindowToWorkspace(n))
+    }
+    if s.starts_with("set-column-width ") {
+        let arg = s.slice(17, s.len()).trim()
+        guard let Some(v) = arg.to_float() else {
+            return Err("invalid width '{arg}'")
+        }
+        guard v >= 0.1 and v <= 1.0 else {
+            return Err("column width fraction must be in 0.1..1.0")
+        }
+        return Ok(Action.SetColumnWidth(v))
+    }
+    if s.starts_with("adjust-column-width ") {
+        let arg = s.slice(20, s.len()).trim()
+        guard let Some(v) = arg.to_float() else {
+            return Err("invalid width delta '{arg}'")
+        }
+        return Ok(Action.AdjustColumnWidth(v))
+    }
+    return match s {
+        "none" => Ok(Action.Noop)
+        "quit" => Ok(Action.Quit)
+        "reload-config" => Ok(Action.ReloadConfig)
+        "toggle-hotkey-overlay" => Ok(Action.ToggleHotkeyOverlay)
+        "close-window" => Ok(Action.CloseWindow)
+        "focus-column-left" => Ok(Action.FocusColumnLeft)
+        "focus-column-right" => Ok(Action.FocusColumnRight)
+        "focus-column-first" => Ok(Action.FocusColumnFirst)
+        "focus-column-last" => Ok(Action.FocusColumnLast)
+        "focus-window-down" => Ok(Action.FocusWindowDown)
+        "focus-window-up" => Ok(Action.FocusWindowUp)
+        "move-column-left" => Ok(Action.MoveColumnLeft)
+        "move-column-right" => Ok(Action.MoveColumnRight)
+        "move-window-down" => Ok(Action.MoveWindowDown)
+        "move-window-up" => Ok(Action.MoveWindowUp)
+        "consume-into-column" => Ok(Action.ConsumeIntoColumn)
+        "expel-from-column" => Ok(Action.ExpelFromColumn)
+        "cycle-preset-width" => Ok(Action.CyclePresetWidth)
+        "maximize-column" => Ok(Action.MaximizeColumn)
+        "center-column" => Ok(Action.CenterColumn)
+        "toggle-fullscreen" => Ok(Action.ToggleFullscreen)
+        "toggle-floating" => Ok(Action.ToggleFloating)
+        "switch-focus-floating" => Ok(Action.SwitchFocusFloating)
+        "focus-workspace-up" => Ok(Action.FocusWorkspaceUp)
+        "focus-workspace-down" => Ok(Action.FocusWorkspaceDown)
+        "move-window-to-workspace-up" => Ok(Action.MoveWindowToWorkspaceUp)
+        "move-window-to-workspace-down" => Ok(Action.MoveWindowToWorkspaceDown)
+        "focus-monitor-left" => Ok(Action.FocusMonitorLeft)
+        "focus-monitor-right" => Ok(Action.FocusMonitorRight)
+        "move-window-to-monitor-left" => Ok(Action.MoveWindowToMonitorLeft)
+        "move-window-to-monitor-right" => Ok(Action.MoveWindowToMonitorRight)
+        _ => Err("unknown action '{s}' (run `pastel --list-actions` for valid actions)")
+    }
+}
+
+/// Overlay section category matching Pastel's clean 4-section grouping.
+pub fn Action.category(self) -> str {
+    return match self {
+        CloseWindow or FocusWindowDown or FocusWindowUp or MoveWindowDown or MoveWindowUp or ToggleFullscreen or ToggleFloating or SwitchFocusFloating => "Windows"
+        FocusColumnLeft or FocusColumnRight or FocusColumnFirst or FocusColumnLast or MoveColumnLeft or MoveColumnRight or ConsumeIntoColumn or ExpelFromColumn or CyclePresetWidth or SetColumnWidth or AdjustColumnWidth or MaximizeColumn or CenterColumn => "Columns"
+        FocusWorkspace or FocusWorkspaceUp or FocusWorkspaceDown or MoveWindowToWorkspace or MoveWindowToWorkspaceUp or MoveWindowToWorkspaceDown or FocusMonitorLeft or FocusMonitorRight or MoveWindowToMonitorLeft or MoveWindowToMonitorRight => "Workspaces"
+        Spawn or ToggleHotkeyOverlay or ReloadConfig or Quit => "Session"
+        Noop => ""
+    }
+}
+
+/// Short human-readable description shown in the hotkey overlay.
+pub fn Action.label(self) -> str {
+    return match self {
+        Noop => "None"
+        Quit => "Quit"
+        ReloadConfig => "Reload config"
+        ToggleHotkeyOverlay => "Hotkeys"
+        CloseWindow => "Close window"
+        FocusColumnLeft => "Focus left"
+        FocusColumnRight => "Focus right"
+        FocusColumnFirst => "Focus first column"
+        FocusColumnLast => "Focus last column"
+        FocusWindowDown => "Focus down"
+        FocusWindowUp => "Focus up"
+        MoveColumnLeft => "Move column left"
+        MoveColumnRight => "Move column right"
+        MoveWindowDown => "Move window down"
+        MoveWindowUp => "Move window up"
+        ConsumeIntoColumn => "Join column"
+        ExpelFromColumn => "Expel from column"
+        CyclePresetWidth => "Cycle width"
+        SetColumnWidth(v) => "Set width {v}"
+        AdjustColumnWidth(v) => if v < 0.0 { "Shrink width" } else { "Grow width" }
+        MaximizeColumn => "Maximize column"
+        CenterColumn => "Center column"
+        ToggleFullscreen => "Fullscreen"
+        ToggleFloating => "Toggle floating"
+        SwitchFocusFloating => "Focus float / tile"
+        FocusWorkspace(n) => "Workspace {n}"
+        FocusWorkspaceUp => "Workspace up"
+        FocusWorkspaceDown => "Workspace down"
+        MoveWindowToWorkspace(n) => "Move to ws {n}"
+        MoveWindowToWorkspaceUp => "Move to ws up"
+        MoveWindowToWorkspaceDown => "Move to ws down"
+        FocusMonitorLeft => "Focus monitor left"
+        FocusMonitorRight => "Focus monitor right"
+        MoveWindowToMonitorLeft => "Move to monitor left"
+        MoveWindowToMonitorRight => "Move to monitor right"
+        Spawn(cmd) => "Launch {cmd}"
+    }
+}
+
+/// Complete list of `(action_syntax, description)` for `pastel --list-actions`.
+pub fn all_actions() -> List[(str, str)] {
+    return [
+        ("none", "Unbind a default shortcut"),
+        ("quit", "Quit Pastel"),
+        ("reload-config", "Reload configuration file live"),
+        ("toggle-hotkey-overlay", "Show or hide the hotkey overlay"),
+        ("close-window", "Close the focused window"),
+        ("focus-column-left", "Focus the column to the left"),
+        ("focus-column-right", "Focus the column to the right"),
+        ("focus-column-first", "Focus the first column"),
+        ("focus-column-last", "Focus the last column"),
+        ("focus-window-down", "Focus the window below in the column"),
+        ("focus-window-up", "Focus the window above in the column"),
+        ("move-column-left", "Move the focused column left"),
+        ("move-column-right", "Move the focused column right"),
+        ("move-window-down", "Move the focused window down"),
+        ("move-window-up", "Move the focused window up"),
+        ("consume-into-column", "Pull focused window into adjacent column"),
+        ("expel-from-column", "Expel focused window into a new column"),
+        ("cycle-preset-width", "Cycle through layout.preset-widths"),
+        ("set-column-width <0.1..1.0>", "Set focused column width fraction"),
+        ("adjust-column-width <delta>", "Adjust focused column width fraction"),
+        ("maximize-column", "Toggle full-width column maximization"),
+        ("center-column", "Center the focused column in the viewport"),
+        ("toggle-fullscreen", "Toggle fullscreen on the focused window"),
+        ("toggle-floating", "Toggle floating state on the focused window"),
+        ("switch-focus-floating", "Switch focus between floating and tiled layers"),
+        ("focus-workspace <1..99>", "Focus workspace by 1-based index"),
+        ("focus-workspace-up", "Focus previous workspace"),
+        ("focus-workspace-down", "Focus next workspace"),
+        ("move-window-to-workspace <1..99>", "Move focused window to workspace"),
+        ("move-window-to-workspace-up", "Move focused window to previous workspace"),
+        ("move-window-to-workspace-down", "Move focused window to next workspace"),
+        ("focus-monitor-left", "Focus monitor to the left"),
+        ("focus-monitor-right", "Focus monitor to the right"),
+        ("move-window-to-monitor-left", "Move focused window to left monitor"),
+        ("move-window-to-monitor-right", "Move focused window to right monitor"),
+        ("spawn <command>", "Spawn a shell command with WAYLAND_DISPLAY"),
+    ]
+}

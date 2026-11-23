@@ -1,0 +1,194 @@
+// Non-blocking Unix domain socket JSON-lines IPC server.
+// Integrates with luminaria's `Display.watch(fd, token)` — zero extra threads.
+
+import std.fs
+import std.net
+import std.json
+
+/// Decoded IPC client request.
+pub enum Request {
+    Action(str)
+    State
+    Subscribe
+}
+
+pub fn decode_request(line: str) -> Result[Request, str] {
+    let v = try json.parse(line)
+    guard let Some(cmd) = v.get_str("cmd") else {
+        return Err("missing 'cmd' field")
+    }
+    match cmd {
+        "action" => {
+            guard let Some(act) = v.get_str("action") else {
+                return Err("missing 'action' field")
+            }
+            return Ok(Request.Action(act))
+        }
+        "state" => {
+            return Ok(Request.State)
+        }
+        "subscribe" => {
+            return Ok(Request.Subscribe)
+        }
+        _ => {
+            return Err("unknown cmd '{cmd}'")
+        }
+    }
+}
+
+pub fn encode_ok() -> str {
+    return json.encode(json.obj().with("ok", json.Value.Bool(true))) + "\n"
+}
+
+pub fn encode_err(msg: str) -> str {
+    let v = json.obj().with("ok", json.Value.Bool(false)).with("error", json.Value.Str(msg.clone()))
+    return json.encode(v) + "\n"
+}
+
+pub fn encode_event(kind: str, take detail: json.Value) -> str {
+    let v = json.obj().with("event", json.Value.Str(kind.clone())).with("data", detail)
+    return json.encode(v) + "\n"
+}
+
+struct Peer {
+    conn: net.Conn
+    buf: str = ""
+    subscribed: bool = false
+}
+
+/// Non-blocking Unix socket IPC server.
+pub struct IpcServer {
+    pub path: str
+    listener: net.Listener
+    peers: List[Peer] = []
+}
+
+pub fn IpcServer.open(sock_path: str) -> Result[IpcServer, str] {
+    if fs.exists(sock_path) {
+        discard fs.remove(sock_path)
+    }
+    let listener = try net.unix_listen(sock_path).map_err(fn(e) => "ipc listen '{sock_path}': {e}")
+    discard listener.set_nonblocking(true)
+    return Ok(IpcServer { path: sock_path.clone(), listener })
+}
+
+pub fn IpcServer.fd(self) -> int {
+    return self.listener.fd
+}
+
+/// Accept all queued non-blocking connections, returning their file descriptors for `Display.watch`.
+pub fn IpcServer.accept_all(mut self) -> List[int] {
+    var fds: List[int] = []
+    while true {
+        match self.listener.accept() {
+            Ok(conn) => {
+                discard conn.set_nonblocking(true)
+                let fd = conn.fd
+                self.peers.push(Peer { conn })
+                fds.push(fd)
+            }
+            Err => {
+                break
+            }
+        }
+    }
+    return fds
+}
+
+fn IpcServer.find_peer(self, fd: int) -> int {
+    for i, p in self.peers {
+        if p.conn.fd == fd {
+            return i
+        }
+    }
+    return -1
+}
+
+/// Read available lines from peer `fd`. Returns `(lines, closed)`.
+pub fn IpcServer.read_lines(mut self, fd: int) -> (List[str], bool) {
+    let i = self.find_peer(fd)
+    guard i >= 0 else {
+        return ([], true)
+    }
+    var closed = false
+    while true {
+        match self.peers[i].conn.read(4096) {
+            Ok(chunk) => {
+                if chunk.is_empty() {
+                    closed = true
+                    break
+                }
+                self.peers[i].buf += chunk
+                if self.peers[i].buf.len() > 65536 {
+                    closed = true
+                    break
+                }
+            }
+            Err => {
+                break
+            }
+        }
+    }
+    var out: List[str] = []
+    while true {
+        guard let Some(nl) = self.peers[i].buf.find("\n") else {
+            break
+        }
+        let line = self.peers[i].buf.slice(0, nl).trim()
+        self.peers[i].buf = self.peers[i].buf.slice(nl + 1, self.peers[i].buf.len())
+        if not line.is_empty() {
+            out.push(line)
+        }
+    }
+    return (out, closed)
+}
+
+pub fn IpcServer.mark_subscribed(mut self, fd: int) {
+    let i = self.find_peer(fd)
+    if i >= 0 {
+        self.peers[i].subscribed = true
+    }
+}
+
+pub fn IpcServer.send(mut self, fd: int, payload: str) -> bool {
+    let i = self.find_peer(fd)
+    guard i >= 0 else {
+        return false
+    }
+    return self.peers[i].conn.write(payload).is_ok()
+}
+
+/// Broadcast a JSON-line event to all subscribed peers, returning fds of disconnected peers.
+pub fn IpcServer.broadcast(mut self, payload: str) -> List[int] {
+    var dropped: List[int] = []
+    for i in 0..self.peers.len() {
+        if self.peers[i].subscribed {
+            if self.peers[i].conn.write(payload).is_err() {
+                dropped.push(self.peers[i].conn.fd)
+            }
+        }
+    }
+    for fd in dropped {
+        self.disconnect(fd)
+    }
+    return dropped
+}
+
+pub fn IpcServer.disconnect(mut self, fd: int) {
+    let i = self.find_peer(fd)
+    if i >= 0 {
+        let p = self.peers.remove(i)
+        p.conn.close()
+    }
+}
+
+pub fn IpcServer.close(mut self) {
+    for p in self.peers {
+        p.conn.close()
+    }
+    self.peers.clear()
+    self.listener.close()
+    if not self.path.is_empty() and fs.exists(self.path) {
+        discard fs.remove(self.path)
+    }
+}

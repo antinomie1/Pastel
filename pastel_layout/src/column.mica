@@ -1,0 +1,67 @@
+// Column and vertical window-slot primitives for the scrolling strip.
+
+/// A single tiled window slot inside a column.
+pub struct WindowSlot {
+    pub id: u64
+    /// Relative vertical height weight within its column (default 1.0).
+    pub weight: f64 = 1.0
+}
+
+/// A vertical column holding one or more stacked windows.
+pub struct Column {
+    pub windows: List[WindowSlot] = []
+    /// Width as a fraction of the usable viewport width (0.1 .. 1.0).
+    pub width_frac: f64 = 0.5
+    /// Prior width remembered before toggling column maximize.
+    pub saved_width: f64 = 0.5
+    pub maximized: bool = false
+    /// Active window index within `windows`.
+    pub active_row: int = 0
+}
+
+pub fn Column.single(id: u64, width_frac: f64) -> Column {
+    let w = width_frac.clamp(0.1, 1.0)
+    return Column { windows: [WindowSlot { id }], width_frac: w, saved_width: w, maximized: false, active_row: 0 }
+}
+
+/// Compute column width in logical pixels from a viewport fraction so that `k`
+/// columns of width `1/k` plus all `(k + 1)` inner and outer gaps fit exactly
+/// inside `viewport_w` without clipping any window edge:
+///   `k * w + (k + 1) * gap = viewport_w  =>  w = floor(frac * (viewport_w - gap) - gap)`
+pub fn width_for_frac(viewport_w: f64, gap: f64, frac: f64) -> f64 {
+    let f = frac.clamp(0.1, 1.0)
+    let w = (f * (viewport_w - gap) - gap).floor()
+    return max(w, 64.0)
+}
+
+pub fn Column.effective_width(self, viewport_w: f64, gap: f64) -> f64 {
+    if self.maximized {
+        return width_for_frac(viewport_w, gap, 1.0)
+    }
+    return width_for_frac(viewport_w, gap, self.width_frac)
+}
+
+pub fn Column.active_id(self) -> Option[u64] {
+    guard not self.windows.is_empty() else {
+        return None
+    }
+    let idx = self.active_row.clamp(0, self.windows.len() - 1)
+    return Some(self.windows[idx].id)
+}
+
+pub fn Column.find(self, id: u64) -> int {
+    for i, slot in self.windows {
+        if slot.id == id {
+            return i
+        }
+    }
+    return -1
+}
+
+pub fn Column.total_weight(self) -> f64 {
+    var sum = 0.0
+    for slot in self.windows {
+        sum += max(slot.weight, 0.1)
+    }
+    return max(sum, 0.1)
+}

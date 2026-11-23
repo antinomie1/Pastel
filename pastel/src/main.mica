@@ -1,0 +1,188 @@
+// Pastel CLI entry point: compositor startup, --check, --list-actions, and `pastel msg`.
+
+import std.env
+import std.flag
+import std.io
+import std.signal
+import luminaria as lum
+import pastel_config as cfg
+import pastel_render as ren
+import pastel_ipc as ipc
+import compositor
+import reload
+
+fn run_msg(args: &[str]) -> int {
+    let sock = match ipc.discover_socket() {
+        Ok(s) => s
+        Err(e) => {
+            io.eprint("pastel msg: {e}")
+            return 1
+        }
+    }
+    guard not args.is_empty() else {
+        io.eprint("usage: pastel msg [--state | --subscribe | <action ...>]")
+        return 2
+    }
+    if args[0] == "--state" {
+        match ipc.client.query_state(sock) {
+            Ok(resp) => {
+                io.print(resp)
+                return 0
+            }
+            Err(e) => {
+                io.eprint("pastel msg: {e}")
+                return 1
+            }
+        }
+    }
+    if args[0] == "--subscribe" {
+        match ipc.client.subscribe(sock, fn(line: str) {
+            io.print(line)
+        }) {
+            Ok => { return 0 }
+            Err(e) => {
+                io.eprint("pastel msg: {e}")
+                return 1
+            }
+        }
+    }
+    var joined = ""
+    for i, a in args {
+        if i > 0 {
+            joined += " "
+        }
+        joined += a
+    }
+    match ipc.client.send_action(sock, joined) {
+        Ok(resp) => {
+            io.print(resp)
+            return 0
+        }
+        Err(e) => {
+            io.eprint("pastel msg: {e}")
+            return 1
+        }
+    }
+}
+
+fn parse_backend(name: str) -> Result[lum.Kind, str] {
+    return match name.trim().to_lower() {
+        "" or "auto" => Ok(lum.Kind.Auto)
+        "drm" => Ok(lum.Kind.Drm)
+        "nested" => Ok(lum.Kind.Nested)
+        "headless" => Ok(lum.Kind.Headless)
+        _ => Err("unknown backend '{name}' (expected auto, drm, nested, headless)")
+    }
+}
+
+fn run_compositor(cfg_path: str, backend_name: str, validation: bool, startup: str) -> Result[(), str] {
+    let config = try cfg.load(cfg_path)
+    let kind = try parse_backend(backend_name)
+    let is_nested = match kind {
+        Nested => true
+        Drm or Headless => false
+        Auto => env.get("WAYLAND_DISPLAY").map(fn(s) => not s.is_empty()).unwrap_or(false)
+    }
+
+    let sheet = ren.EffectSheet.new()
+    let comp = try ren.PastelRenderer.open(validation, sheet.clone())
+    let names = lum.Names {
+        layout: config.input.layout.clone(),
+        variant: config.input.variant.clone(),
+        options: config.input.options.clone(),
+    }
+    let opts = lum.Options {
+        backend: kind,
+        keymap: names.clone(),
+        repeat_rate: config.input.repeat_rate,
+        repeat_delay: config.input.repeat_delay,
+        background: config.background.premul_array(),
+        title: "Pastel",
+        validation,
+    }
+    let be = try lum.backend.Backend.open(lum.backend.Options {
+        kind: opts.backend,
+        headless: opts.headless.clone(),
+        keymap: names,
+        buffers: opts.buffers,
+        title: opts.title.clone(),
+        realtime: opts.realtime,
+    })
+    let disp = try lum.display.Display.with(opts, be, comp)
+
+    var pastel = compositor.Pastel.new(disp, config, cfg_path, is_nested, sheet)
+    defer pastel.shutdown()
+    pastel.enable_ipc()
+    io.eprint("pastel: WAYLAND_DISPLAY={pastel.d.socket()}")
+    pastel.run_startup(startup)
+
+    // Watch SIGHUP for live config reload (`kill -HUP $(pidof pastel)`).
+    discard signal.watch(1)
+
+    while true {
+        if signal.received(1) {
+            if let Err(err) = reload.reload_config(mut pastel) {
+                io.eprint("pastel: reload failed: {err}")
+            }
+        }
+        guard let Some(e) = try pastel.d.next() else {
+            break
+        }
+        pastel.handle_event(e)
+    }
+    return Ok(())
+}
+
+fn main() -> int {
+    let raw_args = env.args()
+    if raw_args.len() >= 2 and raw_args[1] == "msg" {
+        return run_msg(raw_args[2..raw_args.len()])
+    }
+
+    var f = flag.new("pastel", "Lightweight scrolling-tiling Wayland compositor in Mica on luminaria")
+    f.add_str("config", "c", "", "path to config.toml (default: ~/.config/pastel/config.toml)")
+    f.add_bool("check", "", "validate configuration and exit")
+    f.add_bool("list-actions", "", "list all bindable actions and exit")
+    f.add_str("backend", "b", "auto", "output backend: auto, drm, nested, headless")
+    f.add_bool("validation", "", "enable Vulkan validation layers")
+    f.add_str("startup", "s", "", "command to spawn once Pastel starts")
+
+    match f.parse_env() {
+        Err(e) => {
+            io.eprint("pastel: {e}\n{f.usage()}")
+            return 2
+        }
+        _ => {}
+    }
+    if f.help {
+        io.print(f.usage())
+        return 0
+    }
+    if f.get_bool("list-actions") {
+        for (name, desc) in cfg.action.all_actions() {
+            io.print("{name}  --  {desc}")
+        }
+        return 0
+    }
+    let cfg_arg = f.get_str("config")
+    let cfg_path = if cfg_arg.is_empty() { cfg.default_path() } else { cfg_arg }
+    if f.get_bool("check") {
+        match cfg.load(cfg_path) {
+            Ok => {
+                io.print("pastel: config ok ({cfg_path})")
+                return 0
+            }
+            Err(e) => {
+                io.eprint("pastel: config error: {e}")
+                return 1
+            }
+        }
+    }
+    match run_compositor(cfg_path, f.get_str("backend"), f.get_bool("validation"), f.get_str("startup")) {
+        Ok => { return 0 }
+        Err(e) => {
+            io.eprint("pastel: {e}")
+            return 1
+        }
+    }
+}

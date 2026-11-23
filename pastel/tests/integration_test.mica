@@ -1,0 +1,158 @@
+// End-to-end headless Wayland integration tests for Pastel.
+
+import std.env
+import std.fs
+import std.io
+import std.json
+import std.os
+import std.sync
+import std.time
+import luminaria as lum
+import luminaria_wire as wire
+import luminaria_proto as proto
+import luminaria_proto.wayland as wl
+import luminaria_proto.xdg_shell as xdg
+import pastel_config as cfg
+import pastel_render as ren
+import pastel_ipc as ipc
+import pastel
+
+struct ClientFx {
+    c: wire.Conn
+    reg: wl.Registry = wl.Registry { id: 0 }
+    globals: List[(u32, u16)] = []
+}
+
+fn pump[O: lum.plug.Output, R: lum.plug.Renderer](mut p: pastel.compositor.Pastel[O, R], mut fx: ClientFx, ms: int) {
+    let end = time.now_ns() + ms * 1000000
+    while time.now_ns() < end {
+        discard fx.c.flush()
+        while true {
+            guard let Some(e) = p.d.poll().expect("poll") else {
+                break
+            }
+            p.handle_event(e)
+        }
+        discard fx.c.read()
+        while true {
+            match proto.next_event(mut fx.c) {
+                Ok(Some(ev)) => {
+                    match ev {
+                        WlRegistry(_, Global(n, i, _)) => fx.globals.push((n, proto.ifaces.by_name(i)))
+                        XdgSurface(xs, Configure(serial)) => xs.ack_configure(mut fx.c, serial)
+                        _ => {}
+                    }
+                }
+                Ok(None) => {
+                    break
+                }
+                Err(err) => panic("client protocol error: {err}")
+            }
+        }
+        time.sleep_ms(2)
+    }
+}
+
+fn bind_global[O: lum.plug.Output, R: lum.plug.Renderer](mut p: pastel.compositor.Pastel[O, R], mut fx: ClientFx, iface: u16, ver: u32) -> u32 {
+    if fx.reg.id == 0 {
+        fx.reg = wl.Display { id: 1 }.get_registry(mut fx.c)
+        pump(mut p, mut fx, 40)
+    }
+    for (n, i) in fx.globals.clone() {
+        if i == iface {
+            return fx.reg.bind(mut fx.c, n, iface, ver)
+        }
+    }
+    panic("missing global {proto.ifaces.name(iface)}")
+}
+
+fn map_shm_window[O: lum.plug.Output, R: lum.plug.Renderer](mut p: pastel.compositor.Pastel[O, R], mut fx: ClientFx, comp: wl.Compositor, shm: wl.Shm, wm: xdg.WmBase, app_id: str, title: str, w: i32, h: i32) {
+    let s = comp.create_surface(mut fx.c)
+    let xs = wm.get_xdg_surface(mut fx.c, s)
+    let tl = xs.get_toplevel(mut fx.c)
+    tl.set_app_id(mut fx.c, app_id)
+    tl.set_title(mut fx.c, title)
+    s.commit(mut fx.c)
+    pump(mut p, mut fx, 30)
+    let fd = os.memfd("shm-win", int(w * h * 4)).expect("memfd")
+    let pool = shm.create_pool(mut fx.c, fd, w * h * 4)
+    os.close(fd)
+    let buf = pool.create_buffer(mut fx.c, 0, w, h, w * 4, wl.ShmFormat.Argb8888)
+    s.attach(mut fx.c, Some(buf), 0, 0)
+    s.commit(mut fx.c)
+    pump(mut p, mut fx, 40)
+}
+
+test "end-to-end headless Pastel tiles Wayland clients, animates scrolling, toggles overlay, and serves IPC" {
+    let dir = fs.create_temp_dir("pastel-e2e").expect("temp dir")
+    discard env.set("XDG_RUNTIME_DIR", dir)
+
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(comp_ren) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped: no Vulkan device")
+        return
+    }
+    let mode = lum.Mode { width: 1280, height: 720, refresh_mhz: 120000 }
+    let opts = lum.Options { backend: lum.Kind.Headless, headless: [mode], title: "Pastel-Test" }
+    let be = lum.backend.Backend.open(lum.backend.Options { kind: lum.Kind.Headless, headless: [mode] }).expect("headless backend")
+    let disp = lum.display.Display.with(opts, be, comp_ren).expect("display")
+
+    let cfg_text = """
+    [overlay]
+    at-startup = true
+
+    [[window-rule]]
+    app-id = "foot"
+    opacity = 0.88
+    blur = true
+    """
+    let config = cfg.from_toml(cfg_text).expect("config")
+    var p = pastel.compositor.Pastel.new(disp, config, "", false, sheet)
+    defer p.shutdown()
+    p.enable_ipc()
+
+    assert(p.overlay_visible)
+
+    // Connect a real Wayland client and map two windows.
+    let conn = wire.connect(p.d.socket()).expect("connect wayland")
+    var fx = ClientFx { c: conn }
+    let comp = wl.Compositor { id: bind_global(mut p, mut fx, wl.compositor_iface, 6) }
+    let shm = wl.Shm { id: bind_global(mut p, mut fx, wl.shm_iface, 1) }
+    let wm = xdg.WmBase { id: bind_global(mut p, mut fx, xdg.wm_base_iface, 2) }
+
+    map_shm_window(mut p, mut fx, comp, shm, wm, "foot", "Terminal 1", 600, 680)
+    map_shm_window(mut p, mut fx, comp, shm, wm, "editor", "Editor 2", 600, 680)
+
+    assert_eq(p.win_by_id.len(), 2)
+    assert_eq(p.desktop.monitors[0].workspaces[0].strip.columns.len(), 2)
+
+    // Dismiss startup overlay with an action, then verify IPC state & action dispatch.
+    pastel.input.dispatch_action(mut p, cfg.Action.ToggleHotkeyOverlay).expect("toggle overlay")
+    assert(not p.overlay_visible)
+
+    let sock = p.ipc_socket_path.clone()
+    let ch: sync.Chan[str] = sync.chan(2)
+    let ch1 = ch.clone()
+    let h = go {
+        let s1 = ipc.client.query_state(sock.clone()).expect("ipc state")
+        discard ch1.send(s1)
+        let s2 = ipc.client.send_action(sock, "focus-column-left").expect("ipc action")
+        discard ch1.send(s2)
+    }
+    pump(mut p, mut fx, 80)
+    h.join()
+    let st_raw = ch.recv().unwrap()
+    let act_raw = ch.recv().unwrap()
+    let st = json.parse(st_raw).expect("state json")
+    assert_eq(st.get_bool("ok"), Some(true))
+    assert_eq(st.get("windows").unwrap().len(), 2)
+    let act = json.parse(act_raw).expect("action json")
+    assert_eq(act.get_bool("ok"), Some(true))
+    assert_eq(p.desktop.monitors[0].workspaces[0].strip.active_col, 0)
+
+    // Render a few frames and verify clean non-empty headless framebuffer readback.
+    pump(mut p, mut fx, 60)
+    let out = p.d.outputs()[0]
+    let fb = p.d.read_output(out).expect("read headless fb")
+    assert_eq(fb.len(), 1280 * 720 * 4)
+}

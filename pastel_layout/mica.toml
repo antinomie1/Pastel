@@ -1,0 +1,8 @@
+[package]
+name = "pastel_layout"
+version = "0.1.0"
+description = "Pluggable scrolling-tiling layout engine, workspaces, floating layer, and multi-monitor model for Pastel"
+license = "BSD-2-Clause"
+
+[dependencies]
+pastel_core = { workspace = true }

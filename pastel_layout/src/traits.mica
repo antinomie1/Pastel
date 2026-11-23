@@ -1,0 +1,33 @@
+// Pluggable LayoutPolicy structural trait and pure spatial target types.
+
+import pastel_core as core
+
+/// Target placement computed by a layout for a single window in global logical coordinates.
+pub struct TileTarget {
+    pub id: u64 = 0
+    pub rect: core.Rect = core.Rect {}
+    pub focused: bool = false
+    pub floating: bool = false
+    pub fullscreen: bool = false
+    pub workspace_idx: int = 0
+}
+
+/// Centering strategy for horizontal strip scrolling.
+pub enum CenterMode {
+    Never
+    OnOverflow
+    Always
+}
+
+/// Pluggable window layout policy. Layouts are pure spatial functions with no
+/// awareness of time or animations.
+pub trait LayoutPolicy {
+    fn insert(mut self, id: u64, width_hint: f64)
+    fn remove(mut self, id: u64) -> bool
+    fn contains(self, id: u64) -> bool
+    fn focused(self) -> Option[u64]
+    fn focus_window(mut self, id: u64) -> bool
+    fn focus_dir(mut self, dx: int, dy: int) -> Option[u64]
+    fn move_dir(mut self, dx: int, dy: int) -> bool
+    fn compute(mut self, area: core.Rect, gap: f64, center: CenterMode, mut out: List[TileTarget])
+}

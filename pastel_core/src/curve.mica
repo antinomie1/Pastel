@@ -1,0 +1,190 @@
+// Pluggable Curve trait, exact analytical ODE spring solver, and timed easings.
+
+let pos_eps: f64 = 0.05
+let vel_eps: f64 = 0.5
+
+/// Pluggable animation curve: given elapsed time (seconds), start value `x0`,
+/// initial velocity `v0`, and `target`, evaluates `(position, velocity)` and
+/// whether the curve has settled.
+pub trait Curve {
+    fn eval(self, elapsed_s: f64, x0: f64, v0: f64, target: f64) -> (f64, f64)
+    fn settled(self, elapsed_s: f64, x0: f64, v0: f64, target: f64) -> bool
+}
+
+/// Supported timed easing functions.
+pub enum EaseKind {
+    Linear
+    OutQuad
+    OutCubic
+    OutQuint
+    OutExpo
+    InOutCubic
+}
+
+pub fn EaseKind.from_str(name: str) -> Result[EaseKind, str] {
+    return match name {
+        "linear" => Ok(EaseKind.Linear)
+        "out-quad" => Ok(EaseKind.OutQuad)
+        "out-cubic" => Ok(EaseKind.OutCubic)
+        "out-quint" => Ok(EaseKind.OutQuint)
+        "out-expo" => Ok(EaseKind.OutExpo)
+        "in-out-cubic" => Ok(EaseKind.InOutCubic)
+        _ => Err("unknown easing '{name}' (expected linear, out-quad, out-cubic, out-quint, out-expo, in-out-cubic)")
+    }
+}
+
+/// Evaluate easing `f(t)` and derivative `f'(t)` for `t` in `[0, 1]`.
+pub fn EaseKind.sample(self, t: f64) -> (f64, f64) {
+    let u = t.clamp(0.0, 1.0)
+    match self {
+        Linear => {
+            return (u, 1.0)
+        }
+        OutQuad => {
+            let inv = 1.0 - u
+            return (1.0 - inv * inv, 2.0 * inv)
+        }
+        OutCubic => {
+            let inv = 1.0 - u
+            return (1.0 - inv * inv * inv, 3.0 * inv * inv)
+        }
+        OutQuint => {
+            let inv = 1.0 - u
+            let inv2 = inv * inv
+            return (1.0 - inv2 * inv2 * inv, 5.0 * inv2 * inv2)
+        }
+        OutExpo => {
+            if u >= 1.0 {
+                return (1.0, 0.0)
+            }
+            let p = (2.0).pow(-10.0 * u)
+            return (1.0 - p, 10.0 * 0.6931471805599453 * p)
+        }
+        InOutCubic => {
+            if u < 0.5 {
+                return (4.0 * u * u * u, 12.0 * u * u)
+            }
+            let inv = -2.0 * u + 2.0
+            return (1.0 - inv * inv * inv * 0.5, 3.0 * inv * inv)
+        }
+    }
+}
+
+/// A fixed-duration easing curve.
+pub struct Ease {
+    pub ms: f64 = 160.0
+    pub kind: EaseKind = EaseKind.OutCubic
+}
+
+pub fn Ease.eval(self, elapsed_s: f64, x0: f64, v0: f64, target: f64) -> (f64, f64) {
+    let dur = self.ms * 0.001
+    if dur <= 0.0 or elapsed_s >= dur {
+        return (target, 0.0)
+    }
+    if elapsed_s <= 0.0 {
+        return (x0, v0)
+    }
+    let (e, de) = self.kind.sample(elapsed_s / dur)
+    let span = target - x0
+    return (x0 + span * e, span * de / dur)
+}
+
+pub fn Ease.settled(self, elapsed_s: f64, x0: f64, v0: f64, target: f64) -> bool {
+    let dur = self.ms * 0.001
+    return dur <= 0.0 or elapsed_s >= dur or ((target - x0).abs() < 1e-6 and v0.abs() < 1e-6)
+}
+
+/// Exact analytical damped harmonic oscillator (`damping` = damping ratio zeta).
+pub struct Spring {
+    pub stiffness: f64 = 800.0
+    pub damping: f64 = 1.0
+}
+
+pub fn Spring.eval(self, elapsed_s: f64, x0: f64, v0: f64, target: f64) -> (f64, f64) {
+    if elapsed_s <= 0.0 {
+        return (x0, v0)
+    }
+    if self.stiffness <= 0.0 {
+        return (target, 0.0)
+    }
+    let dx = x0 - target
+    let w0 = self.stiffness.sqrt()
+    let z = max(self.damping, 0.05)
+    let t = elapsed_s
+    if (z - 1.0).abs() < 1e-4 {
+        // Critically damped: x(t) = e^(-w0*t) * (dx + (v0 + w0*dx)*t)
+        let decay = (-w0 * t).exp()
+        let b = v0 + w0 * dx
+        let pos = decay * (dx + b * t)
+        let vel = decay * (b - w0 * (dx + b * t))
+        return (target + pos, vel)
+    }
+    if z < 1.0 {
+        // Under-damped oscillation
+        let wd = w0 * (1.0 - z * z).sqrt()
+        let decay = (-z * w0 * t).exp()
+        let a = dx
+        let b = (v0 + z * w0 * dx) / wd
+        let cs = (wd * t).cos()
+        let sn = (wd * t).sin()
+        let pos = decay * (a * cs + b * sn)
+        let vel = decay * ((b * wd - z * w0 * a) * cs - (a * wd + z * w0 * b) * sn)
+        return (target + pos, vel)
+    }
+    // Over-damped
+    let s = (z * z - 1.0).sqrt()
+    let r1 = -w0 * (z - s)
+    let r2 = -w0 * (z + s)
+    let c2 = (r1 * dx - v0) / (r1 - r2)
+    let c1 = dx - c2
+    let e1 = (r1 * t).exp()
+    let e2 = (r2 * t).exp()
+    let pos = c1 * e1 + c2 * e2
+    let vel = c1 * r1 * e1 + c2 * r2 * e2
+    return (target + pos, vel)
+}
+
+pub fn Spring.settled(self, elapsed_s: f64, x0: f64, v0: f64, target: f64) -> bool {
+    if self.stiffness <= 0.0 or elapsed_s >= 5.0 {
+        return true
+    }
+    let (pos, vel) = self.eval(elapsed_s, x0, v0, target)
+    return (pos - target).abs() <= pos_eps and vel.abs() <= vel_eps
+}
+
+/// Configurable curve specification (either a Spring or a timed Ease).
+pub enum CurveSpec {
+    Spring(Spring)
+    Ease(Ease)
+}
+
+pub fn CurveSpec.spring(stiffness: f64, damping: f64) -> CurveSpec {
+    return CurveSpec.Spring(Spring { stiffness, damping })
+}
+
+pub fn CurveSpec.ease(ms: f64, kind: EaseKind) -> CurveSpec {
+    return CurveSpec.Ease(Ease { ms, kind })
+}
+
+/// Return a copy scaled by `slowdown` (>1 slower, <1 faster).
+pub fn CurveSpec.scaled(self, slowdown: f64) -> CurveSpec {
+    let s = max(slowdown, 0.01)
+    return match self {
+        Spring(sp) => CurveSpec.Spring(Spring { stiffness: sp.stiffness / (s * s), damping: sp.damping })
+        Ease(ea) => CurveSpec.Ease(Ease { ms: ea.ms * s, kind: ea.kind })
+    }
+}
+
+pub fn CurveSpec.eval(self, elapsed_s: f64, x0: f64, v0: f64, target: f64) -> (f64, f64) {
+    return match self {
+        Spring(sp) => sp.eval(elapsed_s, x0, v0, target)
+        Ease(ea) => ea.eval(elapsed_s, x0, v0, target)
+    }
+}
+
+pub fn CurveSpec.settled(self, elapsed_s: f64, x0: f64, v0: f64, target: f64) -> bool {
+    return match self {
+        Spring(sp) => sp.settled(elapsed_s, x0, v0, target)
+        Ease(ea) => ea.settled(elapsed_s, x0, v0, target)
+    }
+}

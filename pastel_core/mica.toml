@@ -1,0 +1,5 @@
+[package]
+name = "pastel_core"
+version = "0.1.0"
+description = "Geometry, colors, analytical spring/ease curves, and retargetable animations for Pastel"
+license = "BSD-2-Clause"

@@ -1,0 +1,983 @@
+// PastelRenderer: DWM-style visual compositor implementing luminaria.plug.Renderer.
+// Reuses luminaria_compose.format, vk_gpu, vk_draw2d, and vk_compose while adding
+// GPU Dual-Kawase backdrop blur (X-Ray & Live), SDF hollow borders, configurable
+// shadow colors, and live-reloadable backgrounds — while preserving direct scanout
+// and hardware MPO overlay fast paths.
+
+import std.collections.map
+import std.mem
+import vk_gpu as gpu
+import vk_draw2d as draw2d
+import vk_compose as vc
+import luminaria_types as types
+import luminaria_compose.format as format
+import effects
+import blur
+
+struct Output {
+    scene: vc.Scene
+    width: u32 = 1
+    height: u32 = 1
+    background: vec4 = zeroed()
+    alive: bool = true
+    by_key: map.Map[u64, (u32, u64, u64)]
+    by_id: map.Map[u32, u64]
+    gen: u64 = 0
+    last_ps: List[types.Placement] = []
+    blur_pyr: blur.BlurPyramid = blur.BlurPyramid {}
+    fx_gen: u64 = 0
+    fx_dirty: bool = true
+    has_active_blur: bool = false
+    /// Cached effect snapshot for the current frame.
+    fx: effects.OutputEffects = effects.OutputEffects {}
+}
+
+fn blank_output() -> Output {
+    return Output {
+        scene: vc.Scene.new(1, 1, vec4(0.0)),
+        alive: false,
+        by_key: map.Map.new(),
+        by_id: map.Map.new(),
+    }
+}
+
+struct Shm {
+    format: u32
+    x0: i32 = 0
+    y0: i32 = 0
+    x1: i32 = 0
+    y1: i32 = 0
+}
+
+pub struct PastelRenderer {
+    dev: gpu.Device
+    validation: bool = false
+    want_priority: gpu.Priority = gpu.Priority.Realtime
+    resets: int = 0
+    canvas: Option[draw2d.Canvas] = None
+    canvas_rgba: Option[draw2d.Canvas] = None
+    blur_pipes: Option[blur.BlurPipelines] = None
+    sheet: effects.EffectSheet
+    outputs: List[Output] = []
+    uploads: Option[gpu.Encoder] = None
+    texs: map.Map[u64, gpu.Texture]
+    shms: map.Map[u64, Shm]
+    targets: map.Map[u64, gpu.Texture]
+    next_target: u64 = 1
+    order: List[u32] = []
+    rm_keys: List[u64] = []
+    rm_ids: List[u32] = []
+    ov_ids: List[u32] = []
+}
+
+/// Open a `PastelRenderer` on the system Vulkan 1.3 GPU, connected to `sheet`.
+pub fn PastelRenderer.open(validation: bool, sheet: effects.EffectSheet) -> Result[PastelRenderer, str] {
+    let dev = try gpu.Device.open(gpu.Options { headless: true, validation, priority: gpu.Priority.Realtime })
+    var r = try PastelRenderer.with(dev, sheet)
+    r.validation = validation
+    r.want_priority = gpu.Priority.Realtime
+    return Ok(r)
+}
+
+pub fn PastelRenderer.with(take dev: gpu.Device, sheet: effects.EffectSheet) -> Result[PastelRenderer, str] {
+    let prio = dev.priority()
+    var r = PastelRenderer {
+        dev,
+        want_priority: prio,
+        sheet: sheet.clone(),
+        texs: map.Map.new(),
+        shms: map.Map.new(),
+        targets: map.Map.new(),
+    }
+    r.canvas = Some(try draw2d.Canvas.create(mut r.dev, gpu.Format.B8G8R8A8_UNORM))
+    r.blur_pipes = Some(try blur.BlurPipelines.create(mut r.dev, gpu.Format.B8G8R8A8_UNORM))
+    return Ok(r)
+}
+
+pub fn PastelRenderer.formats(self) -> List[(u32, u64)] {
+    return format.dmabuf_formats(self.dev)
+}
+
+pub fn PastelRenderer.capture_formats(self) -> List[(u32, u64)] {
+    return format.capture_formats(self.dev)
+}
+
+pub fn PastelRenderer.render_node(self) -> Option[(i64, i64)] {
+    return self.dev.drm_node()
+}
+
+pub fn PastelRenderer.device_lost(self) -> bool {
+    return self.dev.lost()
+}
+
+pub fn PastelRenderer.stats(self, mut s: types.Stats) {
+    s.gpu_priority = self.dev.priority().as_i32()
+    s.gpu_resets = self.resets
+}
+
+/// Recover Vulkan device, 2D canvas, Dual-Kawase blur pipelines, and output scenes after device loss.
+pub fn PastelRenderer.recover(mut self) -> Result[(), str] {
+    var new_dev = try gpu.Device.open(gpu.Options { headless: true, validation: self.validation, priority: self.want_priority })
+    let new_canvas = try draw2d.Canvas.create(mut new_dev, gpu.Format.B8G8R8A8_UNORM)
+    let new_blur = try blur.BlurPipelines.create(mut new_dev, gpu.Format.B8G8R8A8_UNORM)
+    if let Some(u) = self.uploads.take() {
+        var enc = u
+        self.dev.cancel(take enc)
+    }
+    if not self.dev.lost() {
+        discard self.dev.idle()
+    }
+    self.texs.clear()
+    self.shms.clear()
+    self.targets.clear()
+    discard self.canvas.take()
+    discard self.canvas_rgba.take()
+    discard self.blur_pipes.take()
+    self.dev = new_dev
+    self.canvas = Some(new_canvas)
+    self.blur_pipes = Some(new_blur)
+    for o in 0..self.outputs.len() {
+        let prev = mem.replace(mut self.outputs[o], blank_output())
+        if prev.alive {
+            self.outputs[o] = Output {
+                scene: vc.Scene.new(prev.width, prev.height, prev.background),
+                width: prev.width,
+                height: prev.height,
+                background: prev.background,
+                alive: true,
+                by_key: map.Map.new(),
+                by_id: map.Map.new(),
+            }
+        }
+    }
+    self.resets += 1
+    return Ok(())
+}
+
+pub fn PastelRenderer.add_output(mut self, o: int, width: u32, height: u32, background: vec4) {
+    while self.outputs.len() <= o {
+        self.outputs.push(blank_output())
+    }
+    self.outputs[o] = Output {
+        scene: vc.Scene.new(width, height, background),
+        width,
+        height,
+        background,
+        alive: true,
+        by_key: map.Map.new(),
+        by_id: map.Map.new(),
+    }
+}
+
+pub fn PastelRenderer.resize(mut self, o: int, width: u32, height: u32) {
+    if o < self.outputs.len() {
+        self.outputs[o].width = width
+        self.outputs[o].height = height
+        self.outputs[o].scene.resize(width, height)
+        self.outputs[o].blur_pyr.invalidate_xray()
+    }
+}
+
+pub fn PastelRenderer.remove_output(mut self, o: int) {
+    if o < self.outputs.len() {
+        var pyr = mem.replace(mut self.outputs[o].blur_pyr, blur.BlurPyramid {})
+        pyr.destroy(mut self.dev)
+        self.outputs[o].blur_pyr = pyr
+        self.outputs[o].alive = false
+        self.outputs[o].by_key.clear()
+        self.outputs[o].by_id.clear()
+        self.outputs[o].last_ps.clear()
+    }
+}
+
+fn to_view(p: types.Placement, t: gpu.Texture) -> vc.View {
+    let src = vc.Rect { x: p.src.x, y: p.src.y, w: p.src.w, h: p.src.h }
+    let opaque = vc.Rect { x: p.opaque.x, y: p.opaque.y, w: p.opaque.w, h: p.opaque.h }
+    return vc.View { tex: t, x: p.x, y: p.y, w: p.w, h: p.h, src, transform: vc.Transform(p.transform), opacity: p.opacity, radius: p.radius, shadow: p.shadow, opaque }
+}
+
+/// Match a decoration entry against a placement by key (for images) or output-pixel bounds (for windows).
+fn find_effect(fx: effects.OutputEffects, p: types.Placement) -> int {
+    for i, item in fx.items {
+        if item.key != 0 {
+            if item.key == p.key {
+                return i
+            }
+        } else if (item.x - p.x).abs() <= 2.0 and (item.y - p.y).abs() <= 2.0 and (item.w - p.w).abs() <= 4.0 and (item.h - p.h).abs() <= 4.0 {
+            return i
+        }
+    }
+    return -1
+}
+
+pub fn PastelRenderer.layout(mut self, o: int, placements: &[types.Placement]) {
+    guard o < self.outputs.len() and self.outputs[o].alive else {
+        return
+    }
+    var out = mem.replace(mut self.outputs[o], blank_output())
+    let snap = self.sheet.snapshot(o)
+    if snap.generation != out.fx_gen {
+        if snap.generation > 0 and snap.background != out.background {
+            out.background = snap.background
+            out.scene = vc.Scene.new(out.width, out.height, out.background)
+            out.by_key.clear()
+            out.by_id.clear()
+            out.blur_pyr.invalidate_xray()
+        }
+        // Any decoration change (border color/width, blur toggle) damages affected regions.
+        let prev_items = mem.replace(mut out.fx.items, [])
+        for item in prev_items {
+            let pad = item.border_width + item.shadow_size + 4.0
+            out.scene.damage(vc.Rect { x: item.x - pad, y: item.y - pad, w: item.w + pad * 2.0, h: item.h + pad * 2.0 })
+        }
+        for item in snap.items {
+            let pad = item.border_width + item.shadow_size + 4.0
+            out.scene.damage(vc.Rect { x: item.x - pad, y: item.y - pad, w: item.w + pad * 2.0, h: item.h + pad * 2.0 })
+        }
+        out.fx = snap
+        out.fx_gen = out.fx.generation
+        out.fx_dirty = true
+    }
+
+    var any_blur = false
+    if out.fx.blur.enabled {
+        for item in out.fx.items {
+            if item.blur and item.blur_opacity > 0.01 {
+                any_blur = true
+                break
+            }
+        }
+    }
+    out.has_active_blur = any_blur
+
+    out.last_ps.clear()
+    out.gen += 1
+    let gen = out.gen
+    var order = mem.replace(mut self.order, [])
+    order.clear()
+    for p in placements {
+        out.last_ps.push(p)
+        guard let Some(t) = self.texs.get(p.tex) else {
+            continue
+        }
+        let v = to_view(p, t)
+        if let Some((id, seen_gen, _)) = out.by_key.get(p.key) {
+            if seen_gen == gen {
+                continue
+            }
+            out.scene.set(id, v)
+            discard out.by_key.insert(p.key, (id, gen, p.tex))
+            order.push(id)
+        } else {
+            let id = out.scene.add(v)
+            discard out.by_key.insert(p.key, (id, gen, p.tex))
+            discard out.by_id.insert(id, p.key)
+            order.push(id)
+        }
+    }
+    var rm_keys = mem.replace(mut self.rm_keys, [])
+    var rm_ids = mem.replace(mut self.rm_ids, [])
+    rm_keys.clear()
+    rm_ids.clear()
+    for e in out.by_key.entries() {
+        if e.val.1 != gen {
+            rm_keys.push(e.key)
+            rm_ids.push(e.val.0)
+        }
+    }
+    if not rm_keys.is_empty() {
+        for i in 0..rm_keys.len() {
+            discard out.by_key.remove(rm_keys[i])
+            discard out.by_id.remove(rm_ids[i])
+        }
+        out.scene.remove_many(rm_ids)
+    }
+    out.scene.reorder(order)
+    if not out.scene.idle() {
+        out.fx_dirty = true
+    }
+    self.order = order
+    self.rm_keys = rm_keys
+    self.rm_ids = rm_ids
+    self.outputs[o] = out
+}
+
+pub fn PastelRenderer.commit(mut self, key: u64, rects: &[(i32, i32, i32, i32)]) {
+    for o in 0..self.outputs.len() {
+        guard let Some((id, _, _)) = self.outputs[o].by_key.get(key) else {
+            continue
+        }
+        self.outputs[o].fx_dirty = true
+        if rects.is_empty() {
+            self.outputs[o].scene.commit(id, None)
+        }
+        for r in rects {
+            self.outputs[o].scene.commit(id, Some(vc.Rect { x: f32(r.0), y: f32(r.1), w: f32(r.2), h: f32(r.3) }))
+        }
+    }
+}
+
+pub fn PastelRenderer.damage_all(mut self) {
+    for o in 0..self.outputs.len() {
+        self.outputs[o].scene.damage_all()
+        self.outputs[o].blur_pyr.invalidate_xray()
+        self.outputs[o].fx_dirty = true
+    }
+}
+
+pub fn PastelRenderer.idle(self, o: int) -> bool {
+    guard o < self.outputs.len() and self.outputs[o].alive else {
+        return true
+    }
+    let need_fx = not self.outputs[o].fx.items.is_empty() and (self.outputs[o].has_active_blur or self.outputs[o].fx.items.any(fn(it) => it.border_width > 0.0))
+    if need_fx {
+        return not self.outputs[o].fx_dirty
+    }
+    return self.outputs[o].scene.idle()
+}
+
+pub fn PastelRenderer.visible(self, o: int, key: u64) -> bool {
+    guard o < self.outputs.len() else {
+        return false
+    }
+    guard let Some((id, _, _)) = self.outputs[o].by_key.get(key) else {
+        return false
+    }
+    return self.outputs[o].scene.visible(id)
+}
+
+/// Preserve zero-copy direct scanout whenever no active blur or overlay sits on top.
+pub fn PastelRenderer.scanout(self, o: int) -> Option[u64] {
+    guard o < self.outputs.len() and not self.outputs[o].has_active_blur else {
+        return None
+    }
+    guard let Some(id) = self.outputs[o].scene.scanout() else {
+        return None
+    }
+    return self.outputs[o].by_id.get(id)
+}
+
+/// Preserve hardware MPO overlay promotion when no active blur blocks it.
+pub fn PastelRenderer.overlay_candidates(self, o: int, max_count: int) -> List[types.OverlayCand] {
+    var out: List[types.OverlayCand] = []
+    guard o < self.outputs.len() and self.outputs[o].alive and not self.outputs[o].has_active_blur else {
+        return out
+    }
+    for id in self.outputs[o].scene.overlay_candidates(max_count) {
+        guard let Some(key) = self.outputs[o].by_id.get(id) else {
+            continue
+        }
+        guard let Some((_, _, tex)) = self.outputs[o].by_key.get(key) else {
+            continue
+        }
+        guard let Some(v) = self.outputs[o].scene.get(id) else {
+            continue
+        }
+        let w = if v.w > 0.0 { v.w } else if not v.src.is_empty() { v.src.w } else { f32(v.tex.width()) }
+        let h = if v.h > 0.0 { v.h } else if not v.src.is_empty() { v.src.h } else { f32(v.tex.height()) }
+        let src = types.Rect { x: v.src.x, y: v.src.y, w: v.src.w, h: v.src.h }
+        let opaque = v.tex.opaque() or (v.opaque.w >= w and v.opaque.h >= h)
+        out.push(types.OverlayCand {
+            key,
+            tex,
+            x: i32(v.x),
+            y: i32(v.y),
+            w: i32(w),
+            h: i32(h),
+            src,
+            transform: u32(v.transform),
+            opaque,
+        })
+    }
+    return out
+}
+
+pub fn PastelRenderer.set_overlays(mut self, o: int, keys: &[u64]) {
+    guard o < self.outputs.len() and self.outputs[o].alive else {
+        return
+    }
+    var ids = mem.replace(mut self.ov_ids, [])
+    ids.clear()
+    for key in keys {
+        if let Some((id, _, _)) = self.outputs[o].by_key.get(key) {
+            ids.push(id)
+        }
+    }
+    self.outputs[o].scene.set_overlays(ids)
+    self.ov_ids = ids
+}
+
+// ------------------------------------------------------------- textures
+
+fn PastelRenderer.encoder(mut self) -> Result[gpu.Encoder, str] {
+    if let Some(e) = self.uploads.take() {
+        return Ok(e)
+    }
+    return self.dev.encoder()
+}
+
+fn PastelRenderer.put(mut self, key: u64, t: gpu.Texture) {
+    if let Some(old) = self.texs.insert(key, t) {
+        self.dev.destroy_texture(old)
+    }
+}
+
+pub fn PastelRenderer.has(self, key: u64) -> bool {
+    return self.texs.contains(key)
+}
+
+pub fn PastelRenderer.forget(mut self, key: u64) {
+    if let Some(t) = self.texs.remove(key) {
+        self.dev.destroy_texture(t)
+    }
+    discard self.shms.remove(key)
+}
+
+pub fn PastelRenderer.import_dmabuf(mut self, key: u64, d: types.Dmabuf) -> bool {
+    guard d.planes >= 1 and d.planes <= 4 else {
+        return false
+    }
+    guard let Ok(t) = format.import_dmabuf(mut self.dev, d) else {
+        return false
+    }
+    self.put(key, t)
+    return true
+}
+
+pub fn PastelRenderer.solid(mut self, key: u64, rgba: [4]u32) -> bool {
+    let px: List[u8] = [u8(rgba[0] >> 24), u8(rgba[1] >> 24), u8(rgba[2] >> 24), u8(rgba[3] >> 24)]
+    let fourcc = if rgba[3] == 0xFFFFFFFF { types.buffer.xbgr8888 } else { types.buffer.abgr8888 }
+    return self.image(key, 1, 1, fourcc, px, 4)
+}
+
+pub fn PastelRenderer.image(mut self, key: u64, width: i32, height: i32, fourcc: u32, pixels: &[u8], stride: int) -> bool {
+    guard self.target(key, width, height, fourcc) else {
+        return false
+    }
+    let none: List[(i32, i32, i32, i32)] = []
+    return self.write(key, pixels, stride, none)
+}
+
+pub fn PastelRenderer.update(mut self, key: u64, pixels: &[u8], stride: int, rects: &[(i32, i32, i32, i32)]) -> bool {
+    return self.texs.contains(key) and self.write(key, pixels, stride, rects)
+}
+
+fn PastelRenderer.target(mut self, key: u64, width: i32, height: i32, fourcc: u32) -> bool {
+    if let Some(t) = self.texs.get(key) {
+        let same = i32(t.width()) == width and i32(t.height()) == height and self.shms.get(key).map(fn(s) => s.format).unwrap_or(0) == fourcc
+        if same {
+            return true
+        }
+    }
+    guard let Ok(t) = format.shm_texture(mut self.dev, width, height, fourcc) else {
+        self.forget(key)
+        return false
+    }
+    self.put(key, t)
+    discard self.shms.insert(key, Shm { format: fourcc, x1: width, y1: height })
+    return true
+}
+
+fn PastelRenderer.write(mut self, key: u64, pixels: &[u8], stride: int, rects: &[(i32, i32, i32, i32)]) -> bool {
+    guard let Some(t) = self.texs.get(key) else {
+        return false
+    }
+    guard let Ok(got) = self.encoder() else {
+        return false
+    }
+    var e = got
+    let ok = format.upload(mut self.dev, mut e, t, pixels, stride, rects).is_ok()
+    self.uploads = Some(e)
+    if let Some(s) = self.shms.get(key) {
+        discard self.shms.insert(key, Shm { format: s.format })
+    }
+    return ok
+}
+
+pub fn PastelRenderer.shm_commit(mut self, key: u64, width: i32, height: i32, fourcc: u32, rects: &[(i32, i32, i32, i32)]) -> bool {
+    guard self.target(key, width, height, fourcc) else {
+        return false
+    }
+    var s = self.shms.get(key).unwrap()
+    if rects.is_empty() {
+        s.x0 = 0
+        s.y0 = 0
+        s.x1 = width
+        s.y1 = height
+    }
+    for r in rects {
+        if s.x0 >= s.x1 {
+            s.x0 = r.0
+            s.y0 = r.1
+            s.x1 = r.0 + r.2
+            s.y1 = r.1 + r.3
+        } else {
+            s.x0 = min(s.x0, r.0)
+            s.y0 = min(s.y0, r.1)
+            s.x1 = max(s.x1, r.0 + r.2)
+            s.y1 = max(s.y1, r.1 + r.3)
+        }
+    }
+    discard self.shms.insert(key, s)
+    return true
+}
+
+pub fn PastelRenderer.shm_upload(mut self, key: u64, bytes: &[u8], stride: int) -> bool {
+    guard let Some(s) = self.shms.get(key) else {
+        return false
+    }
+    guard s.x0 < s.x1 and s.y0 < s.y1 else {
+        return true
+    }
+    let rect: List[(i32, i32, i32, i32)] = [(s.x0, s.y0, s.x1 - s.x0, s.y1 - s.y0)]
+    return self.write(key, bytes, stride, rect)
+}
+
+// ------------------------------------------------------------- targets & render
+
+fn PastelRenderer.flush_uploads(mut self) -> Result[(), str] {
+    if let Some(u) = self.uploads.take() {
+        var enc = u
+        discard try self.dev.submit(take enc)
+    }
+    return Ok(())
+}
+
+pub fn PastelRenderer.targets(mut self, w: types.Want) -> Result[List[types.Target], str] {
+    guard let Some((vf, _)) = format.vk_format(w.format) else {
+        return Err("render target format {w.format:08x} is not supported")
+    }
+    let desc = gpu.TextureDesc { width: u32(w.width), height: u32(w.height), format: vf, target: true }
+    var mods: List[u64] = []
+    if w.export {
+        let gpu_mods = self.dev.dmabuf_modifiers(vf, true)
+        for m in gpu_mods {
+            if w.modifiers.is_empty() or w.modifiers.contains(m) {
+                mods.push(m)
+            }
+        }
+        if mods.is_empty() {
+            mods.push(0)
+        }
+    }
+    var out: List[types.Target] = []
+    for _ in 0..w.count {
+        let key = self.next_target
+        self.next_target += 1
+        if w.export {
+            let (t, b) = try self.dev.export_dmabuf_with(desc, mods)
+            discard self.targets.insert(key, t)
+            let n = b.plane_count()
+            var buf = types.Dmabuf { width: w.width, height: w.height, format: w.format, modifier: b.modifier, planes: n }
+            for i in 0..n {
+                let p = b.plane(i)
+                buf.plane[i] = types.Plane { fd: int(p.fd), offset: u32(p.offset), stride: u32(p.stride) }
+            }
+            out.push(types.Target { key, buf })
+        } else {
+            discard self.targets.insert(key, try self.dev.texture(desc))
+            out.push(types.Target { key })
+        }
+    }
+    return Ok(out)
+}
+
+pub fn PastelRenderer.drop_target(mut self, key: u64) {
+    if let Some(t) = self.targets.remove(key) {
+        self.dev.destroy_texture(t)
+    }
+}
+
+/// Draw `out` into `dst` with GPU SDF hollow borders and Dual-Kawase frosted-glass blur.
+fn PastelRenderer.render_with_effects(mut self, mut out: Output, mut cv: draw2d.Canvas, pipes: blur.BlurPipelines, mut e: gpu.Encoder, dst: gpu.Texture) -> Result[(), str] {
+    let w = dst.width()
+    let h = dst.height()
+    let screen = draw2d.Rect { w: f32(w), h: f32(h) }
+    let none: List[draw2d.Rect] = []
+    let blur_cfg = out.fx.blur
+
+    // Track which effects were matched to a placement so borders/blur draw in exact Z-order.
+    var used: List[bool] = []
+    for _ in 0..out.fx.items.len() {
+        used.push(false)
+    }
+
+    // Acquire all imported dmabuf textures up front once.
+    for p in out.last_ps {
+        if let Some(t) = self.texs.get(p.tex) {
+            e.acquire(t)
+        }
+    }
+
+    cv.clear()
+    cv.rect(screen, out.background)
+    var flushed_any = false
+
+    let ps_len = out.last_ps.len()
+    for pi in 0..ps_len {
+        let p = out.last_ps[pi]
+        guard let Some(t) = self.texs.get(p.tex) else {
+            continue
+        }
+        let v = to_view(p, t)
+        let pw = if v.w > 0.0 { v.w } else if not v.src.is_empty() { v.src.w } else { f32(t.width()) }
+        let ph = if v.h > 0.0 { v.h } else if not v.src.is_empty() { v.src.h } else { f32(t.height()) }
+        let r = draw2d.Rect { x: v.x, y: v.y, w: pw, h: ph }
+        let src_rect = if v.src.is_empty() {
+            draw2d.Rect { w: 1.0, h: 1.0 }
+        } else {
+            let tw = f32(t.width())
+            let th = f32(t.height())
+            let pic = if v.transform.swaps() { vec2(th, tw) } else { vec2(tw, th) }
+            draw2d.Rect { x: v.src.x / pic.x, y: v.src.y / pic.y, w: v.src.w / pic.x, h: v.src.h / pic.y }
+        }
+
+        let fi = find_effect(out.fx, p)
+        if fi >= 0 and not used[fi] {
+            used[fi] = true
+            let ef = out.fx.items[fi]
+
+            // If this placement needs backdrop blur:
+            // - X-Ray mode: reuse cached blurred background/wallpaper (0 extra steady-state passes).
+            // - Live mode (or overlay/floating): flush layers below into `dst` and run Dual-Kawase blur.
+            if blur_cfg.enabled and ef.blur and ef.blur_opacity > 0.01 {
+                let load = if flushed_any { gpu.Load.Keep } else { gpu.Load.Clear }
+                try cv.draw(mut self.dev, mut e, gpu.Pass { target: dst, load, clear: [out.background.x, out.background.y, out.background.z, out.background.w] }, none)
+                flushed_any = true
+                cv.clear()
+                let use_xray = blur_cfg.xray and ef.blur_xray and not ef.is_overlay
+                let blurred = if use_xray {
+                    try out.blur_pyr.ensure_xray(mut self.dev, pipes, mut e, dst, w, h, blur_cfg.passes, blur_cfg.offset, out.background)
+                } else {
+                    try out.blur_pyr.blur_from(mut self.dev, pipes, mut e, dst, w, h, blur_cfg.passes, blur_cfg.offset)
+                }
+                blur.composite(pipes, mut e, blurred, dst, r, ef.radius, ef.blur_opacity)
+            }
+
+            if ef.shadow_size > 0.0 {
+                let sc = vec4(ef.shadow_color.x, ef.shadow_color.y, ef.shadow_color.z, ef.shadow_color.w * v.opacity)
+                cv.shadow(r, sc, ef.radius, ef.shadow_size)
+            }
+            cv.texture(t, r, src_rect, v.transform, vec4(1.0, 1.0, 1.0, v.opacity), ef.radius)
+            if ef.border_width > 0.0 {
+                let bw = ef.border_width
+                let br = draw2d.Rect { x: r.x - bw, y: r.y - bw, w: r.w + bw * 2.0, h: r.h + bw * 2.0 }
+                let bc = vec4(ef.border_color.x, ef.border_color.y, ef.border_color.z, ef.border_color.w * v.opacity)
+                cv.border(br, bc, ef.radius, bw)
+            }
+        } else {
+            if v.shadow > 0.0 {
+                cv.shadow(r, vec4(0.0, 0.0, 0.0, 0.45 * v.opacity), v.radius, v.shadow)
+            }
+            cv.texture(t, r, src_rect, v.transform, vec4(1.0, 1.0, 1.0, v.opacity), v.radius)
+        }
+    }
+
+    let final_load = if flushed_any { gpu.Load.Keep } else { gpu.Load.Clear }
+    try cv.draw(mut self.dev, mut e, gpu.Pass { target: dst, load: final_load, clear: [out.background.x, out.background.y, out.background.z, out.background.w] }, none)
+
+    for p in out.last_ps {
+        if let Some(t) = self.texs.get(p.tex) {
+            e.release(t)
+        }
+    }
+    return Ok(())
+}
+
+/// Draw output `o` into target `key` (`age` frames old).
+/// Uses partial-damage `vk_compose.Scene.render` on the fast path (no borders/blur),
+/// and `render_with_effects` when GPU borders or Dual-Kawase blur are active.
+pub fn PastelRenderer.render(mut self, o: int, key: u64, age: u32) -> Result[Option[int], str] {
+    try self.flush_uploads()
+    guard o < self.outputs.len() else {
+        return Ok(None)
+    }
+    guard let Some(t) = self.targets.get(key) else {
+        return Err("no render target {key}")
+    }
+    guard let Some(cv) = self.canvas.take() else {
+        return Err("no canvas")
+    }
+    var canvas = cv
+    var e = try self.dev.encoder()
+    var out = mem.replace(mut self.outputs[o], blank_output())
+    let need_fx = not out.fx.items.is_empty() and (out.has_active_blur or out.fx.items.any(fn(it) => it.border_width > 0.0))
+
+    var drew = false
+    var err_msg = ""
+    var ok = true
+    if not need_fx {
+        match out.scene.render(mut self.dev, mut canvas, mut e, gpu.Frame.new(t, age)) {
+            Ok(d) => drew = d
+            Err(err) => {
+                ok = false
+                err_msg = err
+            }
+        }
+        out.fx_dirty = false
+    } else if not out.fx_dirty and age == 1 {
+        drew = false
+    } else {
+        if let Some(pipes) = self.blur_pipes {
+            match self.render_with_effects(mut out, mut canvas, pipes, mut e, t) {
+                Ok => {
+                    drew = true
+                    out.fx_dirty = false
+                }
+                Err(err) => {
+                    ok = false
+                    err_msg = err
+                }
+            }
+        }
+    }
+
+    self.outputs[o] = out
+    self.canvas = Some(canvas)
+    guard ok else {
+        self.dev.cancel(take e)
+        return Err(err_msg)
+    }
+    guard drew else {
+        self.dev.cancel(take e)
+        return Ok(None)
+    }
+    let (_, fence) = try self.dev.submit_sync_file(take e)
+    return Ok(Some(int(fence)))
+}
+
+pub fn PastelRenderer.read(mut self, key: u64) -> Result[List[u8], str] {
+    guard let Some(t) = self.targets.get(key) else {
+        return Err("no render target {key}")
+    }
+    return self.dev.read_texture(t)
+}
+
+fn PastelRenderer.draw_placements(mut self, mut cv: draw2d.Canvas, mut e: gpu.Encoder, dst: gpu.Texture, ps: &[types.Placement]) -> Result[(), str] {
+    cv.clear()
+    let w = dst.width()
+    let h = dst.height()
+    cv.rect(draw2d.Rect { w: f32(w), h: f32(h) }, vec4(0.0))
+    for p in ps {
+        guard let Some(t) = self.texs.get(p.tex) else {
+            continue
+        }
+        let v = to_view(p, t)
+        let pw = if v.w > 0.0 { v.w } else if not v.src.is_empty() { v.src.w } else { f32(t.width()) }
+        let ph = if v.h > 0.0 { v.h } else if not v.src.is_empty() { v.src.h } else { f32(t.height()) }
+        let r = draw2d.Rect { x: v.x, y: v.y, w: pw, h: ph }
+        let src_rect = if v.src.is_empty() {
+            draw2d.Rect { w: 1.0, h: 1.0 }
+        } else {
+            let tw = f32(t.width())
+            let th = f32(t.height())
+            let pic = if v.transform.swaps() { vec2(th, tw) } else { vec2(tw, th) }
+            draw2d.Rect { x: v.src.x / pic.x, y: v.src.y / pic.y, w: v.src.w / pic.x, h: v.src.h / pic.y }
+        }
+        if v.shadow > 0.0 {
+            cv.shadow(r, vec4(0.0, 0.0, 0.0, 0.45 * v.opacity), v.radius, v.shadow)
+        }
+        cv.texture(t, r, src_rect, v.transform, vec4(1.0, 1.0, 1.0, v.opacity), v.radius)
+        e.acquire(t)
+    }
+    let none: List[draw2d.Rect] = []
+    try cv.draw(mut self.dev, mut e, gpu.Pass { target: dst, load: gpu.Load.Clear, clear: [0.0, 0.0, 0.0, 0.0] }, none)
+    for p in ps {
+        if let Some(t) = self.texs.get(p.tex) {
+            e.release(t)
+        }
+    }
+    return Ok(())
+}
+
+pub fn PastelRenderer.copy_dmabuf(mut self, target_key: u64, dst_buf: types.Dmabuf, sx: i32, sy: i32, w: i32, h: i32) -> Result[int, str] {
+    try self.flush_uploads()
+    guard let Some(src) = self.targets.get(target_key) else {
+        return Err("no render target {target_key}")
+    }
+    guard w > 0 and h > 0 and w <= dst_buf.width and h <= dst_buf.height else {
+        return Err("invalid capture copy rect {w}x{h} into {dst_buf.width}x{dst_buf.height}")
+    }
+    let dst = try format.import_dmabuf_target(mut self.dev, dst_buf)
+    var e = match self.dev.encoder() {
+        Ok(e) => e
+        Err(err) => {
+            self.dev.destroy_texture(dst)
+            return Err(err)
+        }
+    }
+    e.acquire(dst)
+    e.copy_texture(src, dst, sx, sy, 0, 0, u32(w), u32(h))
+    e.release(dst)
+    let res = self.dev.submit_sync_file(take e)
+    self.dev.destroy_texture(dst)
+    let (_, fence) = try res
+    return Ok(int(fence))
+}
+
+pub fn PastelRenderer.render_offscreen(mut self, width: u32, height: u32, ps: &[types.Placement]) -> Result[List[u8], str] {
+    try self.flush_uploads()
+    guard width > 0 and height > 0 else {
+        return Err("invalid offscreen capture size {width}x{height}")
+    }
+    let dst = try self.dev.texture(gpu.TextureDesc { width, height, format: gpu.Format.B8G8R8A8_UNORM, target: true })
+    guard let Some(cv) = self.canvas.take() else {
+        self.dev.destroy_texture(dst)
+        return Err("no canvas")
+    }
+    var canvas = cv
+    var e = match self.dev.encoder() {
+        Ok(e) => e
+        Err(err) => {
+            self.canvas = Some(canvas)
+            self.dev.destroy_texture(dst)
+            return Err(err)
+        }
+    }
+    let r = self.draw_placements(mut canvas, mut e, dst, ps)
+    self.canvas = Some(canvas)
+    guard r.is_ok() else {
+        self.dev.cancel(take e)
+        self.dev.destroy_texture(dst)
+        return Err(r.unwrap_err())
+    }
+    let ticket = match self.dev.submit(take e) {
+        Ok(t) => t
+        Err(err) => {
+            self.dev.destroy_texture(dst)
+            return Err(err)
+        }
+    }
+    if let Err(err) = self.dev.wait(ticket) {
+        self.dev.destroy_texture(dst)
+        return Err(err)
+    }
+    let px = self.dev.read_texture(dst)
+    self.dev.destroy_texture(dst)
+    return px
+}
+
+pub fn PastelRenderer.render_offscreen_dmabuf(mut self, dst_buf: types.Dmabuf, ps: &[types.Placement]) -> Result[int, str] {
+    try self.flush_uploads()
+    guard let Some((vf, _)) = format.vk_format(dst_buf.format) else {
+        return Err("capture format {dst_buf.format:08x} is not supported")
+    }
+    let dst = try format.import_dmabuf_target(mut self.dev, dst_buf)
+    let is_rgba = vf == gpu.Format.R8G8B8A8_UNORM
+    if dst.can_target() and is_rgba and self.canvas_rgba.is_none() {
+        match draw2d.Canvas.create(mut self.dev, gpu.Format.R8G8B8A8_UNORM) {
+            Ok(c) => self.canvas_rgba = Some(c)
+            Err(err) => {
+                self.dev.destroy_texture(dst)
+                return Err(err)
+            }
+        }
+    }
+    guard let Some(got_cv) = if dst.can_target() and is_rgba { self.canvas_rgba.take() } else { self.canvas.take() } else {
+        self.dev.destroy_texture(dst)
+        return Err("no canvas")
+    }
+    var cv = got_cv
+    var e = match self.dev.encoder() {
+        Ok(e) => e
+        Err(err) => {
+            if dst.can_target() and is_rgba {
+                self.canvas_rgba = Some(cv)
+            } else {
+                self.canvas = Some(cv)
+            }
+            self.dev.destroy_texture(dst)
+            return Err(err)
+        }
+    }
+    if dst.can_target() {
+        e.acquire(dst)
+        let r = self.draw_placements(mut cv, mut e, dst, ps)
+        if is_rgba {
+            self.canvas_rgba = Some(cv)
+        } else {
+            self.canvas = Some(cv)
+        }
+        guard r.is_ok() else {
+            self.dev.cancel(take e)
+            self.dev.destroy_texture(dst)
+            return Err(r.unwrap_err())
+        }
+        e.release(dst)
+        let res = self.dev.submit_sync_file(take e)
+        self.dev.destroy_texture(dst)
+        let (_, fence) = try res
+        return Ok(int(fence))
+    }
+    let tmp = match self.dev.texture(gpu.TextureDesc { width: dst.width(), height: dst.height(), format: gpu.Format.B8G8R8A8_UNORM, target: true }) {
+        Ok(t) => t
+        Err(err) => {
+            self.canvas = Some(cv)
+            self.dev.cancel(take e)
+            self.dev.destroy_texture(dst)
+            return Err(err)
+        }
+    }
+    let r = self.draw_placements(mut cv, mut e, tmp, ps)
+    self.canvas = Some(cv)
+    guard r.is_ok() else {
+        self.dev.cancel(take e)
+        self.dev.destroy_texture(tmp)
+        self.dev.destroy_texture(dst)
+        return Err(r.unwrap_err())
+    }
+    e.acquire(dst)
+    e.copy_texture(tmp, dst, 0, 0, 0, 0, dst.width(), dst.height())
+    e.release(dst)
+    let res = self.dev.submit_sync_file(take e)
+    self.dev.destroy_texture(tmp)
+    self.dev.destroy_texture(dst)
+    let (_, fence) = try res
+    return Ok(int(fence))
+}
+
+pub fn PastelRenderer.changed(self, o: int, mut out: List[(i32, i32, i32, i32)]) {
+    guard o < self.outputs.len() else {
+        return
+    }
+    if self.outputs[o].has_active_blur {
+        // Full-frame damage when frosted blur is active (ensures no dirty seam artifacts).
+        return
+    }
+    for r in self.outputs[o].scene.changed() {
+        out.push((i32(r.x), i32(r.y), i32(r.w), i32(r.h)))
+    }
+}
+
+pub fn PastelRenderer.close(mut self) {
+    if let Some(u) = self.uploads.take() {
+        var enc = u
+        self.dev.cancel(take enc)
+    }
+    if not self.dev.lost() {
+        discard self.dev.idle()
+    }
+    for o in 0..self.outputs.len() {
+        var pyr = mem.replace(mut self.outputs[o].blur_pyr, blur.BlurPyramid {})
+        pyr.destroy(mut self.dev)
+        self.outputs[o].blur_pyr = pyr
+    }
+    for t in self.texs.values() {
+        self.dev.destroy_texture(t)
+    }
+    self.texs.clear()
+    self.shms.clear()
+    for t in self.targets.values() {
+        self.dev.destroy_texture(t)
+    }
+    self.targets.clear()
+    if let Some(bp) = self.blur_pipes.take() {
+        bp.destroy(mut self.dev)
+    }
+    if let Some(cv) = self.canvas.take() {
+        cv.destroy(mut self.dev)
+    }
+    if let Some(cv) = self.canvas_rgba.take() {
+        cv.destroy(mut self.dev)
+    }
+}

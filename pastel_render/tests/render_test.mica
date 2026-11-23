@@ -1,0 +1,114 @@
+import std.io
+import pastel_core as core
+import pastel_config as cfg
+import pastel_render as ren
+import luminaria_types as types
+
+test "hotkey overlay rasterizes cleanly with TrueType font and pastel-rs styling" {
+    let c = cfg.Config.default()
+    let img = ren.overlay.render_hotkey_overlay(c, cfg.ModKey.Super, 1.0).expect("overlay font")
+    assert(img.width > 300 and img.height > 150)
+    assert_eq(img.pixels.len(), int(img.width) * int(img.height) * 4)
+    // Top-left corner pixel matches pastel-rs premultiplied panel `[19, 21, 27, 209]`.
+    assert_eq(img.pixels[0], u8(19))
+    assert_eq(img.pixels[1], u8(21))
+    assert_eq(img.pixels[2], u8(27))
+    assert_eq(img.pixels[3], u8(209))
+    // Verify anti-aliased glyphs actually rendered bright pixels onto the panel.
+    var lit = 0
+    for i in 0..int(img.width) * int(img.height) {
+        if img.pixels[i * 4] > 100 or img.pixels[i * 4 + 2] > 100 {
+            lit += 1
+        }
+    }
+    assert(lit > 500)
+}
+
+test "animation state tracks open, move, focus-ring, workspace slide, and settles to idle" {
+    let c = cfg.Config.default()
+    var anims = ren.AnimState.new()
+    anims.open_window(1, core.Rect.new(10.0, 10.0, 600.0, 400.0), 0.9, true, c.animation, c.window, 0)
+    anims.switch_workspace(1, 1, 1080.0, c.animation, 0)
+    anims.set_overlay(true, c.animation, 0)
+
+    anims.begin_frame()
+    let (_, sc0, op0, _) = anims.tick_window(1, 50000000).unwrap()
+    let wy0 = anims.tick_output_y(1, 50000000)
+    let (oa0, _) = anims.tick_overlay(50000000)
+    assert(anims.is_active())
+    assert(sc0 > 0.94 and sc0 <= 1.0)
+    assert(op0 > 0.0 and op0 <= 0.91)
+    assert(wy0.abs() > 0.1)
+    assert(oa0 > 0.0 and oa0 <= 1.0)
+
+    // After 2 seconds, every animation settles to exact target and active == false.
+    anims.begin_frame()
+    let (_, sc1, op1, _) = anims.tick_window(1, 2000000000).unwrap()
+    let wy1 = anims.tick_output_y(1, 2000000000)
+    let (oa1, _) = anims.tick_overlay(2000000000)
+    assert(not anims.is_active())
+    assert_eq(sc1, 1.0)
+    assert((op1 - 0.9).abs() < 0.001)
+    assert_eq(wy1, 0.0)
+    assert_eq(oa1, 1.0)
+}
+
+test "PastelRenderer renders GPU SDF square borders and Dual-Kawase frosted glass blur" {
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(rr) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped: no Vulkan device")
+        return
+    }
+    var r = rr
+    r.add_output(0, 128, 128, vec4(0.1, 0.2, 0.4, 1.0))
+    let ts = r.targets(types.Want { width: 128, height: 128, format: types.buffer.xrgb8888, count: 1, export: false }).expect("targets")
+    let tkey = ts[0].key
+
+    // Create a translucent foreground image (50% red).
+    var px: List[u8] = []
+    for _ in 0..64 * 64 {
+        px.push(128)
+        px.push(20)
+        px.push(20)
+        px.push(128)
+    }
+    let img_key: u64 = (u64(1) << 63) | u64(1)
+    assert(r.image(img_key, 64, 64, types.buffer.abgr8888, px, 64 * 4))
+
+    // Configure square border + Dual-Kawase live blur behind the translucent image.
+    sheet.set_output(0, core.Color.rgb(0.1, 0.2, 0.4), ren.BlurSettings { enabled: true, xray: false, passes: 2, offset: 2.0 }, [
+        ren.WindowEffect {
+            key: img_key,
+            x: 32.0,
+            y: 32.0,
+            w: 64.0,
+            h: 64.0,
+            radius: 0.0,
+            border_width: 4.0,
+            border_color: vec4(1.0, 1.0, 1.0, 1.0),
+            shadow_size: 8.0,
+            shadow_color: vec4(0.0, 0.0, 0.0, 0.4),
+            blur: true,
+            blur_xray: false,
+            blur_opacity: 1.0,
+            is_overlay: true,
+        },
+    ])
+
+    r.layout(0, [
+        types.Placement { key: img_key, tex: img_key, x: 32.0, y: 32.0, w: 64.0, h: 64.0, opacity: 0.85 },
+    ])
+    let fence = r.render(0, tkey, 0).expect("render")
+    assert(fence.is_some())
+    let pixels = r.read(tkey).expect("read")
+    assert_eq(pixels.len(), 128 * 128 * 4)
+    // Check crisp square white border pixel at (30, 30) (outside 32..96, inside 28..100).
+    let bi = (30 * 128 + 30) * 4
+    assert(pixels[bi] > 200 and pixels[bi + 1] > 200 and pixels[bi + 2] > 200)
+    // Check interior pixel at (64, 64) shows blended translucent red over blurred blue backdrop.
+    let ci = (64 * 128 + 64) * 4
+    assert(pixels[ci + 2] > 80) // R channel (BGRA layout)
+    assert(pixels[ci] > 20) // B channel from blurred backdrop
+    r.drop_target(tkey)
+    r.close()
+}

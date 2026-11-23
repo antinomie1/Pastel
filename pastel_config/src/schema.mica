@@ -1,0 +1,147 @@
+// Configuration schema types and defaults for Pastel.
+
+import pastel_core as core
+
+/// Which physical modifier key represents `Mod` in `[binds]`.
+pub enum ModKey {
+    Super
+    Alt
+    Ctrl
+}
+
+pub fn ModKey.from_str(s: str) -> Result[ModKey, str] {
+    return match s.trim().to_lower() {
+        "super" or "logo" or "meta" => Ok(ModKey.Super)
+        "alt" => Ok(ModKey.Alt)
+        "ctrl" or "control" => Ok(ModKey.Ctrl)
+        _ => Err("unknown modifier '{s}' (expected super, alt, ctrl)")
+    }
+}
+
+/// Horizontal scrolling focus centering strategy.
+pub enum CenterFocus {
+    Never
+    OnOverflow
+    Always
+}
+
+pub fn CenterFocus.from_str(s: str) -> Result[CenterFocus, str] {
+    return match s.trim().to_lower() {
+        "never" => Ok(CenterFocus.Never)
+        "on-overflow" => Ok(CenterFocus.OnOverflow)
+        "always" => Ok(CenterFocus.Always)
+        _ => Err("unknown center-focus '{s}' (expected never, on-overflow, always)")
+    }
+}
+
+pub struct XWaylandConfig {
+    pub enabled: bool = true
+    pub path: str = "xwayland-satellite"
+}
+
+pub struct OutputConfig {
+    pub name: str = ""
+    pub mode: str = ""
+    pub scale: Option[f64] = None
+    pub pos_x: Option[f64] = None
+    pub pos_y: Option[f64] = None
+    pub vrr: Option[bool] = None
+    pub enabled: bool = true
+}
+
+pub struct InputConfig {
+    pub mod_key: ModKey = ModKey.Super
+    pub nested_mod: ModKey = ModKey.Alt
+    pub focus_follows_mouse: bool = false
+    pub repeat_rate: i32 = 25
+    pub repeat_delay: i32 = 600
+    pub tap_to_click: bool = true
+    pub natural_scroll: bool = false
+    pub accel: f64 = 0.0
+    pub left_handed: bool = false
+    pub layout: str = ""
+    pub variant: str = ""
+    pub options: str = ""
+}
+
+pub struct LayoutConfig {
+    pub kind: str = "scrolling"
+    pub gap: f64 = 12.0
+    pub default_width: f64 = 0.5
+    pub preset_widths: List[f64] = []
+    pub center_focus: CenterFocus = CenterFocus.Never
+    /// 0 = dynamic niri-style workspaces; >0 = fixed dwm-style workspaces.
+    pub workspaces: int = 0
+}
+
+pub fn LayoutConfig.default() -> LayoutConfig {
+    return LayoutConfig {
+        preset_widths: [1.0 / 3.0, 0.5, 2.0 / 3.0],
+    }
+}
+
+/// Visual window styling. Default corners are square (`corner_radius = 0.0`).
+pub struct WindowConfig {
+    pub corner_radius: f32 = 0.0
+    pub border_width: f32 = 2.0
+    pub active_color: core.Color = core.Color { r: 0.651, g: 0.784, b: 1.0, a: 1.0 }
+    pub inactive_color: core.Color = core.Color { r: 0.290, g: 0.310, b: 0.361, a: 1.0 }
+    pub shadow_color: core.Color = core.Color { r: 0.0, g: 0.0, b: 0.0, a: 0.376 }
+    pub shadow_size: f32 = 18.0
+    pub opacity: f32 = 1.0
+    pub blur: bool = true
+    pub blur_xray: bool = true
+    pub blur_passes: int = 2
+    pub blur_offset: f32 = 2.0
+}
+
+pub struct AnimationConfig {
+    pub enabled: bool = true
+    pub slowdown: f64 = 1.0
+    pub window_movement: core.CurveSpec = core.CurveSpec.Spring(core.Spring { stiffness: 800.0, damping: 1.0 })
+    pub workspace_switch: core.CurveSpec = core.CurveSpec.Spring(core.Spring { stiffness: 900.0, damping: 1.0 })
+    pub window_open: core.CurveSpec = core.CurveSpec.Ease(core.Ease { ms: 160.0, kind: core.EaseKind.OutCubic })
+    pub window_close: core.CurveSpec = core.CurveSpec.Ease(core.Ease { ms: 140.0, kind: core.EaseKind.OutQuad })
+    pub focus_ring: core.CurveSpec = core.CurveSpec.Ease(core.Ease { ms: 120.0, kind: core.EaseKind.OutCubic })
+    pub overlay: core.CurveSpec = core.CurveSpec.Ease(core.Ease { ms: 140.0, kind: core.EaseKind.OutCubic })
+}
+
+pub struct OverlayConfig {
+    pub at_startup: bool = true
+    pub font: str = "sans-serif"
+    pub opacity: f32 = 0.92
+}
+
+pub struct WindowRule {
+    pub app_id: str = ""
+    pub title: str = ""
+    pub opacity: Option[f32] = None
+    pub blur: Option[bool] = None
+    pub corner_radius: Option[f32] = None
+    pub border_width: Option[f32] = None
+    pub default_width: Option[f64] = None
+    pub floating: Option[bool] = None
+    pub workspace: Option[int] = None
+}
+
+/// Case-sensitive substring match on non-empty `app_id` and `title` criteria.
+pub fn WindowRule.matches(self, app_id: str, title: str) -> bool {
+    if not self.app_id.is_empty() and not app_id.contains(self.app_id) {
+        return false
+    }
+    if not self.title.is_empty() and not title.contains(self.title) {
+        return false
+    }
+    return not self.app_id.is_empty() or not self.title.is_empty()
+}
+
+/// Effective styling and placement hints resolved for a specific window.
+pub struct ResolvedWindow {
+    pub opacity: f32 = 1.0
+    pub blur: bool = true
+    pub corner_radius: f32 = 0.0
+    pub border_width: f32 = 2.0
+    pub default_width: f64 = 0.5
+    pub floating: Option[bool] = None
+    pub workspace: Option[int] = None
+}

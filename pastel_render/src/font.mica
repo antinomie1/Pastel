@@ -1,0 +1,271 @@
+// TrueType/OpenType anti-aliased text rasterizer using Fontconfig + FreeType2
+// loaded dynamically at runtime via `extern table` (zero extra link-time deps).
+
+import std.fs
+import std.str as sstr
+import std.utf8
+import pastel_core as core
+
+extern table FcFn {
+    fn init_load_config_and_fonts() -> Ptr[u8] = "FcInitLoadConfigAndFonts"
+    fn name_parse(name: str) -> Ptr[u8] = "FcNameParse"
+    fn config_substitute(cfg: Ptr[u8], pat: Ptr[u8], kind: i32) -> i32 = "FcConfigSubstitute"
+    fn default_substitute(pat: Ptr[u8]) = "FcDefaultSubstitute"
+    fn font_match(cfg: Ptr[u8], pat: Ptr[u8], mut res: i32) -> Ptr[u8] = "FcFontMatch"
+    fn pattern_get_string(pat: Ptr[u8], obj: str, n: i32, mut out: Ptr[u8]) -> i32 = "FcPatternGetString"
+    fn pattern_destroy(pat: Ptr[u8]) = "FcPatternDestroy"
+    fn config_destroy(cfg: Ptr[u8]) = "FcConfigDestroy"
+}
+
+struct FtVector {
+    x: i64 = 0
+    y: i64 = 0
+}
+
+extern table FtFn {
+    fn init(mut lib: Ptr[u8]) -> i32 = "FT_Init_FreeType"
+    fn done(lib: Ptr[u8]) -> i32 = "FT_Done_FreeType"
+    fn new_face(lib: Ptr[u8], path: str, index: i64, mut face: Ptr[u8]) -> i32 = "FT_New_Face"
+    fn done_face(face: Ptr[u8]) -> i32 = "FT_Done_Face"
+    fn set_char_size(face: Ptr[u8], w: i64, h: i64, hres: u32, vres: u32) -> i32 = "FT_Set_Char_Size"
+    fn get_char_index(face: Ptr[u8], cp: u64) -> u32 = "FT_Get_Char_Index"
+    fn load_char(face: Ptr[u8], cp: u64, flags: i32) -> i32 = "FT_Load_Char"
+    fn get_kerning(face: Ptr[u8], left: u32, right: u32, mode: u32, mut delta: FtVector) -> i32 = "FT_Get_Kerning"
+}
+
+let ft_load_render: i32 = 4
+
+// Verified Linux x86_64 FreeType2 struct offsets (FT_FaceRec / FT_SizeRec / FT_GlyphSlotRec / FT_Bitmap).
+let off_face_glyph: int = 152
+let off_face_size: int = 160
+let off_size_ascender: int = 48
+let off_size_height: int = 64
+let off_slot_advance_x: int = 128
+let off_slot_bmp_rows: int = 152
+let off_slot_bmp_width: int = 156
+let off_slot_bmp_pitch: int = 160
+let off_slot_bmp_buf: int = 168
+let off_slot_bmp_left: int = 192
+let off_slot_bmp_top: int = 196
+
+unsafe fn read_cstr(p: Ptr[u8]) -> str {
+    var bytes: List[u8] = []
+    var i = 0
+    while i < 4096 {
+        let b = p.offset(i).read()
+        if b == 0 {
+            break
+        }
+        bytes.push(b)
+        i += 1
+    }
+    return sstr.from_bytes(bytes)
+}
+
+/// Resolve a Fontconfig pattern (e.g. `"sans-serif"`) to a font file path.
+pub fn resolve_font_path(pattern: str) -> Option[str] {
+    if not pattern.is_empty() and fs.exists(pattern) {
+        return Some(pattern.clone())
+    }
+    if let Ok(fc) = FcFn.open("libfontconfig.so.1") {
+        let query = if pattern.trim().is_empty() { "sans-serif" } else { pattern.trim() }
+        let cfg = fc.init_load_config_and_fonts()
+        if not cfg.is_null() {
+            defer fc.config_destroy(cfg)
+            let pat = fc.name_parse(query)
+            if not pat.is_null() {
+                defer fc.pattern_destroy(pat)
+                discard fc.config_substitute(cfg, pat, 0)
+                fc.default_substitute(pat)
+                var res: i32 = 0
+                let matched = fc.font_match(cfg, pat, mut res)
+                if not matched.is_null() {
+                    defer fc.pattern_destroy(matched)
+                    var file_ptr: Ptr[u8] = Ptr.null()
+                    if fc.pattern_get_string(matched, "file", 0, mut file_ptr) == 0 and not file_ptr.is_null() {
+                        unsafe {
+                            let found = read_cstr(file_ptr)
+                            if not found.is_empty() and fs.exists(found) {
+                                return Some(found)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let fallbacks = [
+        "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    ]
+    for p in fallbacks {
+        if fs.exists(p) {
+            return Some(p.clone())
+        }
+    }
+    return None
+}
+
+/// An open FreeType2 font face sized for smooth anti-aliased rendering.
+pub unsafe struct Font {
+    ft: FtFn
+    lib: Ptr[u8]
+    face: Ptr[u8]
+    ascent_px: i32
+    height_px: i32
+}
+
+/// Open a system font matching `pattern` at `size_pt` points (96 DPI).
+pub fn Font.open(pattern: str, size_pt: f32) -> Option[Font] {
+    guard let Some(path) = resolve_font_path(pattern) else {
+        return None
+    }
+    guard let Ok(ft) = FtFn.open("libfreetype.so.6") else {
+        return None
+    }
+    unsafe {
+        var lib: Ptr[u8] = Ptr.null()
+        guard ft.init(mut lib) == 0 and not lib.is_null() else {
+            return None
+        }
+        var face: Ptr[u8] = Ptr.null()
+        if ft.new_face(lib, path, 0, mut face) != 0 or face.is_null() {
+            discard ft.done(lib)
+            return None
+        }
+        let sz_26_6 = i64((size_pt * 64.0).round())
+        if ft.set_char_size(face, 0, sz_26_6, 96, 96) != 0 {
+            discard ft.done_face(face)
+            discard ft.done(lib)
+            return None
+        }
+        let size_ptr = face.offset(off_face_size).cast[Ptr[u8]]().read()
+        let asc = i32(size_ptr.offset(off_size_ascender).cast[i64]().read() >> 6)
+        let h = i32(size_ptr.offset(off_size_height).cast[i64]().read() >> 6)
+        return Some(Font {
+            ft,
+            lib,
+            face,
+            ascent_px: max(asc, 1),
+            height_px: max(h, max(asc, 1)),
+        })
+    }
+}
+
+pub fn Font.ascent(self) -> i32 {
+    return self.ascent_px
+}
+
+pub fn Font.height(self) -> i32 {
+    return self.height_px
+}
+
+pub fn Font.close(mut self) {
+    if not self.face.is_null() {
+        discard self.ft.done_face(self.face)
+        self.face = Ptr.null()
+    }
+    if not self.lib.is_null() {
+        discard self.ft.done(self.lib)
+        self.lib = Ptr.null()
+    }
+}
+
+/// Measure horizontal advance width of `text` in pixels (including kerning).
+pub fn Font.measure(self, text: str) -> i32 {
+    var pen_x: i32 = 0
+    var prev_gid: u32 = 0
+    var i = 0
+    unsafe {
+        while i < text.len() {
+            let cp = u64(utf8.next(text, mut i))
+            let gid = self.ft.get_char_index(self.face, cp)
+            if prev_gid != 0 and gid != 0 {
+                var kern = FtVector {}
+                if self.ft.get_kerning(self.face, prev_gid, gid, 0, mut kern) == 0 {
+                    pen_x += i32(kern.x >> 6)
+                }
+            }
+            if self.ft.load_char(self.face, cp, ft_load_render) == 0 {
+                let slot = self.face.offset(off_face_glyph).cast[Ptr[u8]]().read()
+                let adv = i32(slot.offset(off_slot_advance_x).cast[i64]().read() >> 6)
+                pen_x += adv
+            }
+            prev_gid = gid
+        }
+    }
+    return pen_x
+}
+
+/// Draw anti-aliased UTF-8 `text` onto a premultiplied RGBA8 canvas at `(x, baseline_y)`.
+pub fn Font.draw(self, mut px: List[u8], w: i32, h: i32, x: i32, baseline_y: i32, text: str, ink: core.Color, max_x: i32) {
+    var pen_x = x
+    var prev_gid: u32 = 0
+    var i = 0
+    let sr = ink.r.clamp(0.0, 1.0)
+    let sg = ink.g.clamp(0.0, 1.0)
+    let sb = ink.b.clamp(0.0, 1.0)
+    let sa_base = ink.a.clamp(0.0, 1.0)
+    unsafe {
+        while i < text.len() {
+            let cp = u64(utf8.next(text, mut i))
+            let gid = self.ft.get_char_index(self.face, cp)
+            if prev_gid != 0 and gid != 0 {
+                var kern = FtVector {}
+                if self.ft.get_kerning(self.face, prev_gid, gid, 0, mut kern) == 0 {
+                    pen_x += i32(kern.x >> 6)
+                }
+            }
+            if pen_x >= max_x {
+                break
+            }
+            if self.ft.load_char(self.face, cp, ft_load_render) == 0 {
+                let slot = self.face.offset(off_face_glyph).cast[Ptr[u8]]().read()
+                let adv = i32(slot.offset(off_slot_advance_x).cast[i64]().read() >> 6)
+                let rows = i32(slot.offset(off_slot_bmp_rows).cast[u32]().read())
+                let width = i32(slot.offset(off_slot_bmp_width).cast[u32]().read())
+                let pitch = slot.offset(off_slot_bmp_pitch).cast[i32]().read()
+                let buf = slot.offset(off_slot_bmp_buf).cast[Ptr[u8]]().read()
+                let left = slot.offset(off_slot_bmp_left).cast[i32]().read()
+                let top = slot.offset(off_slot_bmp_top).cast[i32]().read()
+                if rows > 0 and width > 0 and not buf.is_null() {
+                    let gx0 = pen_x + left
+                    let gy0 = baseline_y - top
+                    for r in 0..rows {
+                        let dy = gy0 + r
+                        if dy < 0 or dy >= h {
+                            continue
+                        }
+                        let row_off = int(r) * int(pitch)
+                        for c in 0..width {
+                            let dx = gx0 + c
+                            if dx < 0 or dx >= w or dx >= max_x {
+                                continue
+                            }
+                            let cov = buf.offset(row_off + int(c)).read()
+                            if cov == 0 {
+                                continue
+                            }
+                            let a = (f32(cov) / 255.0) * sa_base
+                            let inv = 1.0 - a
+                            let idx = (int(dy) * int(w) + int(dx)) * 4
+                            let dr = f32(px[idx])
+                            let dg = f32(px[idx + 1])
+                            let db = f32(px[idx + 2])
+                            let da = f32(px[idx + 3])
+                            px[idx] = u8((sr * a * 255.0 + dr * inv + 0.5).clamp(0.0, 255.0))
+                            px[idx + 1] = u8((sg * a * 255.0 + dg * inv + 0.5).clamp(0.0, 255.0))
+                            px[idx + 2] = u8((sb * a * 255.0 + db * inv + 0.5).clamp(0.0, 255.0))
+                            px[idx + 3] = u8((a * 255.0 + da * inv + 0.5).clamp(0.0, 255.0))
+                        }
+                    }
+                }
+                pen_x += adv
+            }
+            prev_gid = gid
+        }
+    }
+}

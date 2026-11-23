@@ -1,0 +1,41 @@
+// pastel_ipc: Unix JSON-lines IPC socket discovery, server, and CLI client.
+
+import std.env
+import std.fs
+import std.path
+pub import server
+pub import client
+
+pub type Request = server.Request
+pub type IpcServer = server.IpcServer
+
+/// Derive the IPC socket path for a running Wayland display name.
+pub fn socket_path(wayland_display: str) -> str {
+    let dir = env.get("XDG_RUNTIME_DIR").unwrap_or("/tmp")
+    return path.join(dir, "pastel-{wayland_display}.sock")
+}
+
+/// Discover an active Pastel IPC socket via `$PASTEL_SOCKET`, `$WAYLAND_DISPLAY`, or `$XDG_RUNTIME_DIR`.
+pub fn discover_socket() -> Result[str, str] {
+    if let Some(s) = env.get("PASTEL_SOCKET") {
+        if not s.is_empty() and fs.exists(s) {
+            return Ok(s)
+        }
+    }
+    if let Some(wd) = env.get("WAYLAND_DISPLAY") {
+        let p = socket_path(wd)
+        if fs.exists(p) {
+            return Ok(p)
+        }
+    }
+    if let Some(dir) = env.get("XDG_RUNTIME_DIR") {
+        if let Ok(entries) = fs.list_dir(dir) {
+            for e in entries {
+                if e.starts_with("pastel-") and e.ends_with(".sock") {
+                    return Ok(path.join(dir, e))
+                }
+            }
+        }
+    }
+    return Err("no running Pastel IPC socket found (set PASTEL_SOCKET)")
+}

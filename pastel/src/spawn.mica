@@ -1,0 +1,36 @@
+// Process spawning (autostart, keybind commands, and optional xwayland-satellite).
+
+import std.io
+import std.process
+
+/// Spawn a shell command detached in the background with WAYLAND_DISPLAY,
+/// PASTEL_SOCKET, and an optional XDG_ACTIVATION_TOKEN.
+pub fn spawn_shell(cmd: str, wayland_display: str, pastel_socket: str, token: str) {
+    guard not cmd.trim().is_empty() else {
+        return
+    }
+    var c = process.command("sh").args(["-c", "{cmd} &"]).env("WAYLAND_DISPLAY", wayland_display)
+    if not pastel_socket.is_empty() {
+        c = c.env("PASTEL_SOCKET", pastel_socket)
+    }
+    if not token.is_empty() {
+        c = c.env("XDG_ACTIVATION_TOKEN", token)
+    }
+    discard c.status()
+}
+
+/// Launch `xwayland-satellite` in the background if configured and available.
+pub fn start_xwayland(bin_path: str, wayland_display: str) {
+    guard not bin_path.trim().is_empty() else {
+        return
+    }
+    let check = process.command("sh").args(["-c", "command -v {bin_path} >/dev/null 2>&1"]).status()
+    guard let Ok(code) = check else {
+        return
+    }
+    guard code == 0 else {
+        return
+    }
+    discard process.command("sh").args(["-c", "{bin_path} >/dev/null 2>&1 &"]).env("WAYLAND_DISPLAY", wayland_display).status()
+    io.eprint("pastel: started {bin_path} on {wayland_display}")
+}

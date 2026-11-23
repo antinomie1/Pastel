@@ -1,0 +1,567 @@
+// Strict TOML configuration parser built directly on std.toml.
+
+import std.toml
+import pastel_core as core
+import schema
+import action
+import keys
+
+/// Root Pastel configuration.
+pub struct Config {
+    pub background: core.Color = core.Color { r: 0.118, g: 0.125, b: 0.157, a: 1.0 }
+    pub autostart: List[str] = []
+    pub xwayland: schema.XWaylandConfig = schema.XWaylandConfig {}
+    pub outputs: List[schema.OutputConfig] = []
+    pub input: schema.InputConfig = schema.InputConfig {}
+    pub layout: schema.LayoutConfig = schema.LayoutConfig {}
+    pub window: schema.WindowConfig = schema.WindowConfig {}
+    pub animation: schema.AnimationConfig = schema.AnimationConfig {}
+    pub overlay: schema.OverlayConfig = schema.OverlayConfig {}
+    pub binds: List[keys.Binding] = []
+    pub rules: List[schema.WindowRule] = []
+}
+
+pub fn Config.default() -> Config {
+    return Config {
+        layout: schema.LayoutConfig.default(),
+        binds: keys.default_bindings(),
+    }
+}
+
+/// Resolve window styling and behavior rules for `(app_id, title)`.
+pub fn Config.resolve_window(self, app_id: str, title: str) -> schema.ResolvedWindow {
+    var r = schema.ResolvedWindow {
+        opacity: self.window.opacity,
+        blur: self.window.blur,
+        corner_radius: self.window.corner_radius,
+        border_width: self.window.border_width,
+        default_width: self.layout.default_width,
+    }
+    for rule in self.rules {
+        if rule.matches(app_id, title) {
+            if let Some(op) = rule.opacity {
+                r.opacity = op
+            }
+            if let Some(bl) = rule.blur {
+                r.blur = bl
+            }
+            if let Some(cr) = rule.corner_radius {
+                r.corner_radius = cr
+            }
+            if let Some(bw) = rule.border_width {
+                r.border_width = bw
+            }
+            if let Some(dw) = rule.default_width {
+                r.default_width = dw
+            }
+            if let Some(fl) = rule.floating {
+                r.floating = Some(fl)
+            }
+            if let Some(ws) = rule.workspace {
+                r.workspace = Some(ws)
+            }
+        }
+    }
+    return r
+}
+
+/// Find the output configuration block matching `name`, if any.
+pub fn Config.output_for(self, name: str) -> Option[schema.OutputConfig] {
+    for o in self.outputs {
+        if o.name == name {
+            return Some(o.clone())
+        }
+    }
+    return None
+}
+
+fn expect_str(d: toml.Doc, n: int, path: str) -> Result[str, str] {
+    guard d.kind(n) == toml.Kind.Str else {
+        return Err("{path}: expected string")
+    }
+    return Ok(d.as_str(n))
+}
+
+fn expect_bool(d: toml.Doc, n: int, path: str) -> Result[bool, str] {
+    guard d.kind(n) == toml.Kind.Bool else {
+        return Err("{path}: expected boolean")
+    }
+    return Ok(d.as_bool(n))
+}
+
+fn expect_int(d: toml.Doc, n: int, path: str) -> Result[int, str] {
+    guard d.kind(n) == toml.Kind.Int else {
+        return Err("{path}: expected integer")
+    }
+    return Ok(d.as_int(n))
+}
+
+fn expect_num(d: toml.Doc, n: int, path: str) -> Result[f64, str] {
+    guard d.kind(n) == toml.Kind.Float or d.kind(n) == toml.Kind.Int else {
+        return Err("{path}: expected number")
+    }
+    return Ok(d.as_float(n))
+}
+
+fn parse_curve(d: toml.Doc, n: int, path: str) -> Result[core.CurveSpec, str] {
+    guard d.kind(n) == toml.Kind.Table else {
+        return Err("{path}: expected spring or ease curve table")
+    }
+    var has_spring = false
+    var has_ease = false
+    var stiffness = 800.0
+    var damping = 1.0
+    var ms = 160.0
+    var kind = core.EaseKind.OutCubic
+    for i in 0..d.len(n) {
+        let c = d.child(n, i)
+        let k = d.key(c)
+        match k {
+            "stiffness" => {
+                stiffness = try expect_num(d, c, "{path}.stiffness")
+                guard stiffness > 0.0 else {
+                    return Err("{path}.stiffness must be > 0")
+                }
+                has_spring = true
+            }
+            "damping" => {
+                damping = try expect_num(d, c, "{path}.damping")
+                guard damping > 0.0 else {
+                    return Err("{path}.damping must be > 0")
+                }
+                has_spring = true
+            }
+            "ms" => {
+                ms = try expect_num(d, c, "{path}.ms")
+                guard ms >= 0.0 else {
+                    return Err("{path}.ms must be >= 0")
+                }
+                has_ease = true
+            }
+            "easing" => {
+                let s = try expect_str(d, c, "{path}.easing")
+                kind = try core.EaseKind.from_str(s)
+                has_ease = true
+            }
+            _ => { return Err("unknown key '{path}.{k}'") }
+        }
+    }
+    if has_spring and has_ease {
+        return Err("{path}: cannot mix spring (stiffness/damping) and ease (ms/easing)")
+    }
+    if has_ease {
+        return Ok(core.CurveSpec.ease(ms, kind))
+    }
+    return Ok(core.CurveSpec.spring(stiffness, damping))
+}
+
+fn parse_xwayland(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
+    guard d.kind(n) == toml.Kind.Table else {
+        return Err("[xwayland]: expected table")
+    }
+    for i in 0..d.len(n) {
+        let c = d.child(n, i)
+        let k = d.key(c)
+        match k {
+            "enabled" => cfg.xwayland.enabled = try expect_bool(d, c, "xwayland.enabled")
+            "path" => cfg.xwayland.path = try expect_str(d, c, "xwayland.path")
+            _ => { return Err("unknown key 'xwayland.{k}'") }
+        }
+    }
+    return Ok(())
+}
+
+fn parse_input(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
+    guard d.kind(n) == toml.Kind.Table else {
+        return Err("[input]: expected table")
+    }
+    for i in 0..d.len(n) {
+        let c = d.child(n, i)
+        let k = d.key(c)
+        match k {
+            "mod" => cfg.input.mod_key = try schema.ModKey.from_str(try expect_str(d, c, "input.mod"))
+            "nested-mod" => cfg.input.nested_mod = try schema.ModKey.from_str(try expect_str(d, c, "input.nested-mod"))
+            "focus-follows-mouse" => cfg.input.focus_follows_mouse = try expect_bool(d, c, "input.focus-follows-mouse")
+            "repeat-rate" => {
+                let v = try expect_int(d, c, "input.repeat-rate")
+                guard v >= 1 and v <= 200 else {
+                    return Err("input.repeat-rate must be in 1..200")
+                }
+                cfg.input.repeat_rate = i32(v)
+            }
+            "repeat-delay" => {
+                let v = try expect_int(d, c, "input.repeat-delay")
+                guard v >= 50 and v <= 5000 else {
+                    return Err("input.repeat-delay must be in 50..5000")
+                }
+                cfg.input.repeat_delay = i32(v)
+            }
+            "tap-to-click" => cfg.input.tap_to_click = try expect_bool(d, c, "input.tap-to-click")
+            "natural-scroll" => cfg.input.natural_scroll = try expect_bool(d, c, "input.natural-scroll")
+            "accel" => {
+                let v = try expect_num(d, c, "input.accel")
+                guard v >= -1.0 and v <= 1.0 else {
+                    return Err("input.accel must be in -1.0..1.0")
+                }
+                cfg.input.accel = v
+            }
+            "left-handed" => cfg.input.left_handed = try expect_bool(d, c, "input.left-handed")
+            "layout" => cfg.input.layout = try expect_str(d, c, "input.layout")
+            "variant" => cfg.input.variant = try expect_str(d, c, "input.variant")
+            "options" => cfg.input.options = try expect_str(d, c, "input.options")
+            _ => { return Err("unknown key 'input.{k}'") }
+        }
+    }
+    return Ok(())
+}
+
+fn parse_layout(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
+    guard d.kind(n) == toml.Kind.Table else {
+        return Err("[layout]: expected table")
+    }
+    for i in 0..d.len(n) {
+        let c = d.child(n, i)
+        let k = d.key(c)
+        match k {
+            "type" => {
+                let t = try expect_str(d, c, "layout.type")
+                guard t == "scrolling" else {
+                    return Err("layout.type: unknown layout '{t}' (supported: scrolling)")
+                }
+                cfg.layout.kind = t
+            }
+            "gap" => {
+                let v = try expect_num(d, c, "layout.gap")
+                guard v >= 0.0 and v <= 200.0 else {
+                    return Err("layout.gap must be in 0..200")
+                }
+                cfg.layout.gap = v
+            }
+            "default-width" => {
+                let v = try expect_num(d, c, "layout.default-width")
+                guard v >= 0.1 and v <= 1.0 else {
+                    return Err("layout.default-width must be in 0.1..1.0")
+                }
+                cfg.layout.default_width = v
+            }
+            "preset-widths" => {
+                guard d.kind(c) == toml.Kind.Array else {
+                    return Err("layout.preset-widths: expected array of numbers")
+                }
+                var ws: List[f64] = []
+                for j in 0..d.len(c) {
+                    let v = try expect_num(d, d.child(c, j), "layout.preset-widths[{j}]")
+                    guard v >= 0.1 and v <= 1.0 else {
+                        return Err("layout.preset-widths[{j}] must be in 0.1..1.0")
+                    }
+                    ws.push(v)
+                }
+                guard not ws.is_empty() else {
+                    return Err("layout.preset-widths must not be empty")
+                }
+                cfg.layout.preset_widths = ws
+            }
+            "center-focus" => cfg.layout.center_focus = try schema.CenterFocus.from_str(try expect_str(d, c, "layout.center-focus"))
+            "workspaces" => {
+                let v = try expect_int(d, c, "layout.workspaces")
+                guard v >= 0 and v <= 99 else {
+                    return Err("layout.workspaces must be in 0..99")
+                }
+                cfg.layout.workspaces = v
+            }
+            _ => { return Err("unknown key 'layout.{k}'") }
+        }
+    }
+    return Ok(())
+}
+
+fn parse_window(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
+    guard d.kind(n) == toml.Kind.Table else {
+        return Err("[window]: expected table")
+    }
+    for i in 0..d.len(n) {
+        let c = d.child(n, i)
+        let k = d.key(c)
+        match k {
+            "corner-radius" => {
+                let v = try expect_num(d, c, "window.corner-radius")
+                guard v >= 0.0 and v <= 64.0 else {
+                    return Err("window.corner-radius must be in 0..64")
+                }
+                cfg.window.corner_radius = f32(v)
+            }
+            "border-width" => {
+                let v = try expect_num(d, c, "window.border-width")
+                guard v >= 0.0 and v <= 32.0 else {
+                    return Err("window.border-width must be in 0..32")
+                }
+                cfg.window.border_width = f32(v)
+            }
+            "active-color" => cfg.window.active_color = try core.Color.from_hex(try expect_str(d, c, "window.active-color"))
+            "inactive-color" => cfg.window.inactive_color = try core.Color.from_hex(try expect_str(d, c, "window.inactive-color"))
+            "shadow-color" => cfg.window.shadow_color = try core.Color.from_hex(try expect_str(d, c, "window.shadow-color"))
+            "shadow-size" => {
+                let v = try expect_num(d, c, "window.shadow-size")
+                guard v >= 0.0 and v <= 128.0 else {
+                    return Err("window.shadow-size must be in 0..128")
+                }
+                cfg.window.shadow_size = f32(v)
+            }
+            "opacity" => {
+                let v = try expect_num(d, c, "window.opacity")
+                guard v >= 0.05 and v <= 1.0 else {
+                    return Err("window.opacity must be in 0.05..1.0")
+                }
+                cfg.window.opacity = f32(v)
+            }
+            "blur" => cfg.window.blur = try expect_bool(d, c, "window.blur")
+            "blur-xray" => cfg.window.blur_xray = try expect_bool(d, c, "window.blur-xray")
+            "blur-passes" => {
+                let v = try expect_int(d, c, "window.blur-passes")
+                guard v >= 1 and v <= 4 else {
+                    return Err("window.blur-passes must be in 1..4")
+                }
+                cfg.window.blur_passes = v
+            }
+            "blur-offset" => {
+                let v = try expect_num(d, c, "window.blur-offset")
+                guard v >= 0.5 and v <= 8.0 else {
+                    return Err("window.blur-offset must be in 0.5..8.0")
+                }
+                cfg.window.blur_offset = f32(v)
+            }
+            _ => { return Err("unknown key 'window.{k}'") }
+        }
+    }
+    return Ok(())
+}
+
+fn parse_animation(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
+    guard d.kind(n) == toml.Kind.Table else {
+        return Err("[animation]: expected table")
+    }
+    for i in 0..d.len(n) {
+        let c = d.child(n, i)
+        let k = d.key(c)
+        match k {
+            "enabled" => cfg.animation.enabled = try expect_bool(d, c, "animation.enabled")
+            "slowdown" => {
+                let v = try expect_num(d, c, "animation.slowdown")
+                guard v > 0.0 and v <= 10.0 else {
+                    return Err("animation.slowdown must be in (0, 10]")
+                }
+                cfg.animation.slowdown = v
+            }
+            "window-movement" => cfg.animation.window_movement = try parse_curve(d, c, "animation.window-movement")
+            "workspace-switch" => cfg.animation.workspace_switch = try parse_curve(d, c, "animation.workspace-switch")
+            "window-open" => cfg.animation.window_open = try parse_curve(d, c, "animation.window-open")
+            "window-close" => cfg.animation.window_close = try parse_curve(d, c, "animation.window-close")
+            "focus-ring" => cfg.animation.focus_ring = try parse_curve(d, c, "animation.focus-ring")
+            "overlay" => cfg.animation.overlay = try parse_curve(d, c, "animation.overlay")
+            _ => { return Err("unknown key 'animation.{k}'") }
+        }
+    }
+    return Ok(())
+}
+
+fn parse_overlay(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
+    guard d.kind(n) == toml.Kind.Table else {
+        return Err("[overlay]: expected table")
+    }
+    for i in 0..d.len(n) {
+        let c = d.child(n, i)
+        let k = d.key(c)
+        match k {
+            "at-startup" => cfg.overlay.at_startup = try expect_bool(d, c, "overlay.at-startup")
+            "font" => cfg.overlay.font = try expect_str(d, c, "overlay.font")
+            "opacity" => {
+                let v = try expect_num(d, c, "overlay.opacity")
+                guard v >= 0.2 and v <= 1.0 else {
+                    return Err("overlay.opacity must be in 0.2..1.0")
+                }
+                cfg.overlay.opacity = f32(v)
+            }
+            _ => { return Err("unknown key 'overlay.{k}'") }
+        }
+    }
+    return Ok(())
+}
+
+fn parse_binds(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
+    guard d.kind(n) == toml.Kind.Table else {
+        return Err("[binds]: expected table")
+    }
+    for i in 0..d.len(n) {
+        let c = d.child(n, i)
+        let spec = d.key(c)
+        let act_str = try expect_str(d, c, "binds.\"{spec}\"")
+        let combo = try keys.KeyCombo.parse(spec)
+        let act = try action.Action.parse(act_str)
+        // Replace existing binding with the same combo, or remove on "none".
+        var found = -1
+        for j in 0..cfg.binds.len() {
+            if cfg.binds[j].combo.same(combo) {
+                found = j
+                break
+            }
+        }
+        match act {
+            Noop => {
+                if found >= 0 {
+                    discard cfg.binds.remove(found)
+                }
+            }
+            _ => {
+                let b = keys.Binding { combo, act }
+                if found >= 0 {
+                    cfg.binds[found] = b
+                } else {
+                    cfg.binds.push(b)
+                }
+            }
+        }
+    }
+    return Ok(())
+}
+
+fn parse_outputs(d: toml.Doc, arr: int, mut cfg: Config) -> Result[(), str] {
+    guard d.kind(arr) == toml.Kind.Array else {
+        return Err("[[output]]: expected array of tables")
+    }
+    for idx in 0..d.len(arr) {
+        let t = d.child(arr, idx)
+        guard d.kind(t) == toml.Kind.Table else {
+            return Err("output[{idx}]: expected table")
+        }
+        var o = schema.OutputConfig {}
+        for i in 0..d.len(t) {
+            let c = d.child(t, i)
+            let k = d.key(c)
+            match k {
+                "name" => o.name = try expect_str(d, c, "output[{idx}].name")
+                "mode" => o.mode = try expect_str(d, c, "output[{idx}].mode")
+                "scale" => {
+                    let v = try expect_num(d, c, "output[{idx}].scale")
+                    guard v >= 0.5 and v <= 4.0 else {
+                        return Err("output[{idx}].scale must be in 0.5..4.0")
+                    }
+                    o.scale = Some(v)
+                }
+                "position" => {
+                    guard d.kind(c) == toml.Kind.Array and d.len(c) == 2 else {
+                        return Err("output[{idx}].position: expected [x, y]")
+                    }
+                    o.pos_x = Some(try expect_num(d, d.child(c, 0), "output[{idx}].position[0]"))
+                    o.pos_y = Some(try expect_num(d, d.child(c, 1), "output[{idx}].position[1]"))
+                }
+                "vrr" => o.vrr = Some(try expect_bool(d, c, "output[{idx}].vrr"))
+                "enabled" => o.enabled = try expect_bool(d, c, "output[{idx}].enabled")
+                _ => { return Err("unknown key 'output[{idx}].{k}'") }
+            }
+        }
+        guard not o.name.is_empty() else {
+            return Err("output[{idx}]: 'name' is required")
+        }
+        cfg.outputs.push(o)
+    }
+    return Ok(())
+}
+
+fn parse_window_rules(d: toml.Doc, arr: int, mut cfg: Config) -> Result[(), str] {
+    guard d.kind(arr) == toml.Kind.Array else {
+        return Err("[[window-rule]]: expected array of tables")
+    }
+    for idx in 0..d.len(arr) {
+        let t = d.child(arr, idx)
+        guard d.kind(t) == toml.Kind.Table else {
+            return Err("window-rule[{idx}]: expected table")
+        }
+        var r = schema.WindowRule {}
+        for i in 0..d.len(t) {
+            let c = d.child(t, i)
+            let k = d.key(c)
+            match k {
+                "app-id" => r.app_id = try expect_str(d, c, "window-rule[{idx}].app-id")
+                "title" => r.title = try expect_str(d, c, "window-rule[{idx}].title")
+                "opacity" => {
+                    let v = try expect_num(d, c, "window-rule[{idx}].opacity")
+                    guard v >= 0.05 and v <= 1.0 else {
+                        return Err("window-rule[{idx}].opacity must be in 0.05..1.0")
+                    }
+                    r.opacity = Some(f32(v))
+                }
+                "blur" => r.blur = Some(try expect_bool(d, c, "window-rule[{idx}].blur"))
+                "corner-radius" => {
+                    let v = try expect_num(d, c, "window-rule[{idx}].corner-radius")
+                    guard v >= 0.0 and v <= 64.0 else {
+                        return Err("window-rule[{idx}].corner-radius must be in 0..64")
+                    }
+                    r.corner_radius = Some(f32(v))
+                }
+                "border-width" => {
+                    let v = try expect_num(d, c, "window-rule[{idx}].border-width")
+                    guard v >= 0.0 and v <= 32.0 else {
+                        return Err("window-rule[{idx}].border-width must be in 0..32")
+                    }
+                    r.border_width = Some(f32(v))
+                }
+                "default-width" => {
+                    let v = try expect_num(d, c, "window-rule[{idx}].default-width")
+                    guard v >= 0.1 and v <= 1.0 else {
+                        return Err("window-rule[{idx}].default-width must be in 0.1..1.0")
+                    }
+                    r.default_width = Some(v)
+                }
+                "floating" => r.floating = Some(try expect_bool(d, c, "window-rule[{idx}].floating"))
+                "workspace" => {
+                    let v = try expect_int(d, c, "window-rule[{idx}].workspace")
+                    guard v >= 1 and v <= 99 else {
+                        return Err("window-rule[{idx}].workspace must be in 1..99")
+                    }
+                    r.workspace = Some(v)
+                }
+                _ => { return Err("unknown key 'window-rule[{idx}].{k}'") }
+            }
+        }
+        cfg.rules.push(r)
+    }
+    return Ok(())
+}
+
+/// Parse a TOML source string into a validated `Config`.
+pub fn parse_toml(src: str) -> Result[Config, str] {
+    var cfg = Config.default()
+    guard not src.trim().is_empty() else {
+        return Ok(cfg)
+    }
+    let d = try toml.parse(src)
+    let root = toml.root
+    for i in 0..d.len(root) {
+        let c = d.child(root, i)
+        let k = d.key(c)
+        match k {
+            "background" => cfg.background = try core.Color.from_hex(try expect_str(d, c, "background"))
+            "autostart" => {
+                guard d.kind(c) == toml.Kind.Array else {
+                    return Err("autostart: expected array of strings")
+                }
+                var cmds: List[str] = []
+                for j in 0..d.len(c) {
+                    cmds.push(try expect_str(d, d.child(c, j), "autostart[{j}]"))
+                }
+                cfg.autostart = cmds
+            }
+            "xwayland" => try parse_xwayland(d, c, mut cfg)
+            "output" => try parse_outputs(d, c, mut cfg)
+            "input" => try parse_input(d, c, mut cfg)
+            "layout" => try parse_layout(d, c, mut cfg)
+            "window" => try parse_window(d, c, mut cfg)
+            "animation" => try parse_animation(d, c, mut cfg)
+            "overlay" => try parse_overlay(d, c, mut cfg)
+            "binds" => try parse_binds(d, c, mut cfg)
+            "window-rule" => try parse_window_rules(d, c, mut cfg)
+            _ => { return Err("unknown top-level key '{k}'") }
+        }
+    }
+    return Ok(cfg)
+}

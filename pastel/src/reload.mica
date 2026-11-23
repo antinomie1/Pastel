@@ -1,0 +1,41 @@
+// Live configuration reload without restarting the compositor.
+
+import std.io
+import std.json
+import luminaria as lum
+import pastel_config as cfg
+import pastel_layout as lay
+import compositor
+import outputs
+import windows
+
+pub fn center_mode(m: cfg.CenterFocus) -> lay.CenterMode {
+    return match m {
+        Never => lay.CenterMode.Never
+        OnOverflow => lay.CenterMode.OnOverflow
+        Always => lay.CenterMode.Always
+    }
+}
+
+/// Reload `p.cfg_path` cleanly. On error, keeps the current working config intact.
+pub fn reload_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) -> Result[(), str] {
+    let next = try cfg.load(p.cfg_path)
+    p.cfg = next
+    p.desktop.reconfigure(p.cfg.layout.workspaces, p.cfg.layout.gap, p.cfg.layout.default_width, center_mode(p.cfg.layout.center_focus))
+    outputs.apply_keymap(mut p)
+    for so in p.d.outputs() {
+        outputs.apply_output_config(mut p, so)
+    }
+    outputs.sync_outputs(mut p)
+    // Re-apply window rules to all open windows.
+    let wins: List[lum.Window] = p.win_by_id.values()
+    for w in wins {
+        windows.resolve_rules(mut p, w)
+    }
+    // Re-rasterize hotkey overlay with updated colors, border width, radius, and bindings.
+    p.rebuild_overlay()
+    p.needs_layout = true
+    p.broadcast_event("config-reloaded", json.obj().with("path", json.Value.Str(p.cfg_path.clone())))
+    io.eprint("pastel: reloaded config from {p.cfg_path}")
+    return Ok(())
+}

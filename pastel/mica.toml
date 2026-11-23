@@ -1,0 +1,18 @@
+[package]
+name = "pastel"
+version = "0.1.0"
+description = "Lightweight, high-performance scrolling-tiling Wayland compositor in Mica on luminaria"
+license = "BSD-2-Clause"
+
+[dependencies]
+luminaria = { workspace = true }
+luminaria_types = { workspace = true }
+pastel_core = { workspace = true }
+pastel_config = { workspace = true }
+pastel_layout = { workspace = true }
+pastel_render = { workspace = true }
+pastel_ipc = { workspace = true }
+
+[dev-dependencies]
+luminaria_wire = { workspace = true }
+luminaria_proto = { workspace = true }

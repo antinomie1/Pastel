@@ -1,0 +1,165 @@
+// Workspace: combines a ScrollingStrip, floating window layer, and fullscreen state.
+
+import pastel_core as core
+import traits
+import scrolling
+
+/// A floating window with explicit logical geometry.
+pub struct FloatingWin {
+    pub id: u64
+    pub rect: core.Rect
+}
+
+/// One workspace on a monitor.
+pub struct Workspace {
+    pub id: u64 = 1
+    pub strip: scrolling.ScrollingStrip = scrolling.ScrollingStrip {}
+    /// Back-to-front floating windows; last element is topmost.
+    pub floating: List[FloatingWin] = []
+    /// Whether keyboard focus is currently on the floating layer.
+    pub focus_floating: bool = false
+    /// Window currently fullscreen on this workspace, if any.
+    pub fullscreen: Option[u64] = None
+}
+
+pub fn Workspace.new(id: u64) -> Workspace {
+    return Workspace { id, strip: scrolling.ScrollingStrip.new() }
+}
+
+pub fn Workspace.is_empty(self) -> bool {
+    return self.strip.is_empty() and self.floating.is_empty()
+}
+
+pub fn Workspace.window_count(self) -> int {
+    return self.strip.window_count() + self.floating.len()
+}
+
+pub fn Workspace.find_floating(self, id: u64) -> int {
+    for i, f in self.floating {
+        if f.id == id {
+            return i
+        }
+    }
+    return -1
+}
+
+pub fn Workspace.focused(self) -> Option[u64] {
+    if let Some(fs) = self.fullscreen {
+        return Some(fs)
+    }
+    if self.focus_floating and not self.floating.is_empty() {
+        return Some(self.floating[self.floating.len() - 1].id)
+    }
+    if let Some(t) = self.strip.focused() {
+        return Some(t)
+    }
+    if not self.floating.is_empty() {
+        return Some(self.floating[self.floating.len() - 1].id)
+    }
+    return None
+}
+
+pub fn Workspace.insert_tiled(mut self, id: u64, width_hint: f64) {
+    self.strip.insert(id, width_hint)
+    self.focus_floating = false
+}
+
+pub fn Workspace.insert_floating(mut self, id: u64, rect: core.Rect) {
+    self.floating.push(FloatingWin { id, rect })
+    self.focus_floating = true
+}
+
+pub fn Workspace.remove(mut self, id: u64) -> bool {
+    if self.fullscreen == Some(id) {
+        self.fullscreen = None
+    }
+    let fi = self.find_floating(id)
+    if fi >= 0 {
+        discard self.floating.remove(fi)
+        if self.floating.is_empty() {
+            self.focus_floating = false
+        }
+        return true
+    }
+    let removed = self.strip.remove(id)
+    if removed and self.strip.is_empty() and not self.floating.is_empty() {
+        self.focus_floating = true
+    }
+    return removed
+}
+
+pub fn Workspace.focus_window(mut self, id: u64) -> bool {
+    let fi = self.find_floating(id)
+    if fi >= 0 {
+        if fi != self.floating.len() - 1 {
+            let f = self.floating.remove(fi)
+            self.floating.push(f)
+        }
+        self.focus_floating = true
+        return true
+    }
+    if self.strip.focus_window(id) {
+        self.focus_floating = false
+        return true
+    }
+    return false
+}
+
+pub fn Workspace.switch_focus_layer(mut self) -> Option[u64] {
+    if self.focus_floating {
+        if not self.strip.is_empty() {
+            self.focus_floating = false
+        }
+    } else if not self.floating.is_empty() {
+        self.focus_floating = true
+    }
+    return self.focused()
+}
+
+pub fn Workspace.move_floating(mut self, id: u64, dx: f64, dy: f64) -> bool {
+    let fi = self.find_floating(id)
+    guard fi >= 0 else {
+        return false
+    }
+    self.floating[fi].rect.x += dx
+    self.floating[fi].rect.y += dy
+    return true
+}
+
+pub fn Workspace.resize_floating(mut self, id: u64, dx: f64, dy: f64, w: f64, h: f64) -> bool {
+    let fi = self.find_floating(id)
+    guard fi >= 0 else {
+        return false
+    }
+    self.floating[fi].rect.x += dx
+    self.floating[fi].rect.y += dy
+    self.floating[fi].rect.w = max(w, 64.0)
+    self.floating[fi].rect.h = max(h, 64.0)
+    return true
+}
+
+/// Compute all targets for this workspace (tiled, then floating, then fullscreen).
+pub fn Workspace.compute(mut self, ws_idx: int, full_rect: core.Rect, usable_rect: core.Rect, gap: f64, center: traits.CenterMode, mut out: List[traits.TileTarget]) {
+    let active_win = self.focused().unwrap_or(0)
+    let start = out.len()
+    self.strip.compute(usable_rect, gap, center, mut out)
+    for i in start..out.len() {
+        out[i].workspace_idx = ws_idx
+        out[i].focused = out[i].id == active_win
+        if self.fullscreen == Some(out[i].id) {
+            out[i].rect = full_rect
+            out[i].fullscreen = true
+        }
+    }
+    for f in self.floating {
+        let is_fs = self.fullscreen == Some(f.id)
+        out.push(traits.TileTarget {
+            id: f.id,
+            rect: if is_fs { full_rect } else { f.rect },
+            focused: f.id == active_win,
+            floating: not is_fs,
+            fullscreen: is_fs,
+            workspace_idx: ws_idx,
+        })
+    }
+}
