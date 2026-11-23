@@ -6,7 +6,13 @@ pub enum Action {
     Quit
     ReloadConfig
     ToggleHotkeyOverlay
+    ToggleOverview
+    PowerOffMonitors
+    PowerOnMonitors
+    SwitchLayout(int)
     CloseWindow
+    CloseWindowById(u64)
+    FocusWindow(u64)
     FocusColumnLeft
     FocusColumnRight
     FocusColumnFirst
@@ -19,10 +25,15 @@ pub enum Action {
     MoveWindowUp
     ConsumeIntoColumn
     ExpelFromColumn
+    ConsumeOrExpelLeft
+    ConsumeOrExpelRight
+    ToggleColumnTabbed
     CyclePresetWidth
     SetColumnWidth(f64)
     AdjustColumnWidth(f64)
+    ExpandColumnToAvailableWidth
     AdjustWindowHeight(f64)
+    ResetWindowHeight
     MaximizeColumn
     CenterColumn
     ToggleFullscreen
@@ -33,9 +44,14 @@ pub enum Action {
     FocusWorkspace(int)
     FocusWorkspaceUp
     FocusWorkspaceDown
+    FocusWorkspacePrevious
     MoveWindowToWorkspace(int)
+    MoveWindowToWorkspaceSilent(int)
     MoveWindowToWorkspaceUp
     MoveWindowToWorkspaceDown
+    MoveColumnToWorkspace(int)
+    MoveColumnToWorkspaceUp
+    MoveColumnToWorkspaceDown
     FocusMonitorLeft
     FocusMonitorRight
     FocusMonitorUp
@@ -44,6 +60,10 @@ pub enum Action {
     MoveWindowToMonitorRight
     MoveWindowToMonitorUp
     MoveWindowToMonitorDown
+    MoveColumnToMonitorLeft
+    MoveColumnToMonitorRight
+    MoveColumnToMonitorUp
+    MoveColumnToMonitorDown
     Spawn(str)
 }
 
@@ -60,6 +80,34 @@ pub fn Action.parse(raw: str) -> Result[Action, str] {
         }
         return Ok(Action.Spawn(cmd))
     }
+    if s.starts_with("switch-layout ") {
+        let arg = s.slice(14, s.len()).trim().to_lower()
+        return match arg {
+            "next" => Ok(Action.SwitchLayout(1))
+            "prev" or "previous" => Ok(Action.SwitchLayout(-1))
+            _ => Err("switch-layout expects 'next' or 'prev', got '{arg}'")
+        }
+    }
+    if s.starts_with("focus-window ") {
+        let arg = s.slice(13, s.len()).trim()
+        guard let Some(n) = arg.to_int() else {
+            return Err("invalid window id '{arg}'")
+        }
+        guard n > 0 else {
+            return Err("window id must be positive")
+        }
+        return Ok(Action.FocusWindow(u64(n)))
+    }
+    if s.starts_with("close-window ") {
+        let arg = s.slice(13, s.len()).trim()
+        guard let Some(n) = arg.to_int() else {
+            return Err("invalid window id '{arg}'")
+        }
+        guard n > 0 else {
+            return Err("window id must be positive")
+        }
+        return Ok(Action.CloseWindowById(u64(n)))
+    }
     if s.starts_with("focus-workspace ") {
         let arg = s.slice(16, s.len()).trim()
         guard let Some(n) = arg.to_int() else {
@@ -70,6 +118,16 @@ pub fn Action.parse(raw: str) -> Result[Action, str] {
         }
         return Ok(Action.FocusWorkspace(n))
     }
+    if s.starts_with("move-window-to-workspace-silent ") {
+        let arg = s.slice(32, s.len()).trim()
+        guard let Some(n) = arg.to_int() else {
+            return Err("invalid workspace index '{arg}'")
+        }
+        guard n >= 1 and n <= 99 else {
+            return Err("workspace index must be between 1 and 99")
+        }
+        return Ok(Action.MoveWindowToWorkspaceSilent(n))
+    }
     if s.starts_with("move-window-to-workspace ") {
         let arg = s.slice(25, s.len()).trim()
         guard let Some(n) = arg.to_int() else {
@@ -79,6 +137,16 @@ pub fn Action.parse(raw: str) -> Result[Action, str] {
             return Err("workspace index must be between 1 and 99")
         }
         return Ok(Action.MoveWindowToWorkspace(n))
+    }
+    if s.starts_with("move-column-to-workspace ") {
+        let arg = s.slice(25, s.len()).trim()
+        guard let Some(n) = arg.to_int() else {
+            return Err("invalid workspace index '{arg}'")
+        }
+        guard n >= 1 and n <= 99 else {
+            return Err("workspace index must be between 1 and 99")
+        }
+        return Ok(Action.MoveColumnToWorkspace(n))
     }
     if s.starts_with("set-column-width ") {
         let arg = s.slice(17, s.len()).trim()
@@ -141,6 +209,9 @@ pub fn Action.parse(raw: str) -> Result[Action, str] {
         "quit" => Ok(Action.Quit)
         "reload-config" => Ok(Action.ReloadConfig)
         "toggle-hotkey-overlay" => Ok(Action.ToggleHotkeyOverlay)
+        "toggle-overview" => Ok(Action.ToggleOverview)
+        "power-off-monitors" => Ok(Action.PowerOffMonitors)
+        "power-on-monitors" => Ok(Action.PowerOnMonitors)
         "close-window" => Ok(Action.CloseWindow)
         "focus-column-left" => Ok(Action.FocusColumnLeft)
         "focus-column-right" => Ok(Action.FocusColumnRight)
@@ -154,7 +225,12 @@ pub fn Action.parse(raw: str) -> Result[Action, str] {
         "move-window-up" => Ok(Action.MoveWindowUp)
         "consume-into-column" => Ok(Action.ConsumeIntoColumn)
         "expel-from-column" => Ok(Action.ExpelFromColumn)
+        "consume-or-expel-window-left" => Ok(Action.ConsumeOrExpelLeft)
+        "consume-or-expel-window-right" => Ok(Action.ConsumeOrExpelRight)
+        "toggle-column-tabbed-display" => Ok(Action.ToggleColumnTabbed)
         "cycle-preset-width" => Ok(Action.CyclePresetWidth)
+        "expand-column-to-available-width" => Ok(Action.ExpandColumnToAvailableWidth)
+        "reset-window-height" => Ok(Action.ResetWindowHeight)
         "maximize-column" => Ok(Action.MaximizeColumn)
         "center-column" => Ok(Action.CenterColumn)
         "toggle-fullscreen" => Ok(Action.ToggleFullscreen)
@@ -162,8 +238,11 @@ pub fn Action.parse(raw: str) -> Result[Action, str] {
         "switch-focus-floating" => Ok(Action.SwitchFocusFloating)
         "focus-workspace-up" => Ok(Action.FocusWorkspaceUp)
         "focus-workspace-down" => Ok(Action.FocusWorkspaceDown)
+        "focus-workspace-previous" => Ok(Action.FocusWorkspacePrevious)
         "move-window-to-workspace-up" => Ok(Action.MoveWindowToWorkspaceUp)
         "move-window-to-workspace-down" => Ok(Action.MoveWindowToWorkspaceDown)
+        "move-column-to-workspace-up" => Ok(Action.MoveColumnToWorkspaceUp)
+        "move-column-to-workspace-down" => Ok(Action.MoveColumnToWorkspaceDown)
         "focus-monitor-left" => Ok(Action.FocusMonitorLeft)
         "focus-monitor-right" => Ok(Action.FocusMonitorRight)
         "focus-monitor-up" => Ok(Action.FocusMonitorUp)
@@ -172,6 +251,10 @@ pub fn Action.parse(raw: str) -> Result[Action, str] {
         "move-window-to-monitor-right" => Ok(Action.MoveWindowToMonitorRight)
         "move-window-to-monitor-up" => Ok(Action.MoveWindowToMonitorUp)
         "move-window-to-monitor-down" => Ok(Action.MoveWindowToMonitorDown)
+        "move-column-to-monitor-left" => Ok(Action.MoveColumnToMonitorLeft)
+        "move-column-to-monitor-right" => Ok(Action.MoveColumnToMonitorRight)
+        "move-column-to-monitor-up" => Ok(Action.MoveColumnToMonitorUp)
+        "move-column-to-monitor-down" => Ok(Action.MoveColumnToMonitorDown)
         _ => Err("unknown action '{s}' (run `pastel --list-actions` for valid actions)")
     }
 }
@@ -179,10 +262,10 @@ pub fn Action.parse(raw: str) -> Result[Action, str] {
 /// Overlay section category matching Pastel's clean 4-section grouping.
 pub fn Action.category(self) -> str {
     return match self {
-        CloseWindow or FocusWindowDown or FocusWindowUp or MoveWindowDown or MoveWindowUp or AdjustWindowHeight or ToggleFullscreen or ToggleFloating or SwitchFocusFloating or MoveFloating or ResizeFloating => "Windows"
-        FocusColumnLeft or FocusColumnRight or FocusColumnFirst or FocusColumnLast or MoveColumnLeft or MoveColumnRight or ConsumeIntoColumn or ExpelFromColumn or CyclePresetWidth or SetColumnWidth or AdjustColumnWidth or MaximizeColumn or CenterColumn => "Columns"
-        FocusWorkspace or FocusWorkspaceUp or FocusWorkspaceDown or MoveWindowToWorkspace or MoveWindowToWorkspaceUp or MoveWindowToWorkspaceDown or FocusMonitorLeft or FocusMonitorRight or FocusMonitorUp or FocusMonitorDown or MoveWindowToMonitorLeft or MoveWindowToMonitorRight or MoveWindowToMonitorUp or MoveWindowToMonitorDown => "Workspaces"
-        Spawn or ToggleHotkeyOverlay or ReloadConfig or Quit => "Session"
+        CloseWindow or CloseWindowById or FocusWindow or FocusWindowDown or FocusWindowUp or MoveWindowDown or MoveWindowUp or AdjustWindowHeight or ResetWindowHeight or ToggleFullscreen or ToggleFloating or SwitchFocusFloating or MoveFloating or ResizeFloating => "Windows"
+        FocusColumnLeft or FocusColumnRight or FocusColumnFirst or FocusColumnLast or MoveColumnLeft or MoveColumnRight or ConsumeIntoColumn or ExpelFromColumn or ConsumeOrExpelLeft or ConsumeOrExpelRight or ToggleColumnTabbed or CyclePresetWidth or SetColumnWidth or AdjustColumnWidth or ExpandColumnToAvailableWidth or MaximizeColumn or CenterColumn => "Columns"
+        FocusWorkspace or FocusWorkspaceUp or FocusWorkspaceDown or FocusWorkspacePrevious or MoveWindowToWorkspace or MoveWindowToWorkspaceSilent or MoveWindowToWorkspaceUp or MoveWindowToWorkspaceDown or MoveColumnToWorkspace or MoveColumnToWorkspaceUp or MoveColumnToWorkspaceDown or FocusMonitorLeft or FocusMonitorRight or FocusMonitorUp or FocusMonitorDown or MoveWindowToMonitorLeft or MoveWindowToMonitorRight or MoveWindowToMonitorUp or MoveWindowToMonitorDown or MoveColumnToMonitorLeft or MoveColumnToMonitorRight or MoveColumnToMonitorUp or MoveColumnToMonitorDown or ToggleOverview => "Workspaces"
+        Spawn or ToggleHotkeyOverlay or PowerOffMonitors or PowerOnMonitors or SwitchLayout or ReloadConfig or Quit => "Session"
         Noop => ""
     }
 }
@@ -194,7 +277,13 @@ pub fn Action.label(self) -> str {
         Quit => "Quit"
         ReloadConfig => "Reload config"
         ToggleHotkeyOverlay => "Hotkeys"
+        ToggleOverview => "Overview"
+        PowerOffMonitors => "Power off monitors"
+        PowerOnMonitors => "Power on monitors"
+        SwitchLayout(d) => if d < 0 { "Previous layout" } else { "Next layout" }
         CloseWindow => "Close window"
+        CloseWindowById(id) => "Close window {id}"
+        FocusWindow(id) => "Focus window {id}"
         FocusColumnLeft => "Focus left"
         FocusColumnRight => "Focus right"
         FocusColumnFirst => "Focus first column"
@@ -207,10 +296,15 @@ pub fn Action.label(self) -> str {
         MoveWindowUp => "Move window up"
         ConsumeIntoColumn => "Join column"
         ExpelFromColumn => "Expel from column"
+        ConsumeOrExpelLeft => "Consume/expel left"
+        ConsumeOrExpelRight => "Consume/expel right"
+        ToggleColumnTabbed => "Toggle tabbed column"
         CyclePresetWidth => "Cycle width"
         SetColumnWidth(v) => "Set width {v}"
         AdjustColumnWidth(v) => if v < 0.0 { "Shrink width" } else { "Grow width" }
+        ExpandColumnToAvailableWidth => "Expand column width"
         AdjustWindowHeight(v) => if v < 0.0 { "Shrink height" } else { "Grow height" }
+        ResetWindowHeight => "Reset window height"
         MaximizeColumn => "Maximize column"
         CenterColumn => "Center column"
         ToggleFullscreen => "Fullscreen"
@@ -221,9 +315,14 @@ pub fn Action.label(self) -> str {
         FocusWorkspace(n) => "Workspace {n}"
         FocusWorkspaceUp => "Workspace up"
         FocusWorkspaceDown => "Workspace down"
+        FocusWorkspacePrevious => "Previous workspace"
         MoveWindowToWorkspace(n) => "Move to ws {n}"
+        MoveWindowToWorkspaceSilent(n) => "Send to ws {n}"
         MoveWindowToWorkspaceUp => "Move to ws up"
         MoveWindowToWorkspaceDown => "Move to ws down"
+        MoveColumnToWorkspace(n) => "Move col to ws {n}"
+        MoveColumnToWorkspaceUp => "Move col to ws up"
+        MoveColumnToWorkspaceDown => "Move col to ws down"
         FocusMonitorLeft => "Focus monitor left"
         FocusMonitorRight => "Focus monitor right"
         FocusMonitorUp => "Focus monitor up"
@@ -232,6 +331,10 @@ pub fn Action.label(self) -> str {
         MoveWindowToMonitorRight => "Move to monitor right"
         MoveWindowToMonitorUp => "Move to monitor up"
         MoveWindowToMonitorDown => "Move to monitor down"
+        MoveColumnToMonitorLeft => "Move col monitor left"
+        MoveColumnToMonitorRight => "Move col monitor right"
+        MoveColumnToMonitorUp => "Move col monitor up"
+        MoveColumnToMonitorDown => "Move col monitor down"
         Spawn(cmd) => "Launch {cmd}"
     }
 }
@@ -243,7 +346,13 @@ pub fn all_actions() -> List[(str, str)] {
         ("quit", "Quit Pastel"),
         ("reload-config", "Reload configuration file live"),
         ("toggle-hotkey-overlay", "Show or hide the hotkey overlay"),
+        ("toggle-overview", "Toggle workspace & window thumbnail overview"),
+        ("power-off-monitors", "Turn off monitors via DPMS (wakes on input)"),
+        ("power-on-monitors", "Turn on monitors via DPMS"),
+        ("switch-layout <next|prev>", "Cycle active XKB keyboard layout group"),
         ("close-window", "Close the focused window"),
+        ("close-window <id>", "Close window by numeric id"),
+        ("focus-window <id>", "Focus window by numeric id"),
         ("focus-column-left", "Focus the column to the left"),
         ("focus-column-right", "Focus the column to the right"),
         ("focus-column-first", "Focus the first column"),
@@ -256,10 +365,15 @@ pub fn all_actions() -> List[(str, str)] {
         ("move-window-up", "Move the focused window up"),
         ("consume-into-column", "Pull focused window into adjacent column"),
         ("expel-from-column", "Expel focused window into a new column"),
+        ("consume-or-expel-window-left", "Consume into left column or expel leftward"),
+        ("consume-or-expel-window-right", "Consume into right column or expel rightward"),
+        ("toggle-column-tabbed-display", "Toggle tabbed stack display for active column"),
         ("cycle-preset-width", "Cycle through layout.preset-widths"),
         ("set-column-width <0.1..1.0>", "Set focused column width fraction"),
         ("adjust-column-width <delta>", "Adjust focused column width fraction"),
+        ("expand-column-to-available-width", "Expand active column to fill remaining viewport width"),
         ("adjust-window-height <delta>", "Adjust focused window height weight in column"),
+        ("reset-window-height", "Reset window height weights in active column"),
         ("maximize-column", "Toggle full-width column maximization"),
         ("center-column", "Center the focused column in the viewport"),
         ("toggle-fullscreen", "Toggle fullscreen on the focused window"),
@@ -270,9 +384,14 @@ pub fn all_actions() -> List[(str, str)] {
         ("focus-workspace <1..99>", "Focus workspace by 1-based index"),
         ("focus-workspace-up", "Focus previous workspace"),
         ("focus-workspace-down", "Focus next workspace"),
+        ("focus-workspace-previous", "Toggle back to previously active workspace"),
         ("move-window-to-workspace <1..99>", "Move focused window to workspace"),
+        ("move-window-to-workspace-silent <1..99>", "Send focused window to workspace without switching"),
         ("move-window-to-workspace-up", "Move focused window to previous workspace"),
         ("move-window-to-workspace-down", "Move focused window to next workspace"),
+        ("move-column-to-workspace <1..99>", "Move active column to workspace"),
+        ("move-column-to-workspace-up", "Move active column to previous workspace"),
+        ("move-column-to-workspace-down", "Move active column to next workspace"),
         ("focus-monitor-left", "Focus monitor to the left"),
         ("focus-monitor-right", "Focus monitor to the right"),
         ("focus-monitor-up", "Focus monitor above"),
@@ -281,6 +400,10 @@ pub fn all_actions() -> List[(str, str)] {
         ("move-window-to-monitor-right", "Move focused window to right monitor"),
         ("move-window-to-monitor-up", "Move focused window to monitor above"),
         ("move-window-to-monitor-down", "Move focused window to monitor below"),
+        ("move-column-to-monitor-left", "Move active column to left monitor"),
+        ("move-column-to-monitor-right", "Move active column to right monitor"),
+        ("move-column-to-monitor-up", "Move active column to monitor above"),
+        ("move-column-to-monitor-down", "Move active column to monitor below"),
         ("spawn <command>", "Spawn a shell command with WAYLAND_DISPLAY"),
     ]
 }

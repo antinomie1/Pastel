@@ -41,5 +41,6 @@ An animation settles to its exact target once $|x(t) - x_{\text{target}}| < \eps
 - **Window geometry & strip scroll** (`window-movement`): X, Y, W, H per window (smoothly interpolating column/camera shifts)
 - **Workspace switch** (`workspace-switch`): vertical strip slide between workspaces
 - **Window open / close** (`window-open` / `window-close`): subtle scale (`0.94 <-> 1.0`) and opacity fade on open and close
-- **Focus ring** (`focus-ring`): RGBA border color interpolation between `inactive-color` and `active-color`
+- **Focus ring & bell pulse** (`focus-ring`): RGBA border color interpolation between `inactive-color` and `active-color`, plus a 350 ms highlight pulse on `xdg-system-bell-v1`
 - **Hotkey overlay** (`overlay`): opacity & slight vertical slide (`12px`)
+- **Overview** (`overview`): smooth scale & position zoom between active workspace and multi-workspace thumbnail bands (`0.0 <-> 1.0`)

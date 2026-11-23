@@ -12,6 +12,10 @@ import luminaria_wire as wire
 import luminaria_proto as proto
 import luminaria_proto.wayland as wl
 import luminaria_proto.xdg_shell as xdg
+import luminaria_proto.ext_session_lock as slock
+import luminaria_proto.color_management as cm
+import luminaria_proto.wlr_gamma_control_unstable as gamma
+import luminaria_proto.wlr_virtual_pointer_unstable as vptr
 import pastel_config as cfg
 import pastel_render as ren
 import pastel_ipc as ipc
@@ -220,4 +224,153 @@ test "RequestActivate syncs desktop workspace/focus and inotify auto-reloads con
     assert((pastel.outputs.output_scale(2560.0, 1440.0, mode_4k) - 1.0).abs() < 0.001)
     assert((pastel.outputs.output_scale(1440.0, 2560.0, mode_4k) - 1.0).abs() < 0.001)
     assert((pastel.outputs.output_scale(720.0, 1280.0, mode_4k) - 2.0).abs() < 0.001)
+}
+
+test "end-to-end lock-screen guard, DPMS wake, Overview, tabbed columns, HDR, on-demand VRR, privacy redaction, bell, and new Wayland globals" {
+    let dir = fs.create_temp_dir("pastel-e2e-ext").expect("temp dir")
+    discard env.set("XDG_RUNTIME_DIR", dir)
+
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(comp_ren) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped: no Vulkan device")
+        return
+    }
+    let mode = lum.Mode { width: 1280, height: 720, refresh_mhz: 120000 }
+    let opts = lum.Options { backend: lum.Kind.Headless, headless: [mode], title: "Pastel-Ext-Test" }
+    let be = lum.backend.Backend.open(lum.backend.Options { kind: lum.Kind.Headless, headless: [mode] }).expect("headless")
+    let disp = lum.display.Display.with(opts, be, comp_ren).expect("display")
+
+    let cfg_text = """
+    [layout]
+    always-center-single-column = true
+
+    [input.mouse]
+    accel-profile = "flat"
+
+    [cursor]
+    hide-when-typing = true
+
+    [[output]]
+    name = "HEADLESS-1"
+    vrr = "on-demand"
+    hdr = true
+    sdr-nits = 220.0
+    max-nits = 1000.0
+
+    [binds]
+    "Mod+P" = \{ action = "power-off-monitors", allow-when-locked = true \}
+
+    [[window-rule]]
+    app-id = "secret-vault"
+    block-out-from-screencast = true
+    open-focused = false
+    floating = true
+    default-floating-size = [520, 340]
+
+    [[window-rule]]
+    app-id = "game-app"
+    variable-refresh-rate = true
+    """
+    let config = cfg.from_toml(cfg_text).expect("extended config")
+    var p = pastel.compositor.Pastel.new(disp, config, "", false, sheet)
+    defer p.shutdown()
+
+    // 1. Verify HDR enabled on HEADLESS-1 and all new Wayland globals advertised.
+    let out0 = p.d.outputs()[0]
+    assert(p.d.hdr(out0))
+    let conn = wire.connect(p.d.socket()).expect("connect wayland")
+    var fx = ClientFx { c: conn }
+    let comp = wl.Compositor { id: bind_global(mut p, mut fx, wl.compositor_iface, 6) }
+    let shm = wl.Shm { id: bind_global(mut p, mut fx, wl.shm_iface, 1) }
+    let wm = xdg.WmBase { id: bind_global(mut p, mut fx, xdg.wm_base_iface, 2) }
+    var has_cm = false
+    var has_gamma = false
+    var has_vptr = false
+    var has_lock = false
+    for (_, iface) in fx.globals {
+        if iface == cm.color_manager_iface {
+            has_cm = true
+        }
+        if iface == gamma.control_manager_iface {
+            has_gamma = true
+        }
+        if iface == vptr.pointer_manager_iface {
+            has_vptr = true
+        }
+        if iface == slock.lock_manager_iface {
+            has_lock = true
+        }
+    }
+    assert(has_cm and has_gamma and has_vptr and has_lock)
+
+    // 2. Map game window + unfocused secret floating window with custom size & screencast redaction.
+    map_shm_window(mut p, mut fx, comp, shm, wm, "game-app", "Game", 600, 680)
+    let game_id = p.desktop.focused_window().unwrap()
+    map_shm_window(mut p, mut fx, comp, shm, wm, "secret-vault", "Vault", 520, 340)
+    // open-focused = false kept focus on game-app!
+    assert_eq(p.desktop.focused_window(), Some(game_id))
+    let st_val = json.parse(p.state_json()).expect("state json")
+    assert_eq(st_val.get_bool("monitors_powered"), Some(true))
+    assert_eq(st_val.get_bool("overview_open"), Some(false))
+
+    // 3. On-demand VRR: OFF when tiled, ON when game-app goes fullscreen, OFF when un-fullscreened.
+    let oid0 = pastel.outputs.output_id(out0)
+    assert_eq(p.vrr_state.get(oid0), Some(false))
+    pastel.input.dispatch_action(mut p, cfg.Action.ToggleFullscreen).expect("fs on")
+    p.sync_layout(time.now_ns())
+    assert_eq(p.vrr_state.get(oid0), Some(true))
+    pastel.input.dispatch_action(mut p, cfg.Action.ToggleFullscreen).expect("fs off")
+    p.sync_layout(time.now_ns())
+    assert_eq(p.vrr_state.get(oid0), Some(false))
+
+    // 4. Tabbed column emits TabBar into EffectSheet; Bell triggers visual pulse.
+    map_shm_window(mut p, mut fx, comp, shm, wm, "editor", "Editor", 600, 680)
+    pastel.input.dispatch_action(mut p, cfg.Action.ConsumeOrExpelLeft).expect("consume left")
+    pastel.input.dispatch_action(mut p, cfg.Action.ToggleColumnTabbed).expect("tabbed")
+    p.sync_layout(time.now_ns())
+    let snap_tab = p.sheet.snapshot(0)
+    assert_eq(snap_tab.tabs.len(), 1)
+    assert_eq(snap_tab.tabs[0].count, 2)
+
+    let game_w = p.win_by_id.get(game_id).unwrap()
+    p.handle_event(lum.Event.Bell(Some(game_w)))
+    assert(p.anims.bell_alpha(game_id, time.now_ns()) > 0.0)
+
+    // 5. Overview toggle populates overview_bands + OverviewFrame, and 4-finger swipe closes it.
+    pastel.input.dispatch_action(mut p, cfg.Action.ToggleOverview).expect("overview on")
+    assert(p.overview_open)
+    p.sync_layout(time.now_ns() + 500000000)
+    assert(not p.overview_bands.is_empty())
+    let snap_ov = p.sheet.snapshot(0)
+    assert(not snap_ov.frames.is_empty())
+    assert(pastel.input.on_gesture(mut p, lum.Gesture { kind: lum.GestureKind.SwipeBegin, fingers: 4 }))
+    assert(pastel.input.on_gesture(mut p, lum.Gesture { kind: lum.GestureKind.SwipeUpdate, fingers: 4, dy: -60.0 }))
+    assert(pastel.input.on_gesture(mut p, lum.Gesture { kind: lum.GestureKind.SwipeEnd, fingers: 4 }))
+    assert(not p.overview_open)
+
+    // 6. DPMS power-off disables outputs; any input auto-wakes them.
+    pastel.input.dispatch_action(mut p, cfg.Action.PowerOffMonitors).expect("dpms off")
+    assert(not p.monitors_powered)
+    assert(not p.d.output_enabled(out0))
+    pastel.input.on_motion(mut p, lum.Pointer { x: 100.0, y: 100.0 })
+    assert(p.monitors_powered)
+    assert(p.d.output_enabled(out0))
+
+    // 7. Lock-screen security: lock via ext-session-lock-v1; normal Mod+O is blocked, allow-when-locked Mod+P fires!
+    let lm = slock.LockManager { id: bind_global(mut p, mut fx, slock.lock_manager_iface, 1) }
+    let lock_obj = lm.lock(mut fx.c)
+    pump(mut p, mut fx, 40)
+    assert(p.d.locked())
+    let mod_super = lum.Mods { logo: true }
+    // Normal shortcut Mod+O must NOT fire while locked.
+    let consumed_o = pastel.input.on_key(mut p, lum.Key { code: 24, sym: u32(0x6f), base_sym: u32(0x6f), pressed: true, mods: mod_super })
+    assert(not consumed_o)
+    assert(not p.overview_open)
+    // Explicitly allowed `Mod+P` (`allow-when-locked = true`) MUST fire while locked!
+    let consumed_p = pastel.input.on_key(mut p, lum.Key { code: 25, sym: u32(0x70), base_sym: u32(0x70), pressed: true, mods: mod_super })
+    assert(consumed_p)
+    assert(not p.monitors_powered)
+    lock_obj.unlock_and_destroy(mut fx.c)
+    pump(mut p, mut fx, 40)
+    assert(not p.d.locked())
 }

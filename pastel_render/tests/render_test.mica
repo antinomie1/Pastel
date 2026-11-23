@@ -324,3 +324,66 @@ test "AnimState window-close animation and PastelRenderer hotplug output index m
     r.drop_target(tkey)
     r.close()
 }
+
+test "PastelRenderer HDR10 target, TabBar pills, OverviewFrame, and AnimState overview/bell" {
+    let c = cfg.Config.default()
+    var anims = ren.AnimState.new()
+    anims.set_overview(true, c.animation, 0)
+    anims.trigger_bell(42, 0)
+    anims.begin_frame()
+    let ov_mid = anims.tick_overview(40000000)
+    let bell_mid = anims.bell_alpha(42, 100000000)
+    assert(anims.is_active())
+    assert(ov_mid > 0.0 and ov_mid <= 1.0)
+    assert(bell_mid > 0.5 and bell_mid < 1.0)
+    anims.begin_frame()
+    let ov_end = anims.tick_overview(2000000000)
+    let bell_end = anims.bell_alpha(42, 2000000000)
+    assert(not anims.is_active())
+    assert_eq(ov_end, 1.0)
+    assert_eq(bell_end, 0.0)
+
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(rr) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped: no Vulkan device")
+        return
+    }
+    var r = rr
+    r.add_output(0, 128, 128, vec4(0.0, 0.0, 0.0, 1.0))
+    let ts = r.targets(types.Want { width: 128, height: 128, format: types.buffer.xrgb8888, count: 1, export: false }).expect("sdr target")
+    let tkey = ts[0].key
+    let empty_items: List[ren.WindowEffect] = []
+    let empty_closing: List[ren.ClosingEffect] = []
+    sheet.set_output_all(
+        0,
+        core.Color.rgb(0.0, 0.0, 0.0),
+        ren.BlurSettings { enabled: false },
+        empty_items,
+        empty_closing,
+        [ren.TabBar { x: 16.0, y: 8.0, w: 96.0, h: 4.0, count: 2, active_idx: 0, active_color: vec4(1.0, 1.0, 1.0, 1.0), inactive_color: vec4(0.2, 0.2, 0.2, 1.0), radius: 0.0 }],
+        [ren.OverviewFrame { x: 20.0, y: 30.0, w: 88.0, h: 60.0, border_width: 2.0, border_color: vec4(0.0, 1.0, 0.0, 1.0), fill_color: vec4(0.1, 0.1, 0.3, 1.0), radius: 0.0 }],
+    )
+    let empty_ps: List[types.Placement] = []
+    r.layout(0, empty_ps)
+    assert(r.scanout(0).is_none())
+    assert(r.render(0, tkey, 0).expect("render tabs + overview").is_some())
+    let fb = r.read(tkey).expect("read")
+    // Tab 0 pill at (30, 10) is white; OverviewFrame fill at (64, 60) is blue-tinted; border at (19, 60) is green!
+    let p_tab = (10 * 128 + 30) * 4
+    assert(fb[p_tab] > 200 and fb[p_tab + 1] > 200 and fb[p_tab + 2] > 200)
+    let p_frame = (60 * 128 + 64) * 4
+    assert(fb[p_frame] > 50)
+    let p_border = (60 * 128 + 19) * 4
+    assert(fb[p_border + 1] > 200)
+    r.drop_target(tkey)
+
+    // Verify 10-bit HDR10 PQ target renders cleanly on PastelRenderer with zero validation errors.
+    r.set_output_color(0, types.dst_hdr_pq, 203.0, 1000.0)
+    if let Ok(hts) = r.targets(types.Want { width: 64, height: 64, format: types.buffer.xrgb2101010, count: 1, export: false }) {
+        let hkey = hts[0].key
+        r.resize(0, 64, 64)
+        assert(r.render(0, hkey, 0).expect("render hdr10").is_some())
+        r.drop_target(hkey)
+    }
+    r.close()
+}

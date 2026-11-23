@@ -5,9 +5,9 @@
 Pastel combines two proven systems-engineering ideas on top of Mica and `luminaria`:
 
 1. **WDDM + DWM separation of concerns**:
-   - **Device & Protocol Layer (`luminaria`)** acts as the WDDM display driver/kernel boundary: Wayland protocol state machines, DRM/KMS atomic commit thread with real-time scheduling, explicit sync (`sync_file` / `drm_syncobj`), direct scanout, Multi-Plane Overlays (MPO), multi-seat input (`libseat` / `libinput` / `xkbcommon`), adaptive vblank clock, and GPU device-lost (TDR) recovery.
-   - **Visual Composition Layer (`pastel_render`)** acts as the DWM visual compositor: manages the visual effect sheet (hollow SDF borders, Dual-Kawase frosted-glass blur, shadows, dynamic background, hotkey overlay) while preserving zero-copy direct scanout and MPO promotion whenever possible.
-   - **Windowing Policy Layer (`pastel_layout` + `pastel`)** decides where windows belong, how workspaces and focus behave, and how user input translates into actions.
+   - **Device & Protocol Layer (`luminaria`)** acts as the WDDM display driver/kernel boundary: Wayland protocol state machines (including `wp-color-management-v1`, `wlr-gamma-control-unstable-v1`, `wlr-virtual-pointer-unstable-v1`, `ext-session-lock-v1`, `ext-image-copy-capture-v1` with per-window redaction), DRM/KMS atomic commit thread with real-time scheduling, explicit sync (`sync_file` / `drm_syncobj`), HDR static metadata & CRTC gamma LUT, direct scanout, Multi-Plane Overlays (MPO), multi-seat input (`libseat` / `libinput` / `xkbcommon`), adaptive vblank clock, and GPU device-lost (TDR) recovery.
+   - **Visual Composition Layer (`pastel_render`)** acts as the DWM visual compositor: manages the visual effect sheet (hollow SDF borders, Dual-Kawase frosted-glass blur, tab indicator pills, overview workspace frames, shadows, dynamic background, hotkey overlay) and lazy multi-format HDR/SDR canvases while preserving zero-copy direct scanout and MPO promotion whenever possible.
+   - **Windowing Policy Layer (`pastel_layout` + `pastel`)** decides where windows belong, how workspaces/overview/tabbed columns/focus behave, lock-screen shortcut isolation, on-demand VRR policy, and how user input translates into actions.
 
 2. **Pluggable, monomorphized modularity**:
    - Mica traits are structural and monomorphized at compile time (`Display[O, R]`, `Pastel[O, R]`, `Curve`, `LayoutPolicy`), giving clean plug-in boundaries with zero virtual-call indirection.

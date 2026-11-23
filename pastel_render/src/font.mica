@@ -164,6 +164,25 @@ pub fn Font.open(pattern: str, size_pt: f32) -> Option[Font] {
     }
 }
 
+/// Resize an already-open font face without re-querying Fontconfig or re-opening FreeType2.
+pub fn Font.set_size(mut self, size_pt: f32) -> bool {
+    guard not self.face.is_null() else {
+        return false
+    }
+    unsafe {
+        let sz_26_6 = i64((size_pt * 64.0).round())
+        guard self.ft.set_char_size(self.face, 0, sz_26_6, 96, 96) == 0 else {
+            return false
+        }
+        let size_ptr = self.face.offset(off_face_size).cast[Ptr[u8]]().read()
+        let asc = i32(size_ptr.offset(off_size_ascender).cast[i64]().read() >> 6)
+        let h = i32(size_ptr.offset(off_size_height).cast[i64]().read() >> 6)
+        self.ascent_px = max(asc, 1)
+        self.height_px = max(h, max(asc, 1))
+        return true
+    }
+}
+
 pub fn Font.ascent(self) -> i32 {
     return self.ascent_px
 }
@@ -198,7 +217,7 @@ pub fn Font.measure(self, text: str) -> i32 {
                     pen_x += i32(kern.x >> 6)
                 }
             }
-            if self.ft.load_char(self.face, cp, ft_load_render) == 0 {
+            if self.ft.load_char(self.face, cp, 0) == 0 {
                 let slot = self.face.offset(off_face_glyph).cast[Ptr[u8]]().read()
                 let adv = i32(slot.offset(off_slot_advance_x).cast[i64]().read() >> 6)
                 pen_x += adv

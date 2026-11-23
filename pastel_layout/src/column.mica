@@ -15,13 +15,15 @@ pub struct Column {
     /// Prior width remembered before toggling column maximize.
     pub saved_width: f64 = 0.5
     pub maximized: bool = false
+    /// When true, only the active window in this column is shown (with a compact tab indicator).
+    pub tabbed: bool = false
     /// Active window index within `windows`.
     pub active_row: int = 0
 }
 
 pub fn Column.single(id: u64, width_frac: f64) -> Column {
     let w = width_frac.clamp(0.1, 1.0)
-    return Column { windows: [WindowSlot { id }], width_frac: w, saved_width: w, maximized: false, active_row: 0 }
+    return Column { windows: [WindowSlot { id }], width_frac: w, saved_width: w, maximized: false, tabbed: false, active_row: 0 }
 }
 
 /// Compute column width in logical pixels from a viewport fraction so that `k`
@@ -64,4 +66,15 @@ pub fn Column.total_weight(self) -> f64 {
         sum += max(slot.weight, 0.1)
     }
     return max(sum, 0.1)
+}
+
+pub fn Column.reset_weights(mut self) -> bool {
+    var changed = false
+    for i in 0..self.windows.len() {
+        if (self.windows[i].weight - 1.0).abs() > 1e-6 {
+            self.windows[i].weight = 1.0
+            changed = true
+        }
+    }
+    return changed
 }

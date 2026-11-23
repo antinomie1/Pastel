@@ -70,6 +70,14 @@ pub fn Workspace.insert_tiled(mut self, id: u64, width_hint: f64) {
     self.focus_floating = false
 }
 
+pub fn Workspace.insert_tiled_unfocused(mut self, id: u64, width_hint: f64) {
+    if self.is_empty() {
+        self.insert_tiled(id, width_hint)
+        return
+    }
+    self.strip.insert_unfocused(id, width_hint)
+}
+
 pub fn Workspace.insert_column(mut self, take col: column.Column) {
     self.fullscreen = None
     self.strip.insert_column(col)
@@ -80,6 +88,14 @@ pub fn Workspace.insert_floating(mut self, id: u64, rect: core.Rect) {
     self.fullscreen = None
     self.floating.push(FloatingWin { id, rect })
     self.focus_floating = true
+}
+
+pub fn Workspace.insert_floating_unfocused(mut self, id: u64, rect: core.Rect) {
+    if self.is_empty() {
+        self.insert_floating(id, rect)
+        return
+    }
+    self.floating.insert(0, FloatingWin { id, rect })
 }
 
 pub fn Workspace.remove(mut self, id: u64) -> bool {
@@ -198,4 +214,33 @@ pub fn Workspace.compute_layers(mut self, monitor_idx: int, ws_idx: int, is_acti
             workspace_idx: ws_idx,
         })
     }
+}
+
+fn transform_overview_targets(mut list: List[traits.TileTarget], start: int, full_rect: core.Rect, usable_rect: core.Rect, band_rect: core.Rect, scale: f64) {
+    var i = start
+    while i < list.len() {
+        let r = list[i].rect
+        let nx = band_rect.x + (r.x - full_rect.x) * scale
+        let ny = band_rect.y + (r.y - full_rect.y) * scale
+        let nw = max(r.w * scale, 4.0)
+        let nh = max(r.h * scale, 4.0)
+        if nx + nw <= usable_rect.x + 1.0 or nx >= usable_rect.right() - 1.0 {
+            discard list.remove(i)
+            continue
+        }
+        list[i].rect = core.Rect.new(nx, ny, nw, nh)
+        list[i].overview_scale = scale
+        i += 1
+    }
+}
+
+/// Compute scaled thumbnail targets for this workspace inside `band_rect` for Overview mode.
+pub fn Workspace.compute_overview_band(mut self, monitor_idx: int, ws_idx: int, is_active_ws: bool, is_active_monitor: bool, full_rect: core.Rect, usable_rect: core.Rect, band_rect: core.Rect, scale: f64, gap: f64, center: traits.CenterMode, mut tiled_out: List[traits.TileTarget], mut float_out: List[traits.TileTarget], mut full_out: List[traits.TileTarget]) {
+    let t0 = tiled_out.len()
+    let f0 = float_out.len()
+    let fs0 = full_out.len()
+    self.compute_layers(monitor_idx, ws_idx, is_active_monitor and is_active_ws, full_rect, usable_rect, gap, center, mut tiled_out, mut float_out, mut full_out)
+    transform_overview_targets(mut tiled_out, t0, full_rect, usable_rect, band_rect, scale)
+    transform_overview_targets(mut float_out, f0, full_rect, usable_rect, band_rect, scale)
+    transform_overview_targets(mut full_out, fs0, full_rect, usable_rect, band_rect, scale)
 }

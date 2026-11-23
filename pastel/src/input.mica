@@ -1,4 +1,4 @@
-// Keyboard bindings, pointer/scroll interactions, 3-finger touchpad gestures, and action dispatch.
+// Keyboard bindings, pointer/scroll/wheel bindings, 3/4-finger touchpad gestures, lock guard, and action dispatch.
 
 import std.io
 import std.json
@@ -6,6 +6,7 @@ import std.time
 import luminaria as lum
 import pastel_config as cfg
 import compositor
+import outputs
 import reload
 import spawn
 import windows
@@ -13,6 +14,12 @@ import windows
 let btn_left: u32 = 272
 let btn_right: u32 = 273
 let scroll_step_threshold: f64 = 15.0
+
+fn wake_monitors_if_off[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) {
+    if not p.monitors_powered {
+        outputs.power_monitors(mut p, true)
+    }
+}
 
 fn effective_mod[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R]) -> cfg.ModKey {
     return if p.nested { p.cfg.input.nested_mod } else { p.cfg.input.mod_key }
@@ -70,12 +77,35 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         ToggleHotkeyOverlay => {
             p.set_overlay_visible(not p.overlay_visible, now)
         }
+        ToggleOverview => {
+            p.set_overview_open(not p.overview_open, now)
+        }
+        PowerOffMonitors => {
+            outputs.power_monitors(mut p, false)
+        }
+        PowerOnMonitors => {
+            outputs.power_monitors(mut p, true)
+        }
         CloseWindow => {
             if let Some(id) = p.desktop.focused_window() {
                 if let Some(w) = p.win_by_id.get(id) {
                     p.d.close(w)
                 }
             }
+        }
+        CloseWindowById(id) => {
+            guard let Some(w) = p.win_by_id.get(id) else {
+                return Err("unknown window id {id}")
+            }
+            p.d.close(w)
+        }
+        FocusWindow(id) => {
+            guard p.desktop.focus_window(id) else {
+                return Err("unknown window id {id}")
+            }
+            p.sync_focus()
+            maybe_warp_pointer(mut p)
+            p.needs_layout = true
         }
         FocusColumnLeft => {
             if not p.desktop.monitors.is_empty() {
@@ -199,6 +229,36 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
                 }
             }
         }
+        ConsumeOrExpelLeft => {
+            if tiled_focused(p) {
+                let mi = p.desktop.active_monitor
+                let wi = p.desktop.monitors[mi].active_ws
+                if p.desktop.monitors[mi].workspaces[wi].strip.consume_or_expel_left() {
+                    p.sync_focus()
+                    p.needs_layout = true
+                }
+            }
+        }
+        ConsumeOrExpelRight => {
+            if tiled_focused(p) {
+                let mi = p.desktop.active_monitor
+                let wi = p.desktop.monitors[mi].active_ws
+                if p.desktop.monitors[mi].workspaces[wi].strip.consume_or_expel_right() {
+                    p.sync_focus()
+                    p.needs_layout = true
+                }
+            }
+        }
+        ToggleColumnTabbed => {
+            if tiled_focused(p) {
+                let mi = p.desktop.active_monitor
+                let wi = p.desktop.monitors[mi].active_ws
+                if p.desktop.monitors[mi].workspaces[wi].strip.toggle_tabbed() {
+                    p.sync_focus()
+                    p.needs_layout = true
+                }
+            }
+        }
         CyclePresetWidth => {
             if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
@@ -232,6 +292,26 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 if p.desktop.monitors[mi].workspaces[wi].strip.adjust_row_weight(delta) {
+                    p.needs_layout = true
+                }
+            }
+        }
+        ResetWindowHeight => {
+            if tiled_focused(p) {
+                let mi = p.desktop.active_monitor
+                let wi = p.desktop.monitors[mi].active_ws
+                if p.desktop.monitors[mi].workspaces[wi].strip.reset_row_weights() {
+                    p.needs_layout = true
+                }
+            }
+        }
+        ExpandColumnToAvailableWidth => {
+            if tiled_focused(p) {
+                let mi = p.desktop.active_monitor
+                let wi = p.desktop.monitors[mi].active_ws
+                let area = p.desktop.monitors[mi].usable_rect
+                let gap = p.desktop.gap
+                if p.desktop.monitors[mi].workspaces[wi].strip.expand_to_available_width(area, gap) {
                     p.needs_layout = true
                 }
             }
@@ -302,9 +382,20 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
                 notify_ws_change(mut p, now)
             }
         }
+        FocusWorkspacePrevious => {
+            if p.desktop.focus_workspace_previous() {
+                notify_ws_change(mut p, now)
+            }
+        }
         MoveWindowToWorkspace(n) => {
             if p.desktop.move_focused_to_workspace(n) {
                 notify_ws_change(mut p, now)
+            }
+        }
+        MoveWindowToWorkspaceSilent(n) => {
+            if p.desktop.move_focused_to_workspace_silent(n) {
+                p.sync_focus()
+                p.needs_layout = true
             }
         }
         MoveWindowToWorkspaceUp => {
@@ -314,6 +405,21 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         }
         MoveWindowToWorkspaceDown => {
             if p.desktop.move_focused_to_workspace_rel(1) {
+                notify_ws_change(mut p, now)
+            }
+        }
+        MoveColumnToWorkspace(n) => {
+            if p.desktop.move_column_to_workspace(n) {
+                notify_ws_change(mut p, now)
+            }
+        }
+        MoveColumnToWorkspaceUp => {
+            if p.desktop.move_column_to_workspace_rel(-1) {
+                notify_ws_change(mut p, now)
+            }
+        }
+        MoveColumnToWorkspaceDown => {
+            if p.desktop.move_column_to_workspace_rel(1) {
                 notify_ws_change(mut p, now)
             }
         }
@@ -373,9 +479,42 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
                 p.needs_layout = true
             }
         }
+        MoveColumnToMonitorLeft => {
+            if p.desktop.move_column_to_monitor_2d(-1, 0) {
+                p.sync_focus()
+                maybe_warp_pointer(mut p)
+                p.needs_layout = true
+            }
+        }
+        MoveColumnToMonitorRight => {
+            if p.desktop.move_column_to_monitor_2d(1, 0) {
+                p.sync_focus()
+                maybe_warp_pointer(mut p)
+                p.needs_layout = true
+            }
+        }
+        MoveColumnToMonitorUp => {
+            if p.desktop.move_column_to_monitor_2d(0, -1) {
+                p.sync_focus()
+                maybe_warp_pointer(mut p)
+                p.needs_layout = true
+            }
+        }
+        MoveColumnToMonitorDown => {
+            if p.desktop.move_column_to_monitor_2d(0, 1) {
+                p.sync_focus()
+                maybe_warp_pointer(mut p)
+                p.needs_layout = true
+            }
+        }
+        SwitchLayout(delta) => {
+            if p.d.switch_layout(delta) {
+                p.broadcast_event("layout-changed", json.obj().with("layout", json.Value.Str(p.d.layout_name())))
+            }
+        }
         Spawn(cmd) => {
             let tok = p.d.activation_token()
-            spawn.spawn_shell(cmd, p.d.socket(), p.ipc_socket_path.clone(), p.xwayland_display.clone(), tok)
+            spawn.spawn_shell(cmd, p.d.socket(), p.ipc_socket_path.clone(), p.xwayland_display.clone(), tok, p.cfg.env)
         }
     }
     return Ok(())
@@ -413,11 +552,30 @@ pub fn on_key[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel
         }
         return false
     }
+    wake_monitors_if_off(mut p)
+    let eff = effective_mod(p)
+    // Session lock security: only bindings explicitly marked `allow-when-locked = true` fire while locked.
+    if p.d.locked() {
+        var locked_act: Option[cfg.Action] = None
+        for b in p.cfg.binds {
+            if b.allow_when_locked and b.combo.matches_with_base(k.sym, k.base_sym, k.mods.shift, k.mods.ctrl, k.mods.alt, k.mods.logo, eff) {
+                locked_act = Some(b.act.clone())
+                break
+            }
+        }
+        if let Some(act) = locked_act {
+            suppress_key(mut p, k.code)
+            if let Err(err) = dispatch_action(mut p, act) {
+                io.eprint("pastel: action error: {err}")
+            }
+            return true
+        }
+        return false
+    }
     guard not p.d.shortcuts_inhibited() else {
         return false
     }
     // Check configured bindings first.
-    let eff = effective_mod(p)
     var matched: Option[cfg.Action] = None
     for b in p.cfg.binds {
         if b.combo.matches_with_base(k.sym, k.base_sym, k.mods.shift, k.mods.ctrl, k.mods.alt, k.mods.logo, eff) {
@@ -425,10 +583,9 @@ pub fn on_key[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel
             break
         }
     }
+    let is_mod_key = k.sym >= u32(0xffe1) and k.sym <= u32(0xffee)
     // If hotkey overlay is visible, any non-modifier key press dismisses it (niri behavior).
     if p.overlay_visible {
-        // Ignore pure modifier keys so pressing Mod to hit Mod+Shift+/ doesn't dismiss early.
-        let is_mod_key = k.sym >= u32(0xffe1) and k.sym <= u32(0xffee)
         if not is_mod_key {
             suppress_key(mut p, k.code)
             p.set_overlay_visible(false, time.now_ns())
@@ -448,23 +605,82 @@ pub fn on_key[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel
             return true
         }
     }
-    guard let Some(act) = matched else {
-        return false
+    if let Some(act) = matched {
+        suppress_key(mut p, k.code)
+        if let Err(err) = dispatch_action(mut p, act) {
+            io.eprint("pastel: action error: {err}")
+        }
+        return true
     }
-    suppress_key(mut p, k.code)
-    if let Err(err) = dispatch_action(mut p, act) {
-        io.eprint("pastel: action error: {err}")
+    // Escape or Return closes Overview thumbnail mode cleanly.
+    if p.overview_open and (k.sym == u32(0xff1b) or k.sym == u32(0xff0d)) {
+        suppress_key(mut p, k.code)
+        p.set_overview_open(false, time.now_ns())
+        return true
     }
-    return true
+    if p.cfg.cursor.hide_when_typing and not is_mod_key and not p.cursor_hidden {
+        p.d.hide_cursor()
+        p.cursor_hidden = true
+    }
+    return false
 }
 
-/// Click-to-focus, Mod+Left drag (move floating / pan tiled strip), Mod+Right drag (resize floating).
+/// Overview thumbnail selection, configurable mouse button bindings, click-to-focus,
+/// Mod+Left drag (move floating / pan tiled strip), and Mod+Right drag (resize floating).
 pub fn on_button[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], b: lum.Pointer) -> bool {
     guard b.pressed else {
         return false
     }
+    wake_monitors_if_off(mut p)
+    guard not p.d.locked() else {
+        return false
+    }
     if p.overlay_visible {
         p.set_overlay_visible(false, time.now_ns())
+        return true
+    }
+    if p.overview_open {
+        let now = time.now_ns()
+        if let Some(w) = p.d.window_at(b.x, b.y) {
+            let id = windows.window_id(w)
+            discard p.desktop.focus_window(id)
+            p.sync_focus()
+            p.set_overview_open(false, now)
+            return true
+        }
+        var hit_band: Option[(int, int)] = None
+        for band in p.overview_bands {
+            if band.rect.contains(b.x, b.y) {
+                hit_band = Some((band.monitor_idx, band.workspace_idx))
+                break
+            }
+        }
+        if let Some((bmi, bwi)) = hit_band {
+            if bmi >= 0 and bmi < p.desktop.monitors.len() {
+                p.desktop.active_monitor = bmi
+                discard p.desktop.focus_workspace(bwi + 1)
+                p.sync_focus()
+            }
+            p.set_overview_open(false, now)
+            return true
+        }
+        p.set_overview_open(false, now)
+        return true
+    }
+    // Check configured mouse button bindings (`MouseMiddle`, `MouseBack`, `MouseForward`, etc.).
+    let mods = p.d.mods()
+    let eff = effective_mod(p)
+    var btn_act: Option[cfg.Action] = None
+    for bind in p.cfg.binds {
+        if bind.combo.matches_button(b.button, mods.shift, mods.ctrl, mods.alt, mods.logo, eff) {
+            btn_act = Some(bind.act.clone())
+            break
+        }
+    }
+    if let Some(act) = btn_act {
+        if let Err(err) = dispatch_action(mut p, act) {
+            io.eprint("pastel: action error: {err}")
+        }
         return true
     }
     guard let Some(w) = p.d.window_at(b.x, b.y) else {
@@ -480,7 +696,7 @@ pub fn on_button[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pas
         p.sync_focus()
         p.needs_layout = true
     }
-    guard mod_down(p, p.d.mods()) else {
+    guard mod_down(p, mods) else {
         return false
     }
     guard let Some(loc) = p.desktop.locate(id) else {
@@ -509,9 +725,22 @@ pub fn on_button[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pas
     return false
 }
 
-/// Optional focus-follows-mouse on pointer motion (including empty monitors).
+/// Cursor auto-restore/inactivity hide timer and optional focus-follows-mouse on pointer motion.
 pub fn on_motion[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], m: lum.Pointer) {
-    guard p.cfg.input.focus_follows_mouse else {
+    wake_monitors_if_off(mut p)
+    let hide_ms = p.cfg.cursor.hide_after_inactive_ms
+    if p.cursor_hidden {
+        p.d.set_cursor_named("default")
+        p.cursor_hidden = false
+    }
+    if hide_ms > 0 {
+        p.cursor_last_motion_ns = time.now_ns()
+        if not p.cursor_timer_pending {
+            p.cursor_timer_pending = true
+            p.d.timer(hide_ms, compositor.tok_cursor_hide)
+        }
+    }
+    guard not p.d.locked() and not p.overview_open and p.cfg.input.focus_follows_mouse else {
         return
     }
     if let Some(w) = p.d.window_at(m.x, m.y) {
@@ -530,51 +759,87 @@ pub fn on_motion[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pas
     }
 }
 
-/// Mod+Scroll horizontally scrolls columns in the active workspace with smooth detent accumulation.
+fn find_wheel_bind[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R], code: u32, mods: lum.Mods) -> Option[cfg.Action] {
+    let eff = effective_mod(p)
+    for b in p.cfg.binds {
+        if b.combo.matches_wheel(code, mods.shift, mods.ctrl, mods.alt, mods.logo, eff) {
+            return Some(b.act.clone())
+        }
+    }
+    return None
+}
+
+/// Configurable scroll wheel bindings (`WheelUp`/`WheelDown`/`WheelLeft`/`WheelRight`) with detent accumulation.
 pub fn on_scroll[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], s: lum.Scroll) -> bool {
-    guard mod_down(p, p.d.mods()) and not p.desktop.monitors.is_empty() else {
-        p.scroll_accum = 0.0
+    wake_monitors_if_off(mut p)
+    guard not p.d.locked() else {
         return false
     }
-    let delta = if s.dx.abs() > s.dy.abs() { s.dx } else { s.dy }
-    if delta == 0.0 {
-        return true
+    let mods = p.d.mods()
+    let horiz = s.dx.abs() > s.dy.abs()
+    let delta = if horiz { s.dx } else { s.dy }
+    guard delta != 0.0 else {
+        return false
     }
-    var steps = 0
-    if delta.abs() >= scroll_step_threshold {
-        p.scroll_accum = 0.0
-        steps = if delta > 0.0 { 1 } else { -1 }
+    let want_code = if horiz {
+        if delta < 0.0 { cfg.keys.wheel_left } else { cfg.keys.wheel_right }
+    } else if delta < 0.0 {
+        cfg.keys.wheel_up
     } else {
-        if (p.scroll_accum > 0.0 and delta < 0.0) or (p.scroll_accum < 0.0 and delta > 0.0) {
-            p.scroll_accum = 0.0
+        cfg.keys.wheel_down
+    }
+    guard let Some(act) = find_wheel_bind(p, u32(want_code), mods) else {
+        p.scroll_accum_x = 0.0
+        p.scroll_accum_y = 0.0
+        return false
+    }
+    var fired = false
+    if delta.abs() >= scroll_step_threshold {
+        p.scroll_accum_x = 0.0
+        p.scroll_accum_y = 0.0
+        fired = true
+    } else if horiz {
+        if (p.scroll_accum_x > 0.0 and delta < 0.0) or (p.scroll_accum_x < 0.0 and delta > 0.0) {
+            p.scroll_accum_x = 0.0
         }
-        p.scroll_accum += delta
-        if p.scroll_accum.abs() >= scroll_step_threshold {
-            steps = if p.scroll_accum > 0.0 { 1 } else { -1 }
-            p.scroll_accum = 0.0
+        p.scroll_accum_x += delta
+        if p.scroll_accum_x.abs() >= scroll_step_threshold {
+            p.scroll_accum_x = 0.0
+            fired = true
+        }
+    } else {
+        if (p.scroll_accum_y > 0.0 and delta < 0.0) or (p.scroll_accum_y < 0.0 and delta > 0.0) {
+            p.scroll_accum_y = 0.0
+        }
+        p.scroll_accum_y += delta
+        if p.scroll_accum_y.abs() >= scroll_step_threshold {
+            p.scroll_accum_y = 0.0
+            fired = true
         }
     }
-    if steps != 0 {
-        let mi = p.desktop.active_monitor
-        let wi = p.desktop.monitors[mi].active_ws
-        p.desktop.monitors[mi].workspaces[wi].fullscreen = None
-        p.desktop.monitors[mi].workspaces[wi].focus_floating = false
-        discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(steps, 0)
-        p.sync_focus()
-        p.needs_layout = true
+    if fired {
+        if let Err(err) = dispatch_action(mut p, act) {
+            io.eprint("pastel: action error: {err}")
+        }
     }
     return true
 }
 
 /// 3-finger touchpad swipe: horizontal pan of columns, vertical workspace switch.
+/// 4-finger vertical touchpad swipe: toggle Overview thumbnail mode.
 /// Other gestures pass straight through to applications.
 pub fn on_gesture[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], g: lum.Gesture) -> bool {
+    wake_monitors_if_off(mut p)
+    guard not p.d.locked() else {
+        return false
+    }
     match g.kind {
         SwipeBegin => {
-            guard g.fingers == 3 and not p.desktop.monitors.is_empty() else {
+            guard (g.fingers == 3 or g.fingers == 4) and not p.desktop.monitors.is_empty() else {
                 return false
             }
             p.swipe_active = true
+            p.swipe_fingers = g.fingers
             p.swipe_dx = 0.0
             p.swipe_dy = 0.0
             p.swipe_axis = 0
@@ -591,7 +856,7 @@ pub fn on_gesture[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pa
             if p.swipe_axis == 0 and (p.swipe_dx.abs() > 10.0 or p.swipe_dy.abs() > 10.0) {
                 p.swipe_axis = if p.swipe_dx.abs() >= p.swipe_dy.abs() { 1 } else { 2 }
             }
-            if p.swipe_axis == 1 and p.swipe_mon < p.desktop.monitors.len() and p.swipe_ws < p.desktop.monitors[p.swipe_mon].workspaces.len() {
+            if p.swipe_fingers == 3 and p.swipe_axis == 1 and p.swipe_mon < p.desktop.monitors.len() and p.swipe_ws < p.desktop.monitors[p.swipe_mon].workspaces.len() {
                 p.desktop.monitors[p.swipe_mon].workspaces[p.swipe_ws].strip.pan(-g.dx * 1.4)
                 p.needs_layout = true
             }
@@ -601,7 +866,16 @@ pub fn on_gesture[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pa
             guard p.swipe_active else {
                 return false
             }
+            let fingers = p.swipe_fingers
             p.swipe_active = false
+            p.swipe_fingers = 0
+            if fingers == 4 {
+                if not g.cancelled and p.swipe_dy.abs() > 35.0 {
+                    p.set_overview_open(not p.overview_open, time.now_ns())
+                }
+                p.swipe_axis = 0
+                return true
+            }
             // Always finish horizontal pan on the originating workspace, even if the gesture was cancelled,
             // so `manual_pan` can never remain stuck true.
             if p.swipe_axis == 1 and p.swipe_mon < p.desktop.monitors.len() and p.swipe_ws < p.desktop.monitors[p.swipe_mon].workspaces.len() {

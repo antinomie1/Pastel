@@ -6,13 +6,14 @@
 
 ## 核心特性
 
-- **滚动平铺（Scrolling Tiling）**：每个工作区拥有无限水平滚动的列带（column strip），支持列内垂直堆叠、预设宽度循环、列最大化与居中、动态（niri 风格）或固定（dwm tag 风格）工作区、浮动窗口与多显示器支持。
-- **解析式动画系统**：采用精确解析 ODE 弹簧求解器与缓动曲线，与刷新率无关（60Hz / 144Hz / 240Hz / VRR），支持运动中保动量重定位（in-flight retargeting），覆盖窗口移动、视口滚动、工作区切换、窗口开关、焦点环颜色过渡与热键层动画。
-- **视觉效果**：默认方角窗口边框（`corner-radius = 0.0`，可按需调整圆角）、GPU SDF 空心边框、柔和阴影、窗口透明度与 GPU Dual-Kawase 毛玻璃背景模糊（支持稳态零额外 GPU Pass 的 X-Ray 模糊与实时背景模糊）。
+- **滚动平铺与 Overview 全景**：每个工作区拥有无限水平滚动的列带（column strip），支持列内垂直堆叠与轻量 GPU 标签列（隐藏非活动标签页以触发应用挂起）、方向性并入/移出（consume/expel）、整列跨工作区/跨屏迁移、预设宽度循环、扩展至可用宽度、单列居中、动态（niri 风格）或固定（dwm tag 风格）工作区、浮动窗口、多显示器支持，以及零常驻显存的动画 **Overview 全景缩略图**（`Mod+O` / 四指滑动）。
+- **解析式动画系统**：采用精确解析 ODE 弹簧求解器与缓动曲线，与刷新率无关（60Hz / 144Hz / 240Hz / VRR），支持运动中保动量重定位（in-flight retargeting），覆盖窗口移动、视口滚动、工作区切换、窗口开关、焦点环与响铃脉冲、热键层与 Overview 缩放过渡。
+- **视觉效果与 HDR**：默认方角窗口边框（`corner-radius = 0.0`，可按需调整圆角）、GPU SDF 空心边框、柔和阴影、窗口透明度、GPU Dual-Kawase 毛玻璃背景模糊（稳态零额外 GPU Pass 的 X-Ray 模式与实时背景模糊）、**10-bit/FP16 HDR**（`wp-color-management-v1` + DRM `HDR_OUTPUT_METADATA` / `BT2020_RGB`）、**按需 VRR**（`vrr = "on-demand"`）、**护眼色温 Gamma LUT**（`wlr-gamma-control-unstable-v1`，兼容 `gammastep` / `wlsunset`）与**录屏隐私遮罩**（`block-out-from-screencast`）。
+- **锁屏安全与键鼠精细控制**：`ext-session-lock-v1` 锁屏期间默认隔离所有快捷键与指针/手势（仅显式声明 `allow-when-locked = true` 的绑定生效）、DPMS 息屏与任意输入自动唤醒、`[input.touchpad]` 与 `[input.mouse]` 独立配置（支持平坦加速 `accel-profile = "flat"` 与打字禁用触控板 `dwt`）、完整 XKB keysym（多媒体/亮度键）、可配置鼠标按键与滚轮绑定、`[cursor]` 自动隐藏，以及虚拟指针协议支持（`wlr-virtual-pointer-unstable-v1`）。
 - **视觉一致的热键表**：简洁的 niri 风格热键覆盖层（支持启动显示与 `Mod+Shift+/` 切换），运行时按需动态加载系统 FreeType2 / Fontconfig 渲染清晰平滑的矢量字体（默认 `[overlay].font = "sans-serif"`），外框宽度、方角/圆角、主题色、阴影、实时模糊与动画曲线自动继承 `[window]` 配置。
 - **模块化与可插拔**：基于 Mica 结构化 trait 单态化（`Curve`、`LayoutPolicy`、`luminaria.plug.Output`、`luminaria.plug.Renderer`），无虚表与动态分发开销。
-- **低占用与边缘设备友好**：零额外字体/UI C 库依赖、模糊纹理按需惰性分配、热路径稳态零堆分配、**空闲时零唤醒**。
-- **TOML 配置与热重载**：严格配置校验（`pastel --check`），空配置文件即可直接获得完整桌面，支持运行时无重启热重载。
+- **低占用与边缘设备友好**：零额外链接期 C 依赖、模糊/HDR 管线按需惰性分配、热路径稳态零堆分配、**空闲时零唤醒**。
+- **TOML 配置与热重载**：严格配置校验（`pastel --check`）、`[env]` 会话环境变量注入、空配置文件即可直接获得完整桌面，支持运行时无重启热重载。
 - **JSON-lines IPC**：通过 Unix Socket 提供 `pastel msg <action>`、`pastel msg --state`、`pastel msg --subscribe`，便于与状态栏、启动器及脚本集成。
 
 ## 构建
@@ -53,26 +54,29 @@ sheaf test --release -p pastel
 | 快捷键 | 动作 |
 |---|---|
 | `Mod+Shift+/` | 显示 / 隐藏热键表 |
+| `Mod+O` | 打开 / 关闭 Overview 全景缩略图 |
 | `Mod+Return` / `Mod+D` | 启动终端 / 应用启动器 |
 | `Mod+Q` | 关闭当前焦点窗口 |
 | `Mod+H` / `Mod+L` | 聚焦左 / 右列 |
-| `Mod+J` / `Mod+K` | 列内聚焦下 / 上窗口 |
+| `Mod+J` / `Mod+K` | 列内聚焦下 / 上窗口（或切换标签页） |
 | `Mod+Shift+H` / `Mod+Shift+L` | 向左 / 右移动列 |
 | `Mod+Shift+J` / `Mod+Shift+K` | 向下 / 上移动窗口 |
-| `Mod+[` / `Mod+]` | 将窗口并入相邻列 / 移出为新列 |
+| `Mod+Comma` / `Mod+Period` | 向左 / 右并入或移出列（同时兼容 `Mod+[` / `Mod+]`） |
+| `Mod+W` | 切换列标签显示 |
 | `Mod+R` / `Mod+F` / `Mod+C` | 循环列宽 / 最大化列 / 居中列 |
+| `Mod+Ctrl+F` / `Mod+Ctrl+R` | 扩展列至剩余可用宽度 / 重置行高比例 |
 | `Mod+Minus` / `Mod+Equal` | 缩小 / 增大列宽（`Mod+Shift+-/=` 调整列内行高） |
 | `Mod+Shift+F` | 切换全屏 |
 | `Mod+V` / `Mod+Shift+V` | 切换浮动 / 在平铺与浮动层间切换焦点 |
-| `Mod+U` / `Mod+I` | 切换上一 / 下一工作区 |
-| `Mod+1` .. `Mod+9` | 切换到工作区 1..9 |
-| `Mod+Shift+1` .. `Mod+Shift+9` | 将窗口移至工作区 1..9 |
+| `Mod+U` / `Mod+I` / `Mod+Tab` | 切换上一 / 下一 / 最近访问的工作区 |
+| `Mod+1` .. `Mod+9` | 切换到工作区 1..9（`Mod+Shift+1..9` 移动窗口） |
 | `Mod+Ctrl+H/J/K/L` | 聚焦左 / 下 / 上 / 右显示器（加 `Shift` 移动窗口） |
+| `Mod+Shift+P` | 关闭显示器电源（DPMS，任意输入自动唤醒） |
 | `Mod+Shift+R` | 热重载配置 |
 | `Mod+Shift+E` | 退出 Pastel |
-| `Mod+滚轮` | 水平滚动列带 |
+| `Mod+WheelUp` / `Mod+WheelDown` | 聚焦左 / 右列（`Mod+Shift+Wheel*` 切换工作区） |
 | `Mod+左键拖动` / `Mod+右键拖动` | 移动浮动窗口或平移平铺列带 / 缩放浮动窗口 |
-| 触控板三指滑动 | 水平平移列带 / 垂直切换工作区 |
+| 触控板三指 / 四指滑动 | 水平平移列带与切换工作区 / 切换 Overview 全景 |
 
 ## 配置
 

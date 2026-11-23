@@ -1,7 +1,54 @@
-// Keysym name lookup, Mod+Key parsing, default bindings, and event matching.
+// Keysym name lookup (built-in fast aliases + lazy libxkbcommon fallback), mouse/wheel triggers,
+// Mod+Key parsing, default bindings, and event matching.
 
 import action
 import schema
+
+extern table XkbKeysymLib {
+    fn from_name(name: str, flags: i32) -> u32 = "xkb_keysym_from_name"
+}
+
+static var xkb_tried: bool = false
+static var xkb_handle: Option[XkbKeysymLib] = None
+
+fn xkb_keysym_lookup(name: str) -> u32 {
+    unsafe {
+        if not xkb_tried {
+            xkb_tried = true
+            if let Ok(lib) = XkbKeysymLib.open("libxkbcommon.so.0") {
+                xkb_handle = Some(lib)
+            } else if let Ok(lib) = XkbKeysymLib.open("libxkbcommon.so") {
+                xkb_handle = Some(lib)
+            }
+        }
+        if let Some(lib) = xkb_handle {
+            let exact = lib.from_name(name, 0)
+            if exact != 0 {
+                return exact
+            }
+            return lib.from_name(name, 1)
+        }
+    }
+    return 0
+}
+
+/// Wheel direction codes for `BindTrigger.Wheel`.
+pub let wheel_up: int = 1
+pub let wheel_down: int = 2
+pub let wheel_left: int = 3
+pub let wheel_right: int = 4
+
+/// evdev button codes for configurable mouse button bindings.
+pub let mouse_middle: u32 = 274
+pub let mouse_back: u32 = 275
+pub let mouse_forward: u32 = 276
+
+/// What input event triggers a binding: XKB key, mouse button, or wheel direction.
+pub enum BindTrigger {
+    Key(u32)
+    Button(u32)
+    Wheel(int)
+}
 
 /// Normalized modifier flags for a keybinding.
 pub struct ModMask {
@@ -12,24 +59,27 @@ pub struct ModMask {
     pub logo: bool = false
 }
 
-/// A parsed key combination.
+/// A parsed input binding combination (keyboard key, mouse button, or wheel step).
 pub struct KeyCombo {
     pub mods: ModMask = ModMask {}
+    pub trigger: BindTrigger = BindTrigger.Key(0)
+    /// XKB keysym when `trigger` is `BindTrigger.Key` (0 for mouse/wheel triggers).
     pub sym: u32 = 0
-    /// Canonical base key label (e.g. `"/"`, `"Return"`, `"+"`).
+    /// Canonical base key label (e.g. `"/"`, `"Return"`, `"WheelUp"`, `"MouseBack"`).
     pub key_name: str = ""
     /// Canonical display string for the hotkey overlay (e.g. `Mod+Shift+/`).
     pub display: str = ""
 }
 
-/// A single keybinding mapping a key combination to an Action.
+/// A single binding mapping a trigger combination to an Action.
 pub struct Binding {
     pub combo: KeyCombo
     pub act: action.Action
+    /// Allow this binding to trigger while the Wayland session lock screen is active.
+    pub allow_when_locked: bool = false
 }
 
-/// Map a key name (case-insensitive for named keys, case-sensitive for single letters)
-/// to its XKB keysym value.
+/// Map a key name (fast built-in aliases + full libxkbcommon keysym table) to its XKB keysym.
 pub fn name_to_sym(raw: str) -> Option[u32] {
     let s = raw.trim()
     guard not s.is_empty() else {
@@ -46,13 +96,14 @@ pub fn name_to_sym(raw: str) -> Option[u32] {
         }
     }
     let lo = s.to_lower()
-    return match lo {
+    let builtin: Option[u32] = match lo {
         "return" or "enter" => Some(u32(0xff0d))
         "escape" or "esc" => Some(u32(0xff1b))
         "tab" => Some(u32(0xff09))
         "space" => Some(u32(0x0020))
         "backspace" => Some(u32(0xff08))
         "delete" or "del" => Some(u32(0xffff))
+        "insert" or "ins" => Some(u32(0xff63))
         "left" => Some(u32(0xff51))
         "up" => Some(u32(0xff52))
         "right" => Some(u32(0xff53))
@@ -90,6 +141,29 @@ pub fn name_to_sym(raw: str) -> Option[u32] {
         "xf86monbrightnessup" => Some(u32(0x1008ff02))
         "xf86monbrightnessdown" => Some(u32(0x1008ff03))
         "print" => Some(u32(0xff61))
+        _ => None
+    }
+    if builtin.is_some() {
+        return builtin
+    }
+    let resolved = xkb_keysym_lookup(s)
+    if resolved != 0 {
+        return Some(resolved)
+    }
+    return None
+}
+
+/// Resolve mouse/wheel trigger token (`WheelUp`, `WheelDown`, `WheelLeft`, `WheelRight`,
+/// `MouseMiddle`, `MouseBack`, `MouseForward`).
+fn parse_pointer_trigger(raw: str) -> Option[(BindTrigger, str)] {
+    return match raw.trim().to_lower() {
+        "wheelup" or "wheel_up" => Some((BindTrigger.Wheel(wheel_up), "WheelUp"))
+        "wheeldown" or "wheel_down" => Some((BindTrigger.Wheel(wheel_down), "WheelDown"))
+        "wheelleft" or "wheel_left" => Some((BindTrigger.Wheel(wheel_left), "WheelLeft"))
+        "wheelright" or "wheel_right" => Some((BindTrigger.Wheel(wheel_right), "WheelRight"))
+        "mousemiddle" or "mouse_middle" => Some((BindTrigger.Button(mouse_middle), "MouseMiddle"))
+        "mouseback" or "mouse_back" => Some((BindTrigger.Button(mouse_back), "MouseBack"))
+        "mouseforward" or "mouse_forward" => Some((BindTrigger.Button(mouse_forward), "MouseForward"))
         _ => None
     }
 }
@@ -168,11 +242,20 @@ pub fn KeyCombo.parse(spec: str) -> Result[KeyCombo, str] {
             _ => { return Err("unknown modifier '{p}' in key spec '{spec}'") }
         }
     }
-    guard let Some(s) = name_to_sym(key_part) else {
-        return Err("unknown key '{key_part}' in key spec '{spec}'")
+    var trigger = BindTrigger.Key(0)
+    var sym: u32 = 0
+    var key_label = ""
+    if let Some((pt, label)) = parse_pointer_trigger(key_part) {
+        trigger = pt
+        key_label = label
+    } else {
+        guard let Some(s) = name_to_sym(key_part) else {
+            return Err("unknown key '{key_part}' in key spec '{spec}'")
+        }
+        sym = normalize_sym(s, mods.shift)
+        trigger = BindTrigger.Key(sym)
+        key_label = if key_part.len() == 1 { key_part.to_upper() } else { key_part }
     }
-    let sym = normalize_sym(s, mods.shift)
-    let key_label = if key_part.len() == 1 { key_part.to_upper() } else { key_part }
     // Canonical display label
     var disp = ""
     if mods.uses_mod {
@@ -191,7 +274,7 @@ pub fn KeyCombo.parse(spec: str) -> Result[KeyCombo, str] {
         disp += "Shift+"
     }
     disp += key_label
-    return Ok(KeyCombo { mods, sym, key_name: key_label, display: disp })
+    return Ok(KeyCombo { mods, trigger, sym, key_name: key_label, display: disp })
 }
 
 /// Format this combo for the hotkey overlay with the active `Mod` resolved
@@ -231,23 +314,7 @@ pub fn KeyCombo.format_for(self, effective_mod: schema.ModKey) -> str {
     return out
 }
 
-/// Whether two key combos represent the same logical binding.
-pub fn KeyCombo.same(self, other: KeyCombo) -> bool {
-    return self.sym == other.sym and self.mods == other.mods
-}
-
-/// Match an incoming key press against this combo under the active `effective_mod`.
-pub fn KeyCombo.matches(self, sym: u32, shift: bool, ctrl: bool, alt: bool, logo: bool, effective_mod: schema.ModKey) -> bool {
-    return self.matches_with_base(sym, 0, shift, ctrl, alt, logo, effective_mod)
-}
-
-/// Layout-independent match using both the effective keysym `sym` and the unshifted
-/// level-0 keysym `base_sym` (so `Mod+Shift+/` and `Mod+Shift+1..9` work on any XKB layout).
-pub fn KeyCombo.matches_with_base(self, sym: u32, base_sym: u32, shift: bool, ctrl: bool, alt: bool, logo: bool, effective_mod: schema.ModKey) -> bool {
-    let sym_hit = normalize_sym(sym, shift) == self.sym or (base_sym != 0 and normalize_sym(base_sym, false) == self.sym)
-    guard sym_hit else {
-        return false
-    }
+fn KeyCombo.mods_match(self, shift: bool, ctrl: bool, alt: bool, logo: bool, effective_mod: schema.ModKey) -> bool {
     var want_shift = self.mods.shift
     var want_ctrl = self.mods.ctrl
     var want_alt = self.mods.alt
@@ -262,6 +329,47 @@ pub fn KeyCombo.matches_with_base(self, sym: u32, base_sym: u32, shift: bool, ct
     return shift == want_shift and ctrl == want_ctrl and alt == want_alt and logo == want_logo
 }
 
+/// Whether two key combos represent the same logical binding.
+pub fn KeyCombo.same(self, other: KeyCombo) -> bool {
+    return self.trigger == other.trigger and self.mods == other.mods
+}
+
+/// Match an incoming key press against this combo under the active `effective_mod`.
+pub fn KeyCombo.matches(self, sym: u32, shift: bool, ctrl: bool, alt: bool, logo: bool, effective_mod: schema.ModKey) -> bool {
+    return self.matches_with_base(sym, 0, shift, ctrl, alt, logo, effective_mod)
+}
+
+/// Layout-independent match using both the effective keysym `sym` and the unshifted
+/// level-0 keysym `base_sym` (so `Mod+Shift+/` and `Mod+Shift+1..9` work on any XKB layout).
+pub fn KeyCombo.matches_with_base(self, sym: u32, base_sym: u32, shift: bool, ctrl: bool, alt: bool, logo: bool, effective_mod: schema.ModKey) -> bool {
+    match self.trigger {
+        Key(want_sym) => {
+            let sym_hit = normalize_sym(sym, shift) == want_sym or (base_sym != 0 and normalize_sym(base_sym, false) == want_sym)
+            guard sym_hit else {
+                return false
+            }
+            return self.mods_match(shift, ctrl, alt, logo, effective_mod)
+        }
+        _ => { return false }
+    }
+}
+
+/// Match a mouse button press against this combo under the active `effective_mod`.
+pub fn KeyCombo.matches_button(self, button: u32, shift: bool, ctrl: bool, alt: bool, logo: bool, effective_mod: schema.ModKey) -> bool {
+    return match self.trigger {
+        Button(want_btn) => want_btn == button and self.mods_match(shift, ctrl, alt, logo, effective_mod)
+        _ => false
+    }
+}
+
+/// Match a scroll wheel direction (`wheel_up`, `wheel_down`, `wheel_left`, `wheel_right`) against this combo.
+pub fn KeyCombo.matches_wheel(self, dir: int, shift: bool, ctrl: bool, alt: bool, logo: bool, effective_mod: schema.ModKey) -> bool {
+    return match self.trigger {
+        Wheel(want_dir) => want_dir == dir and self.mods_match(shift, ctrl, alt, logo, effective_mod)
+        _ => false
+    }
+}
+
 fn bind(spec: str, take act: action.Action) -> Binding {
     return Binding { combo: KeyCombo.parse(spec).unwrap(), act }
 }
@@ -270,6 +378,7 @@ fn bind(spec: str, take act: action.Action) -> Binding {
 pub fn default_bindings() -> List[Binding] {
     return [
         bind("Mod+Shift+/", action.Action.ToggleHotkeyOverlay),
+        bind("Mod+O", action.Action.ToggleOverview),
         bind("Mod+Return", action.Action.Spawn("foot")),
         bind("Mod+D", action.Action.Spawn("fuzzel")),
         bind("Mod+Q", action.Action.CloseWindow),
@@ -289,7 +398,12 @@ pub fn default_bindings() -> List[Binding] {
         bind("Mod+Shift+K", action.Action.MoveWindowUp),
         bind("Mod+[", action.Action.ConsumeIntoColumn),
         bind("Mod+]", action.Action.ExpelFromColumn),
+        bind("Mod+Comma", action.Action.ConsumeOrExpelLeft),
+        bind("Mod+Period", action.Action.ConsumeOrExpelRight),
+        bind("Mod+W", action.Action.ToggleColumnTabbed),
         bind("Mod+R", action.Action.CyclePresetWidth),
+        bind("Mod+Ctrl+R", action.Action.ResetWindowHeight),
+        bind("Mod+Ctrl+F", action.Action.ExpandColumnToAvailableWidth),
         bind("Mod+Minus", action.Action.AdjustColumnWidth(-0.1)),
         bind("Mod+Equal", action.Action.AdjustColumnWidth(0.1)),
         bind("Mod+Shift+Minus", action.Action.AdjustWindowHeight(-0.2)),
@@ -299,10 +413,15 @@ pub fn default_bindings() -> List[Binding] {
         bind("Mod+Shift+F", action.Action.ToggleFullscreen),
         bind("Mod+V", action.Action.ToggleFloating),
         bind("Mod+Shift+V", action.Action.SwitchFocusFloating),
+        bind("Mod+Tab", action.Action.FocusWorkspacePrevious),
         bind("Mod+U", action.Action.FocusWorkspaceUp),
         bind("Mod+I", action.Action.FocusWorkspaceDown),
         bind("Mod+Shift+U", action.Action.MoveWindowToWorkspaceUp),
         bind("Mod+Shift+I", action.Action.MoveWindowToWorkspaceDown),
+        bind("Mod+WheelUp", action.Action.FocusColumnLeft),
+        bind("Mod+WheelDown", action.Action.FocusColumnRight),
+        bind("Mod+Shift+WheelUp", action.Action.FocusWorkspaceUp),
+        bind("Mod+Shift+WheelDown", action.Action.FocusWorkspaceDown),
         bind("Mod+1", action.Action.FocusWorkspace(1)),
         bind("Mod+2", action.Action.FocusWorkspace(2)),
         bind("Mod+3", action.Action.FocusWorkspace(3)),
@@ -329,6 +448,7 @@ pub fn default_bindings() -> List[Binding] {
         bind("Mod+Ctrl+Shift+L", action.Action.MoveWindowToMonitorRight),
         bind("Mod+Ctrl+Shift+K", action.Action.MoveWindowToMonitorUp),
         bind("Mod+Ctrl+Shift+J", action.Action.MoveWindowToMonitorDown),
+        bind("Mod+Shift+P", action.Action.PowerOffMonitors),
         bind("Mod+Shift+R", action.Action.ReloadConfig),
         bind("Mod+Shift+E", action.Action.Quit),
     ]

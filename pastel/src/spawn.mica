@@ -23,12 +23,26 @@ fn shell_quote(s: str) -> str {
     return out
 }
 
+fn valid_env_key(k: str) -> bool {
+    guard not k.is_empty() else {
+        return false
+    }
+    for i in 0..k.len() {
+        let ch = k.slice(i, i + 1)
+        let ok = (ch >= "A" and ch <= "Z") or (ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok {
+            return false
+        }
+    }
+    return true
+}
+
 /// Spawn a shell command detached in the background with Wayland/Pastel session variables
 /// (`WAYLAND_DISPLAY`, `XDG_CURRENT_DESKTOP`, `XDG_SESSION_TYPE`, `PASTEL_SOCKET`,
-/// optional `DISPLAY`, and optional `XDG_ACTIVATION_TOKEN`).
+/// optional `DISPLAY`, optional `XDG_ACTIVATION_TOKEN`, and configured `[env]` overrides).
 /// Commands are grouped in a subshell `( ... ) </dev/null >/dev/null 2>&1 &` so compound
 /// pipelines containing `;` never block the compositor event loop.
-pub fn spawn_shell(cmd: str, wayland_display: str, pastel_socket: str, xwayland_display: str, token: str) {
+pub fn spawn_shell(cmd: str, wayland_display: str, pastel_socket: str, xwayland_display: str, token: str, extra_env: &[(str, str)]) {
     let trimmed = cmd.trim()
     guard not trimmed.is_empty() else {
         return
@@ -42,6 +56,11 @@ pub fn spawn_shell(cmd: str, wayland_display: str, pastel_socket: str, xwayland_
     }
     if not token.is_empty() {
         c = c.env("XDG_ACTIVATION_TOKEN", token)
+    }
+    for (k, v) in extra_env {
+        if not k.is_empty() {
+            c = c.env(k, v)
+        }
     }
     discard c.status()
 }
@@ -121,8 +140,8 @@ pub fn stop_xwayland(pid: int) {
 }
 
 /// Export session environment to D-Bus / systemd user activation when running a real session,
-/// so `xdg-desktop-portal` and screen-sharing clients pick up `WAYLAND_DISPLAY` automatically.
-pub fn export_session_env(wayland_display: str, xwayland_display: str, nested: bool) {
+/// so `xdg-desktop-portal` and screen-sharing clients pick up `WAYLAND_DISPLAY` and `[env]` automatically.
+pub fn export_session_env(wayland_display: str, xwayland_display: str, nested: bool, extra_env: &[(str, str)]) {
     guard not nested else {
         return
     }
@@ -133,9 +152,19 @@ pub fn export_session_env(wayland_display: str, xwayland_display: str, nested: b
     if not xwayland_display.is_empty() {
         vars += " DISPLAY"
     }
+    for (k, _) in extra_env {
+        if valid_env_key(k) {
+            vars += " {k}"
+        }
+    }
     var c = process.command("sh").args(["-c", "( command -v dbus-update-activation-environment >/dev/null 2>&1 && dbus-update-activation-environment --systemd {vars} ) </dev/null >/dev/null 2>&1 &"]).env("WAYLAND_DISPLAY", wayland_display).env("XDG_CURRENT_DESKTOP", "pastel").env("XDG_SESSION_TYPE", "wayland")
     if not xwayland_display.is_empty() {
         c = c.env("DISPLAY", xwayland_display)
+    }
+    for (k, v) in extra_env {
+        if valid_env_key(k) {
+            c = c.env(k, v)
+        }
     }
     discard c.status()
 }

@@ -8,6 +8,7 @@ pub import workspace
 pub import desktop
 
 pub type TileTarget = traits.TileTarget
+pub type OverviewBand = traits.OverviewBand
 pub type CenterMode = traits.CenterMode
 pub type WindowSlot = column.WindowSlot
 pub type Column = column.Column

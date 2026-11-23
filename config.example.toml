@@ -11,6 +11,11 @@ background = "#1e2028"
 # Shell commands executed once at startup (with WAYLAND_DISPLAY set).
 autostart = []
 
+# Custom environment variables exported to spawned processes and D-Bus activation.
+[env]
+# QT_QPA_PLATFORM = "wayland"
+# ELECTRON_OZONE_PLATFORM_HINT = "wayland"
+
 # Optional X11 compatibility via xwayland-satellite (pure Wayland core; XWayland runs out-of-process).
 [xwayland]
 enabled = true
@@ -24,7 +29,10 @@ ready-timeout-ms = 1500       # Max ms to wait for X11 socket readiness before a
 # mode = "2560x1440@144"
 # scale = 1.5
 # position = [0, 0]
-# vrr = false
+# vrr = "on-demand"           # false, true, or "on-demand" (activates on fullscreen game/video/rule)
+# hdr = false                 # Enable BT.2020 + ST.2084 PQ 10-bit HDR scanout (when monitor supports HDR)
+# sdr-nits = 203.0            # SDR reference white luminance in HDR mode (nits)
+# max-nits = 1000.0           # Display peak luminance in HDR mode (nits)
 # enabled = true
 
 [input]
@@ -34,13 +42,28 @@ focus-follows-mouse = false
 warp-mouse-to-focus = false   # Warp pointer to focused monitor/window on keyboard monitor switches
 repeat-rate = 25
 repeat-delay = 600
-tap-to-click = true
-natural-scroll = false
-accel = 0.0                   # Pointer acceleration (-1.0 .. 1.0)
-left-handed = false
 layout = ""                   # XKB layout, e.g. "us" or "us,de" (empty = system default)
 variant = ""                  # XKB variant
 options = ""                  # XKB options, e.g. "ctrl:nocaps"
+
+[input.touchpad]
+tap-to-click = true
+natural-scroll = false
+accel = 0.0                   # Pointer acceleration (-1.0 .. 1.0)
+accel-profile = "default"     # "default", "flat", "adaptive"
+dwt = true                    # Disable touchpad while typing
+left-handed = false
+
+[input.mouse]
+natural-scroll = false
+accel = 0.0                   # Pointer acceleration (-1.0 .. 1.0)
+accel-profile = "default"     # "default", "flat", "adaptive" (use "flat" for raw 1:1 mouse)
+left-handed = false
+
+[cursor]
+size = 24                     # Cursor theme size in logical px (8..128)
+hide-when-typing = false      # Hide cursor while typing (restores on pointer motion)
+hide-after-inactive-ms = 0    # Auto-hide cursor after ms of pointer inactivity (0 disables)
 
 [layout]
 type = "scrolling"
@@ -48,6 +71,7 @@ gap = 12.0                    # Gap between columns, windows, and screen edges (
 default-width = 0.5           # Initial column width fraction (0.1 .. 1.0)
 preset-widths = [0.3333333333333333, 0.5, 0.6666666666666666]
 center-focus = "never"        # "never", "on-overflow", "always"
+always-center-single-column = false
 workspaces = 0                # 0 = dynamic (niri-style); >0 = fixed count (dwm-style, e.g. 9)
 
 [window]
@@ -74,6 +98,7 @@ window-open = { ms = 160.0, easing = "out-cubic" }
 window-close = { ms = 140.0, easing = "out-quad" }
 focus-ring = { ms = 120.0, easing = "out-cubic" }
 overlay = { ms = 140.0, easing = "out-cubic" }
+overview = { stiffness = 850.0, damping = 1.0 }
 
 [overlay]
 at-startup = true             # Display hotkey overlay when Pastel launches
@@ -81,11 +106,17 @@ font = "sans-serif"           # Fontconfig font family for the hotkey overlay
 opacity = 0.92                # Overlay panel opacity (inherits [window] border, radius, blur & colors)
 
 # Merged over default keybindings. Set an entry to "none" to unbind it.
+# Supports all XKB keysyms plus WheelUp/WheelDown/WheelLeft/WheelRight and MouseMiddle/MouseBack/MouseForward.
+# Use `{ action = "...", allow-when-locked = true }` to allow media/power bindings while locked.
 # Run `pastel --list-actions` for all valid action names.
 [binds]
 # "Mod+Return" = "spawn foot"
 # "Mod+D" = "spawn fuzzel"
-# "Mod+B" = "spawn firefox"
+# "Mod+O" = "toggle-overview"
+# "Mod+W" = "toggle-column-tabbed-display"
+# "Mod+WheelUp" = "focus-column-left"
+# "Mod+WheelDown" = "focus-column-right"
+# "XF86AudioRaiseVolume" = { action = "spawn wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+", allow-when-locked = true }
 
 # Per-window rules (substring match, or `*` wildcard glob on app-id and/or title).
 # Later matching rules override earlier ones.
@@ -94,8 +125,12 @@ opacity = 0.92                # Overlay panel opacity (inherits [window] border,
 # opacity = 0.88
 # blur = true
 # default-width = 0.5
+# default-floating-size = [900, 600]
 # floating = false
 # fullscreen = false
 # maximized = false
+# open-focused = true
+# block-out-from-screencast = false
+# variable-refresh-rate = true
 # workspace = 1
 # monitor = "DP-1"

@@ -30,6 +30,7 @@ pub struct Monitor {
     pub usable_rect: core.Rect = core.Rect {}
     pub workspaces: List[workspace.Workspace] = []
     pub active_ws: int = 0
+    pub prev_ws: int = 0
 }
 
 /// Root multi-monitor desktop state. Pure data, no clocks or Wayland dependencies.
@@ -40,6 +41,7 @@ pub struct Desktop {
     pub gap: f64 = 12.0
     pub default_width: f64 = 0.5
     pub center_mode: traits.CenterMode = traits.CenterMode.OnOverflow
+    pub always_center_single: bool = false
     pub next_ws_id: u64 = 1
     /// O(1) reverse index: window id -> location.
     pub index: map.Map[u64, WindowLoc]
@@ -48,6 +50,7 @@ pub struct Desktop {
     /// Reusable scratch lists for zero-allocation global Z-order assembly.
     float_scratch: List[traits.TileTarget] = []
     full_scratch: List[traits.TileTarget] = []
+    ws_vis_scratch: List[int] = []
 }
 
 pub fn Desktop.new(fixed_workspaces: int, gap: f64, default_width: f64, center_mode: traits.CenterMode) -> Desktop {
@@ -72,10 +75,22 @@ pub fn Desktop.reconfigure(mut self, fixed_workspaces: int, gap: f64, default_wi
     self.rebuild_index()
 }
 
+/// Toggle whether a workspace containing a single column always centers it horizontally.
+pub fn Desktop.set_always_center_single(mut self, on: bool) {
+    self.always_center_single = on
+    for mi in 0..self.monitors.len() {
+        for wi in 0..self.monitors[mi].workspaces.len() {
+            self.monitors[mi].workspaces[wi].strip.always_center_single = on
+        }
+    }
+}
+
 fn Desktop.alloc_ws(mut self) -> workspace.Workspace {
     let id = self.next_ws_id
     self.next_ws_id += 1
-    return workspace.Workspace.new(id)
+    var ws = workspace.Workspace.new(id)
+    ws.strip.always_center_single = self.always_center_single
+    return ws
 }
 
 fn clamp_floating_to_area(r: core.Rect, u: core.Rect) -> core.Rect {
@@ -106,6 +121,7 @@ fn Desktop.normalize_workspaces(mut self, mi: int) {
             }
         }
         self.monitors[mi].active_ws = self.monitors[mi].active_ws.clamp(0, self.monitors[mi].workspaces.len() - 1)
+        self.monitors[mi].prev_ws = self.monitors[mi].prev_ws.clamp(0, self.monitors[mi].workspaces.len() - 1)
         return
     }
     // Dynamic niri-style mode: keep active workspace and non-empty workspaces, plus 1 trailing empty spare.
@@ -113,6 +129,7 @@ fn Desktop.normalize_workspaces(mut self, mi: int) {
         let ws = self.alloc_ws()
         self.monitors[mi].workspaces.push(ws)
         self.monitors[mi].active_ws = 0
+        self.monitors[mi].prev_ws = 0
         return
     }
     var i = 0
@@ -121,6 +138,9 @@ fn Desktop.normalize_workspaces(mut self, mi: int) {
             discard self.monitors[mi].workspaces.remove(i)
             if i < self.monitors[mi].active_ws {
                 self.monitors[mi].active_ws -= 1
+            }
+            if i < self.monitors[mi].prev_ws {
+                self.monitors[mi].prev_ws -= 1
             }
         } else {
             i += 1
@@ -132,6 +152,7 @@ fn Desktop.normalize_workspaces(mut self, mi: int) {
         self.monitors[mi].workspaces.push(ws)
     }
     self.monitors[mi].active_ws = self.monitors[mi].active_ws.clamp(0, self.monitors[mi].workspaces.len() - 1)
+    self.monitors[mi].prev_ws = self.monitors[mi].prev_ws.clamp(0, self.monitors[mi].workspaces.len() - 1)
 }
 
 fn Desktop.rebuild_index(mut self) {
@@ -207,15 +228,6 @@ pub fn Desktop.add_monitor(mut self, id: u64, name: str, full_rect: core.Rect, u
             }
         }
     }
-}
-
-pub fn Desktop.update_monitor_rect(mut self, id: u64, full_rect: core.Rect, usable_rect: core.Rect) {
-    let mi = self.find_monitor(id)
-    guard mi >= 0 else {
-        return
-    }
-    self.monitors[mi].full_rect = full_rect
-    self.monitors[mi].usable_rect = usable_rect
 }
 
 /// Remove a monitor, migrating open windows (preserving column stacks & clamping floating rects)
@@ -296,6 +308,11 @@ pub fn Desktop.add_window(mut self, id: u64, floating: bool, width_hint: f64, na
 
 /// Insert a new window onto `target_monitor` (by output name, empty = active monitor) and optional 1-based workspace.
 pub fn Desktop.add_window_on(mut self, id: u64, floating: bool, width_hint: f64, natural_w: f64, natural_h: f64, target_monitor: str, target_ws: Option[int]) {
+    self.add_window_full(id, floating, width_hint, natural_w, natural_h, target_monitor, target_ws, true)
+}
+
+/// Insert a new window with full control over target monitor, workspace, and whether it steals focus.
+pub fn Desktop.add_window_full(mut self, id: u64, floating: bool, width_hint: f64, natural_w: f64, natural_h: f64, target_monitor: str, target_ws: Option[int], open_focused: bool) {
     guard not self.monitors.is_empty() else {
         self.orphaned.push(OrphanWindow { id, floating, width_hint, natural_w, natural_h })
         return
@@ -320,10 +337,18 @@ pub fn Desktop.add_window_on(mut self, id: u64, floating: bool, width_hint: f64,
         let w = if natural_w > 32.0 { min(natural_w, u.w * 0.9) } else { min(u.w * 0.5, 800.0) }
         let h = if natural_h > 32.0 { min(natural_h, u.h * 0.9) } else { min(u.h * 0.6, 600.0) }
         let r = core.Rect.new(u.x + (u.w - w) * 0.5, u.y + (u.h - h) * 0.5, w, h)
-        self.monitors[mi].workspaces[wi].insert_floating(id, r)
+        if open_focused {
+            self.monitors[mi].workspaces[wi].insert_floating(id, r)
+        } else {
+            self.monitors[mi].workspaces[wi].insert_floating_unfocused(id, r)
+        }
     } else {
         let wf = if width_hint > 0.0 { width_hint } else { self.default_width }
-        self.monitors[mi].workspaces[wi].insert_tiled(id, wf)
+        if open_focused {
+            self.monitors[mi].workspaces[wi].insert_tiled(id, wf)
+        } else {
+            self.monitors[mi].workspaces[wi].insert_tiled_unfocused(id, wf)
+        }
     }
     discard self.index.insert(id, WindowLoc { monitor_idx: mi, workspace_idx: wi, floating })
     self.normalize_workspaces(mi)
@@ -453,7 +478,10 @@ pub fn Desktop.focus_window(mut self, id: u64) -> bool {
     let prev_mi = self.active_monitor
     let prev_ws = if prev_mi < self.monitors.len() { self.monitors[prev_mi].active_ws } else { -1 }
     self.active_monitor = loc.monitor_idx
-    self.monitors[loc.monitor_idx].active_ws = loc.workspace_idx
+    if self.monitors[loc.monitor_idx].active_ws != loc.workspace_idx {
+        self.monitors[loc.monitor_idx].prev_ws = self.monitors[loc.monitor_idx].active_ws
+        self.monitors[loc.monitor_idx].active_ws = loc.workspace_idx
+    }
     let ok = self.monitors[loc.monitor_idx].workspaces[loc.workspace_idx].focus_window(id)
     if self.fixed_workspaces == 0 and (prev_mi != loc.monitor_idx or prev_ws != loc.workspace_idx) {
         if prev_mi >= 0 and prev_mi < self.monitors.len() {
@@ -595,6 +623,7 @@ pub fn Desktop.focus_workspace(mut self, ws1: int) -> bool {
         if clamped == self.monitors[mi].active_ws {
             return false
         }
+        self.monitors[mi].prev_ws = self.monitors[mi].active_ws
         self.monitors[mi].active_ws = clamped
         return true
     }
@@ -603,10 +632,24 @@ pub fn Desktop.focus_workspace(mut self, ws1: int) -> bool {
     if clamped == self.monitors[mi].active_ws {
         return false
     }
+    self.monitors[mi].prev_ws = self.monitors[mi].active_ws
     self.monitors[mi].active_ws = clamped
     self.normalize_workspaces(mi)
     self.rebuild_index()
     return true
+}
+
+/// Switch back to the previously visited workspace on the active monitor.
+pub fn Desktop.focus_workspace_previous(mut self) -> bool {
+    guard not self.monitors.is_empty() else {
+        return false
+    }
+    let mi = self.active_monitor
+    let prev = self.monitors[mi].prev_ws.clamp(0, self.monitors[mi].workspaces.len() - 1)
+    guard prev != self.monitors[mi].active_ws else {
+        return false
+    }
+    return self.focus_workspace(prev + 1)
 }
 
 /// Switch workspace relatively (`delta`: -1 up/prev, +1 down/next).
@@ -620,6 +663,15 @@ pub fn Desktop.focus_workspace_rel(mut self, delta: int) -> bool {
 
 /// Move the focused window to 1-based workspace `ws1` on the active monitor (preserving column width).
 pub fn Desktop.move_focused_to_workspace(mut self, ws1: int) -> bool {
+    return self.move_focused_to_workspace_opt(ws1, true)
+}
+
+/// Move the focused window to 1-based workspace `ws1` without switching the active workspace.
+pub fn Desktop.move_focused_to_workspace_silent(mut self, ws1: int) -> bool {
+    return self.move_focused_to_workspace_opt(ws1, false)
+}
+
+fn Desktop.move_focused_to_workspace_opt(mut self, ws1: int, follow: bool) -> bool {
     guard let Some(id) = self.focused_window() else {
         return false
     }
@@ -651,7 +703,10 @@ pub fn Desktop.move_focused_to_workspace(mut self, ws1: int) -> bool {
         discard self.monitors[mi].workspaces[from_ws].remove(id)
         self.monitors[mi].workspaces[to_ws].insert_tiled(id, saved_w)
     }
-    self.monitors[mi].active_ws = to_ws
+    if follow {
+        self.monitors[mi].prev_ws = from_ws
+        self.monitors[mi].active_ws = to_ws
+    }
     self.normalize_workspaces(mi)
     self.rebuild_index()
     return true
@@ -664,6 +719,61 @@ pub fn Desktop.move_focused_to_workspace_rel(mut self, delta: int) -> bool {
     let cur = self.monitors[self.active_monitor].active_ws
     let next = max(cur + delta, 0)
     return self.move_focused_to_workspace(next + 1)
+}
+
+/// Move the entire active column (preserving vertical stack, weights, width, and tabbed state)
+/// to 1-based workspace `ws1`. Falls back to moving the focused floating window if floating.
+pub fn Desktop.move_column_to_workspace(mut self, ws1: int) -> bool {
+    guard let Some(id) = self.focused_window() else {
+        return false
+    }
+    guard let Some(loc) = self.index.get(id) else {
+        return false
+    }
+    if loc.floating {
+        return self.move_focused_to_workspace(ws1)
+    }
+    let mi = loc.monitor_idx
+    let from_ws = loc.workspace_idx
+    let want = max(ws1 - 1, 0)
+    var to_ws = want
+    if self.fixed_workspaces > 0 {
+        to_ws = want.clamp(0, self.monitors[mi].workspaces.len() - 1)
+    } else {
+        while self.monitors[mi].workspaces.len() <= to_ws {
+            let ws = self.alloc_ws()
+            self.monitors[mi].workspaces.push(ws)
+        }
+    }
+    guard to_ws != from_ws else {
+        return false
+    }
+    guard let Some(col) = self.monitors[mi].workspaces[from_ws].strip.take_active_column() else {
+        return false
+    }
+    if let Some(fs_id) = self.monitors[mi].workspaces[from_ws].fullscreen {
+        if col.find(fs_id) >= 0 {
+            self.monitors[mi].workspaces[from_ws].fullscreen = None
+        }
+    }
+    if self.monitors[mi].workspaces[from_ws].strip.is_empty() and not self.monitors[mi].workspaces[from_ws].floating.is_empty() {
+        self.monitors[mi].workspaces[from_ws].focus_floating = true
+    }
+    self.monitors[mi].workspaces[to_ws].insert_column(col)
+    self.monitors[mi].prev_ws = from_ws
+    self.monitors[mi].active_ws = to_ws
+    self.normalize_workspaces(mi)
+    self.rebuild_index()
+    return true
+}
+
+pub fn Desktop.move_column_to_workspace_rel(mut self, delta: int) -> bool {
+    guard not self.monitors.is_empty() else {
+        return false
+    }
+    let cur = self.monitors[self.active_monitor].active_ws
+    let next = max(cur + delta, 0)
+    return self.move_column_to_workspace(next + 1)
 }
 
 /// Focus adjacent monitor in 2D (`dx`: -1 left / +1 right, `dy`: -1 up / +1 down).
@@ -704,11 +814,6 @@ pub fn Desktop.focus_monitor_2d(mut self, dx: int, dy: int) -> bool {
     return true
 }
 
-/// Focus adjacent horizontal monitor (`dx`: -1 left, +1 right).
-pub fn Desktop.focus_monitor_dir(mut self, dx: int) -> bool {
-    return self.focus_monitor_2d(dx, 0)
-}
-
 /// Move focused window to adjacent monitor in 2D (preserving column width).
 pub fn Desktop.move_focused_to_monitor_2d(mut self, dx: int, dy: int) -> bool {
     guard let Some(id) = self.focused_window() else {
@@ -740,9 +845,40 @@ pub fn Desktop.move_focused_to_monitor_2d(mut self, dx: int, dy: int) -> bool {
     return true
 }
 
-/// Move focused window to adjacent horizontal monitor (`dx`: -1 left, +1 right).
-pub fn Desktop.move_focused_to_monitor_dir(mut self, dx: int) -> bool {
-    return self.move_focused_to_monitor_2d(dx, 0)
+/// Move the entire active column (or focused floating window) to adjacent monitor in 2D.
+pub fn Desktop.move_column_to_monitor_2d(mut self, dx: int, dy: int) -> bool {
+    guard let Some(id) = self.focused_window() else {
+        return false
+    }
+    guard let Some(loc) = self.index.get(id) else {
+        return false
+    }
+    if loc.floating {
+        return self.move_focused_to_monitor_2d(dx, dy)
+    }
+    let src_m = loc.monitor_idx
+    let src_w = loc.workspace_idx
+    guard self.focus_monitor_2d(dx, dy) else {
+        return false
+    }
+    let dst_m = self.active_monitor
+    let dst_w = self.monitors[dst_m].active_ws
+    guard let Some(col) = self.monitors[src_m].workspaces[src_w].strip.take_active_column() else {
+        return false
+    }
+    if let Some(fs_id) = self.monitors[src_m].workspaces[src_w].fullscreen {
+        if col.find(fs_id) >= 0 {
+            self.monitors[src_m].workspaces[src_w].fullscreen = None
+        }
+    }
+    if self.monitors[src_m].workspaces[src_w].strip.is_empty() and not self.monitors[src_m].workspaces[src_w].floating.is_empty() {
+        self.monitors[src_m].workspaces[src_w].focus_floating = true
+    }
+    self.monitors[dst_m].workspaces[dst_w].insert_column(col)
+    self.normalize_workspaces(src_m)
+    self.normalize_workspaces(dst_m)
+    self.rebuild_index()
+    return true
 }
 
 /// Compute active workspace window targets across all monitors in strict global Z-order:
@@ -771,4 +907,83 @@ pub fn Desktop.compute_all(mut self, mut out: List[traits.TileTarget]) {
     }
     self.float_scratch = floats
     self.full_scratch = fulls
+}
+
+/// Compute scaled workspace bands and window thumbnail targets across all monitors for Overview mode.
+pub fn Desktop.compute_overview(mut self, mut out: List[traits.TileTarget], mut out_bands: List[traits.OverviewBand]) {
+    out.clear()
+    out_bands.clear()
+    var floats = mem.replace(mut self.float_scratch, [])
+    var fulls = mem.replace(mut self.full_scratch, [])
+    var vis = mem.replace(mut self.ws_vis_scratch, [])
+    floats.clear()
+    fulls.clear()
+    for mi in 0..self.monitors.len() {
+        vis.clear()
+        let aw = self.monitors[mi].active_ws
+        let nws = self.monitors[mi].workspaces.len()
+        for wi in 0..nws {
+            let show_trailing_spare = self.fixed_workspaces == 0 and wi == nws - 1
+            if wi == aw or not self.monitors[mi].workspaces[wi].is_empty() or show_trailing_spare {
+                vis.push(wi)
+            }
+        }
+        if vis.is_empty() and nws > 0 {
+            vis.push(aw.clamp(0, nws - 1))
+        }
+        let count = vis.len()
+        guard count > 0 else {
+            continue
+        }
+        let full = self.monitors[mi].full_rect
+        let u = self.monitors[mi].usable_rect
+        let pad = max(self.gap * 1.5, 16.0)
+        let avail_h = max(u.h - pad * f64(count + 1), 64.0)
+        let band_h_max = avail_h / f64(count)
+        let scale_h = band_h_max / max(full.h, 1.0)
+        let scale_w = max(u.w - pad * 2.0, 64.0) * 0.72 / max(full.w, 1.0)
+        let sc = min(min(scale_h, scale_w), 0.55).clamp(0.08, 0.55)
+        let band_w = (full.w * sc).round()
+        let band_h = (full.h * sc).round()
+        let total_stack_h = f64(count) * band_h + f64(count - 1) * pad
+        var by = (u.y + (u.h - total_stack_h) * 0.5).round()
+        let bx = (u.x + (u.w - band_w) * 0.5).round()
+        let is_active_mon = mi == self.active_monitor
+        for vi in 0..count {
+            let wi = vis[vi]
+            let band_rect = core.Rect.new(bx, by, band_w, band_h)
+            out_bands.push(traits.OverviewBand {
+                monitor_idx: mi,
+                workspace_idx: wi,
+                rect: band_rect,
+                scale: sc,
+                active: wi == aw,
+            })
+            self.monitors[mi].workspaces[wi].compute_overview_band(
+                mi,
+                wi,
+                wi == aw,
+                is_active_mon,
+                full,
+                u,
+                band_rect,
+                sc,
+                self.gap,
+                self.center_mode,
+                mut out,
+                mut floats,
+                mut fulls,
+            )
+            by += band_h + pad
+        }
+    }
+    for f in floats {
+        out.push(f)
+    }
+    for fs in fulls {
+        out.push(fs)
+    }
+    self.float_scratch = floats
+    self.full_scratch = fulls
+    self.ws_vis_scratch = vis
 }

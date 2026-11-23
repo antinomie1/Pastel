@@ -10,8 +10,21 @@ pub struct TileTarget {
     pub floating: bool = false
     pub fullscreen: bool = false
     pub maximized: bool = false
+    pub tabbed: bool = false
+    pub tab_count: int = 1
+    pub tab_index: int = 0
+    pub overview_scale: f64 = 1.0
     pub monitor_idx: int = 0
     pub workspace_idx: int = 0
+}
+
+/// One workspace band computed for Overview thumbnail mode in global logical coordinates.
+pub struct OverviewBand {
+    pub monitor_idx: int = 0
+    pub workspace_idx: int = 0
+    pub rect: core.Rect = core.Rect {}
+    pub scale: f64 = 1.0
+    pub active: bool = false
 }
 
 /// Centering strategy for horizontal strip scrolling.

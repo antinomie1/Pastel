@@ -59,6 +59,7 @@ pub struct BlurPyramid {
     pub width: u32 = 0
     pub height: u32 = 0
     pub depth: int = 0
+    pub format: gpu.Format = gpu.Format.B8G8R8A8_UNORM
     pub levels: List[gpu.Texture] = []
     pub xray_tex: Option[gpu.Texture] = None
     pub xray_bg: vec4 = zeroed()
@@ -83,17 +84,17 @@ pub fn BlurPyramid.invalidate_xray(mut self) {
     self.xray_valid = false
 }
 
-/// Ensure the half/quarter/eighth-resolution mip pyramid matches `(w, h, passes)`.
-pub fn BlurPyramid.ensure(mut self, mut dev: gpu.Device, w: u32, h: u32, passes: int) -> Result[(), str] {
+/// Ensure the half/quarter/eighth-resolution mip pyramid matches `(w, h, passes, fmt)`.
+pub fn BlurPyramid.ensure(mut self, mut dev: gpu.Device, w: u32, h: u32, passes: int, fmt: gpu.Format) -> Result[(), str] {
     let d = passes.clamp(1, 4)
-    if self.width == w and self.height == h and self.depth == d and self.levels.len() == d {
+    if self.width == w and self.height == h and self.depth == d and self.format == fmt and self.levels.len() == d {
         return Ok(())
     }
     self.destroy(mut dev)
     var cw = max(w / 2, u32(1))
     var ch = max(h / 2, u32(1))
     for _ in 0..d {
-        let desc = gpu.TextureDesc { width: cw, height: ch, format: gpu.Format.B8G8R8A8_UNORM, target: true }
+        let desc = gpu.TextureDesc { width: cw, height: ch, format: fmt, target: true }
         let tex = try dev.texture(desc)
         self.levels.push(tex)
         cw = max(cw / 2, u32(1))
@@ -102,13 +103,14 @@ pub fn BlurPyramid.ensure(mut self, mut dev: gpu.Device, w: u32, h: u32, passes:
     self.width = w
     self.height = h
     self.depth = d
+    self.format = fmt
     self.xray_valid = false
     return Ok(())
 }
 
 /// Run Dual-Kawase downsample -> upsample on `src` and return the blurred level-0 texture.
 pub fn BlurPyramid.blur_from(mut self, mut dev: gpu.Device, pipes: BlurPipelines, mut e: gpu.Encoder, src: gpu.Texture, w: u32, h: u32, passes: int, offset: f32) -> Result[gpu.Texture, str] {
-    try self.ensure(mut dev, w, h, passes)
+    try self.ensure(mut dev, w, h, passes, src.format())
     let n = self.levels.len()
     let off = offset.clamp(0.5, 8.0)
 
@@ -155,9 +157,10 @@ pub fn BlurPyramid.blur_from(mut self, mut dev: gpu.Device, pipes: BlurPipelines
 
 /// Ensure a cached X-Ray blurred texture exists at half resolution, blurring `src` only when invalid.
 pub fn BlurPyramid.ensure_xray(mut self, mut dev: gpu.Device, pipes: BlurPipelines, mut e: gpu.Encoder, src: gpu.Texture, w: u32, h: u32, passes: int, offset: f32, bg: vec4) -> Result[gpu.Texture, str] {
-    if self.xray_valid and self.xray_bg == bg {
+    let fmt = src.format()
+    if self.xray_valid and self.xray_bg == bg and self.format == fmt {
         if let Some(t) = self.xray_tex {
-            if t.width() == max(w / 2, u32(1)) and t.height() == max(h / 2, u32(1)) {
+            if t.width() == max(w / 2, u32(1)) and t.height() == max(h / 2, u32(1)) and t.format() == fmt {
                 return Ok(t)
             }
         }
@@ -168,7 +171,7 @@ pub fn BlurPyramid.ensure_xray(mut self, mut dev: gpu.Device, pipes: BlurPipelin
     var dst_opt = self.xray_tex
     var need_alloc = true
     if let Some(t) = dst_opt {
-        if t.width() == bw and t.height() == bh {
+        if t.width() == bw and t.height() == bh and t.format() == fmt {
             need_alloc = false
         } else {
             dev.destroy_texture(t)
@@ -176,7 +179,7 @@ pub fn BlurPyramid.ensure_xray(mut self, mut dev: gpu.Device, pipes: BlurPipelin
         }
     }
     if need_alloc {
-        let tex = try dev.texture(gpu.TextureDesc { width: bw, height: bh, format: gpu.Format.B8G8R8A8_UNORM, target: true })
+        let tex = try dev.texture(gpu.TextureDesc { width: bw, height: bh, format: fmt, target: true })
         dst_opt = Some(tex)
         self.xray_tex = dst_opt
     }
@@ -196,12 +199,6 @@ pub fn kernel_radius(passes: int, offset: f32) -> f32 {
         scale *= 2.0
     }
     return scale * off * 2.0 + 4.0
-}
-
-/// Composite `blurred` into `dst`, scissored and SDF-clipped to `rect` with `radius` and `alpha`.
-pub fn composite(pipes: BlurPipelines, mut e: gpu.Encoder, blurred: gpu.Texture, dst: gpu.Texture, rect: draw2d.Rect, radius: f32, alpha: f32) {
-    let none: List[draw2d.Rect] = []
-    composite_clips(pipes, mut e, blurred, dst, rect, radius, alpha, none)
 }
 
 /// Composite `blurred` into `dst`, scissored to the intersection of `rect` with each damage clip

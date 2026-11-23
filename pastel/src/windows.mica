@@ -32,14 +32,16 @@ pub fn on_window_new[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor
     let is_dialog = p.d.parent(w).is_some() or p.d.modal(w)
     let float = rule.floating.unwrap_or(is_dialog)
     if float or p.desktop.monitors.is_empty() {
-        discard p.d.configure(w, 0, 0, lum.States { activated: true })
+        let fw = i32(rule.default_floating_w.unwrap_or(0.0).round())
+        let fh = i32(rule.default_floating_h.unwrap_or(0.0).round())
+        discard p.d.configure(w, fw, fh, lum.States { activated: rule.open_focused })
     } else {
         let named_mi = p.desktop.find_monitor_by_name(rule.monitor)
         let mi = if named_mi >= 0 { named_mi } else { p.desktop.active_monitor }
         let u = p.desktop.monitors[mi].usable_rect
         let cw = i32(lay.column.width_for_frac(u.w, p.desktop.gap, rule.default_width))
         let ch = i32(max((u.h - p.desktop.gap * 2.0).floor(), 128.0))
-        discard p.d.configure(w, cw, ch, lum.States { activated: true, tiled_left: true, tiled_right: true, tiled_top: true, tiled_bottom: true })
+        discard p.d.configure(w, cw, ch, lum.States { activated: rule.open_focused, tiled_left: true, tiled_right: true, tiled_top: true, tiled_bottom: true })
     }
 }
 
@@ -60,7 +62,9 @@ pub fn on_window_mapped[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composi
     let is_dialog = p.d.parent(w).is_some() or p.d.modal(w)
     let float = rule.floating.unwrap_or(is_dialog)
     let (nw, nh) = p.d.size(w)
-    p.desktop.add_window_on(id, float, rule.default_width, f64(nw), f64(nh), rule.monitor, rule.workspace)
+    let eff_nw = rule.default_floating_w.unwrap_or(f64(nw))
+    let eff_nh = rule.default_floating_h.unwrap_or(f64(nh))
+    p.desktop.add_window_full(id, float, rule.default_width, eff_nw, eff_nh, rule.monitor, rule.workspace, rule.open_focused)
     if let Some(want_max) = rule.maximized {
         discard p.desktop.set_maximized(id, want_max)
     }

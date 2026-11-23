@@ -238,13 +238,14 @@ pub fn reload_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor
         p.cfg_watch = Some(watcher)
     }
     p.desktop.reconfigure(p.cfg.layout.workspaces, p.cfg.layout.gap, p.cfg.layout.default_width, center_mode(p.cfg.layout.center_focus))
+    p.desktop.set_always_center_single(p.cfg.layout.always_center_single_column)
     outputs.apply_keymap(mut p, true)
     // Live reload keyboard repeat rate & delay across all seats.
     p.d.set_repeat(p.cfg.input.repeat_rate, p.cfg.input.repeat_delay)
     // Re-apply pointer/touchpad settings to every currently connected input device.
     let devs = p.input_devices.clone()
-    for dev in devs {
-        outputs.apply_input_config(mut p, dev)
+    for (dev, desc) in devs {
+        outputs.apply_input_config(mut p, dev, desc)
     }
     // Live reconcile xwayland-satellite lifecycle when `[xwayland]` changed.
     if xw_changed {
@@ -256,8 +257,9 @@ pub fn reload_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor
             p.xwayland_display = disp
             p.xwayland_pid = pid
         }
-        spawn.export_session_env(p.d.socket(), p.xwayland_display.clone(), p.nested)
     }
+    spawn.export_session_env(p.d.socket(), p.xwayland_display.clone(), p.nested, p.cfg.env)
+    p.vrr_state.clear()
     for so in p.d.outputs() {
         outputs.apply_output_config(mut p, so)
     }

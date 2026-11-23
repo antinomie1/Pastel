@@ -91,8 +91,81 @@ pub fn apply_output_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: comp
         p.d.set_position(so, px, py)
     }
     if let Some(vrr) = oc.vrr {
-        p.d.set_vrr(so, vrr)
+        let oid = output_id(so)
+        match vrr {
+            Off => {
+                p.d.set_vrr(so, false)
+                discard p.vrr_state.insert(oid, false)
+            }
+            On => {
+                p.d.set_vrr(so, true)
+                discard p.vrr_state.insert(oid, true)
+            }
+            OnDemand => {}
+        }
     }
+    if let Some(hdr) = oc.hdr {
+        discard p.d.set_hdr(so, hdr, oc.sdr_nits, oc.max_nits)
+    }
+}
+
+/// Evaluate `vrr = "on-demand"` across monitors: activate VRR only when a fullscreen window on
+/// that monitor opts in via `[[window-rule]].variable-refresh-rate` or reports video/game content type.
+pub fn sync_vrr_on_demand[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) {
+    for mi in 0..p.desktop.monitors.len() {
+        let mid = p.desktop.monitors[mi].id
+        guard let Some(oc) = p.cfg.output_for(p.desktop.monitors[mi].name) else {
+            continue
+        }
+        guard oc.vrr == Some(cfg.VrrMode.OnDemand) else {
+            continue
+        }
+        guard let Some(so) = p.out_by_id.get(mid) else {
+            continue
+        }
+        var want = false
+        let wi = p.desktop.monitors[mi].active_ws
+        if wi >= 0 and wi < p.desktop.monitors[mi].workspaces.len() {
+            if let Some(fs_id) = p.desktop.monitors[mi].workspaces[wi].fullscreen {
+                let rule_vrr = p.win_rules.get(fs_id).and_then(fn(r) => r.variable_refresh_rate)
+                match rule_vrr {
+                    Some(v) => want = v
+                    None => {
+                        if let Some(w) = p.win_by_id.get(fs_id) {
+                            let ct = p.d.content_type(w)
+                            // wp_content_type_v1: 2 = video, 3 = game.
+                            want = ct == u32(2) or ct == u32(3)
+                        }
+                    }
+                }
+            }
+        }
+        if p.vrr_state.get(mid) != Some(want) {
+            p.d.set_vrr(so, want)
+            discard p.vrr_state.insert(mid, want)
+        }
+    }
+}
+
+/// Toggle DPMS power state on all configured outputs (honoring outputs disabled in config).
+pub fn power_monitors[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], on: bool) {
+    let outs = p.d.outputs()
+    if not on {
+        for so in outs {
+            p.d.enable(so, false)
+        }
+        p.monitors_powered = false
+        return
+    }
+    for so in outs {
+        let desc = p.d.output_desc(so)
+        let cfg_off = p.cfg.output_for(desc.name).map(fn(oc) => not oc.enabled).unwrap_or(false)
+        if not cfg_off {
+            p.d.enable(so, true)
+        }
+    }
+    p.monitors_powered = true
+    p.needs_layout = true
 }
 
 /// Synchronize all live luminaria outputs into `p.desktop`.
@@ -172,14 +245,38 @@ pub fn on_output_removed[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compos
     p.needs_layout = true
 }
 
-pub fn apply_input_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], dev: u32) {
-    p.d.configure_input(dev, lum.InputConfig {
-        tap: p.cfg.input.tap_to_click,
-        natural_scroll: p.cfg.input.natural_scroll,
-        accel: p.cfg.input.accel,
-        left_handed: p.cfg.input.left_handed,
-        disabled: false,
-    })
+fn accel_profile_code(p: cfg.AccelProfile) -> i32 {
+    return match p {
+        Default => lum.types.accel_profile_default
+        Flat => lum.types.accel_profile_flat
+        Adaptive => lum.types.accel_profile_adaptive
+    }
+}
+
+pub fn apply_input_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], dev: u32, desc: lum.types.DeviceDesc) {
+    if desc.touchpad {
+        let tp = p.cfg.input.touchpad
+        p.d.configure_input(dev, lum.InputConfig {
+            tap: tp.tap_to_click,
+            natural_scroll: tp.natural_scroll,
+            accel: tp.accel,
+            accel_profile: accel_profile_code(tp.accel_profile),
+            dwt: tp.dwt,
+            left_handed: tp.left_handed,
+            disabled: false,
+        })
+    } else {
+        let ms = p.cfg.input.mouse
+        p.d.configure_input(dev, lum.InputConfig {
+            tap: false,
+            natural_scroll: ms.natural_scroll,
+            accel: ms.accel,
+            accel_profile: accel_profile_code(ms.accel_profile),
+            dwt: false,
+            left_handed: ms.left_handed,
+            disabled: false,
+        })
+    }
 }
 
 pub fn apply_keymap[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], force: bool) {

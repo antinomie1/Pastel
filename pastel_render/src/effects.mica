@@ -55,12 +55,39 @@ pub struct ClosingEffect {
     pub opacity: f32 = 0.0
 }
 
+/// Compact segmented tab indicator pill bar drawn above a tabbed column in output pixels.
+pub struct TabBar {
+    pub x: f32 = 0.0
+    pub y: f32 = 0.0
+    pub w: f32 = 0.0
+    pub h: f32 = 0.0
+    pub count: int = 1
+    pub active_idx: int = 0
+    pub active_color: vec4 = zeroed()
+    pub inactive_color: vec4 = zeroed()
+    pub radius: f32 = 0.0
+}
+
+/// Workspace backdrop and highlight frame drawn behind thumbnails in Overview mode.
+pub struct OverviewFrame {
+    pub x: f32 = 0.0
+    pub y: f32 = 0.0
+    pub w: f32 = 0.0
+    pub h: f32 = 0.0
+    pub border_width: f32 = 0.0
+    pub border_color: vec4 = zeroed()
+    pub fill_color: vec4 = zeroed()
+    pub radius: f32 = 0.0
+}
+
 /// Per-output visual state pushed from the compositor before each layout update.
 pub struct OutputEffects {
     pub background: vec4 = zeroed()
     pub blur: BlurSettings = BlurSettings {}
     pub items: List[WindowEffect] = []
     pub closing: List[ClosingEffect] = []
+    pub tabs: List[TabBar] = []
+    pub frames: List[OverviewFrame] = []
     pub generation: u64 = 0
 }
 
@@ -82,17 +109,21 @@ pub fn EffectSheet.clone(self) -> EffectSheet {
     return EffectSheet { inner: self.inner.clone() }
 }
 
-/// Update output `o`'s effects atomically, bumping the sheet generation.
+/// Update output `o`'s window effects atomically, bumping the sheet generation.
 pub fn EffectSheet.set_output(self, o: int, bg: core.Color, blur: BlurSettings, take items: List[WindowEffect]) {
     let empty_closing: List[ClosingEffect] = []
-    self.set_output_full(o, bg, blur, items, empty_closing)
+    let empty_tabs: List[TabBar] = []
+    let empty_frames: List[OverviewFrame] = []
+    self.set_output_all(o, bg, blur, items, empty_closing, empty_tabs, empty_frames)
 }
 
-/// Update output `o`'s effects and closing-window ghost animations atomically.
-pub fn EffectSheet.set_output_full(self, o: int, bg: core.Color, blur: BlurSettings, take items: List[WindowEffect], take closing: List[ClosingEffect]) {
+/// Update output `o`'s full effect state (windows, closing ghosts, tab bars, overview frames) atomically.
+pub fn EffectSheet.set_output_all(self, o: int, bg: core.Color, blur: BlurSettings, take items: List[WindowEffect], take closing: List[ClosingEffect], take tabs: List[TabBar], take frames: List[OverviewFrame]) {
     let bgv = bg.premul()
     let copy = items
     let ccopy = closing
+    let tcopy = tabs
+    let fcopy = frames
     self.inner.write(fn(mut s: SheetData) {
         while s.outputs.len() <= o {
             s.outputs.push(OutputEffects {})
@@ -103,6 +134,8 @@ pub fn EffectSheet.set_output_full(self, o: int, bg: core.Color, blur: BlurSetti
             blur,
             items: copy.clone(),
             closing: ccopy.clone(),
+            tabs: tcopy.clone(),
+            frames: fcopy.clone(),
             generation: s.generation,
         }
     })

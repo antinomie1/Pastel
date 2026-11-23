@@ -221,3 +221,112 @@ test "LayoutPolicy trait generic compute, target monitor rules, late rules, and 
     assert_eq(after.w, before.w + 100.0)
     assert_eq(after.h, before.h + 50.0)
 }
+
+test "directional consume/expel, tabbed columns, always-center-single, reset-height, and expand-width" {
+    var strip = lay.ScrollingStrip.new()
+    strip.always_center_single = true
+    let area = core.Rect.new(0.0, 0.0, 1000.0, 600.0)
+    let gap = 10.0
+
+    strip.insert(1, 0.5)
+    var out: List[lay.TileTarget] = []
+    strip.compute(area, gap, lay.CenterMode.Never, mut out)
+    // Single column centered inside 1000px viewport.
+    assert((out[0].rect.x - 257.5).abs() < 2.0)
+
+    strip.insert(2, 0.33)
+    // Directional consume-or-expel-left pulls window 2 into column 0.
+    assert(strip.consume_or_expel_left())
+    assert_eq(strip.columns.len(), 1)
+    assert_eq(strip.columns[0].windows.len(), 2)
+
+    // Adjust row height then reset.
+    assert(strip.adjust_row_weight(1.0))
+    assert(strip.reset_row_weights())
+    assert(not strip.reset_row_weights())
+
+    // Tabbed column emits ONLY active window (hiding non-active tab so luminaria suspends it).
+    assert(strip.toggle_tabbed())
+    out.clear()
+    strip.compute(area, gap, lay.CenterMode.Never, mut out)
+    assert_eq(out.len(), 1)
+    assert(out[0].tabbed)
+    assert_eq(out[0].tab_count, 2)
+    assert_eq(out[0].tab_index, 1)
+    assert_eq(out[0].id, u64(2))
+    assert_eq(strip.focus_dir(0, -1), Some(u64(1)))
+    out.clear()
+    strip.compute(area, gap, lay.CenterMode.Never, mut out)
+    assert_eq(out.len(), 1)
+    assert_eq(out[0].id, u64(1))
+    assert_eq(out[0].tab_index, 0)
+
+    // Directional expel-left puts active window into a new column to the LEFT.
+    assert(strip.consume_or_expel_left())
+    assert_eq(strip.columns.len(), 2)
+    assert_eq(strip.active_col, 0)
+    assert_eq(strip.focused(), Some(u64(1)))
+
+    // Directional consume-right absorbs solo window 1 into right neighbor column 1.
+    assert(strip.consume_or_expel_right())
+    assert_eq(strip.columns.len(), 1)
+    assert_eq(strip.columns[0].windows.len(), 2)
+    // Directional expel-right puts active window into a new column to the RIGHT.
+    assert(strip.consume_or_expel_right())
+    assert_eq(strip.columns.len(), 2)
+    assert_eq(strip.active_col, 1)
+
+    // Expand column to available remaining width.
+    assert(strip.set_column_width(0.3))
+    out.clear()
+    strip.compute(area, gap, lay.CenterMode.Never, mut out)
+    assert(strip.expand_to_available_width(area, gap))
+    assert(strip.columns[strip.active_col].width_frac > 0.45)
+}
+
+test "move column across workspaces/monitors, silent move, previous workspace, open-focused=false, and overview" {
+    var d = lay.Desktop.new(4, 12.0, 0.5, lay.CenterMode.OnOverflow)
+    d.set_always_center_single(true)
+    d.add_monitor(1, "DP-1", core.Rect.new(0.0, 0.0, 1920.0, 1080.0), core.Rect.new(0.0, 0.0, 1920.0, 1080.0))
+    d.add_monitor(2, "DP-2", core.Rect.new(1920.0, 0.0, 1920.0, 1080.0), core.Rect.new(1920.0, 0.0, 1920.0, 1080.0))
+
+    d.add_window(1, false, 0.5, 800.0, 600.0, None)
+    // Unfocused window opens without stealing focus from window 1.
+    d.add_window_full(2, false, 0.5, 800.0, 600.0, "", None, false)
+    assert_eq(d.focused_window(), Some(u64(1)))
+
+    // Stack window 1 & 2 into a single column, then move the ENTIRE column to workspace 3.
+    assert(d.focus_window(2))
+    assert(d.monitors[0].workspaces[0].strip.consume_or_expel_left())
+    assert(d.move_column_to_workspace(3))
+    assert_eq(d.monitors[0].active_ws, 2)
+    assert_eq(d.locate(1).unwrap().workspace_idx, 2)
+    assert_eq(d.locate(2).unwrap().workspace_idx, 2)
+
+    // Focus previous workspace returns to workspace 1 (index 0).
+    assert(d.focus_workspace_previous())
+    assert_eq(d.monitors[0].active_ws, 0)
+    assert(d.focus_workspace_previous())
+    assert_eq(d.monitors[0].active_ws, 2)
+
+    // Silent move sends window 2 to workspace 2 without leaving workspace 3.
+    assert(d.move_focused_to_workspace_silent(2))
+    assert_eq(d.monitors[0].active_ws, 2)
+    assert_eq(d.locate(2).unwrap().workspace_idx, 1)
+
+    // Move entire column across monitors (DP-1 -> DP-2).
+    assert(d.move_column_to_monitor_2d(1, 0))
+    assert_eq(d.active_monitor, 1)
+    assert_eq(d.locate(1).unwrap().monitor_idx, 1)
+
+    // Overview computes scaled workspace bands and window thumbnails across both monitors.
+    var ov_targets: List[lay.TileTarget] = []
+    var ov_bands: List[lay.OverviewBand] = []
+    d.compute_overview(mut ov_targets, mut ov_bands)
+    assert(ov_bands.len() >= 3)
+    assert_eq(ov_targets.len(), 2)
+    for t in ov_targets {
+        assert(t.overview_scale > 0.05 and t.overview_scale < 0.6)
+        assert(t.rect.w > 10.0 and t.rect.h > 10.0)
+    }
+}

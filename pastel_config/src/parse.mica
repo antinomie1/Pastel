@@ -10,9 +10,12 @@ import keys
 pub struct Config {
     pub background: core.Color = core.Color { r: 0.118, g: 0.125, b: 0.157, a: 1.0 }
     pub autostart: List[str] = []
+    /// Custom environment variables exported to spawned processes and D-Bus activation.
+    pub env: List[(str, str)] = []
     pub xwayland: schema.XWaylandConfig = schema.XWaylandConfig {}
     pub outputs: List[schema.OutputConfig] = []
     pub input: schema.InputConfig = schema.InputConfig {}
+    pub cursor: schema.CursorConfig = schema.CursorConfig {}
     pub layout: schema.LayoutConfig = schema.LayoutConfig {}
     pub window: schema.WindowConfig = schema.WindowConfig {}
     pub animation: schema.AnimationConfig = schema.AnimationConfig {}
@@ -54,6 +57,12 @@ pub fn Config.resolve_window(self, app_id: str, title: str) -> schema.ResolvedWi
             if let Some(dw) = rule.default_width {
                 r.default_width = dw
             }
+            if let Some(fw) = rule.default_floating_w {
+                r.default_floating_w = Some(fw)
+            }
+            if let Some(fh) = rule.default_floating_h {
+                r.default_floating_h = Some(fh)
+            }
             if let Some(fl) = rule.floating {
                 r.floating = Some(fl)
             }
@@ -62,6 +71,15 @@ pub fn Config.resolve_window(self, app_id: str, title: str) -> schema.ResolvedWi
             }
             if let Some(mx) = rule.maximized {
                 r.maximized = Some(mx)
+            }
+            if let Some(of) = rule.open_focused {
+                r.open_focused = of
+            }
+            if let Some(blk) = rule.block_out_from_screencast {
+                r.block_out_from_screencast = blk
+            }
+            if let Some(vrr) = rule.variable_refresh_rate {
+                r.variable_refresh_rate = Some(vrr)
             }
             if let Some(ws) = rule.workspace {
                 r.workspace = Some(ws)
@@ -197,6 +215,130 @@ fn parse_xwayland(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
     return Ok(())
 }
 
+fn valid_env_name(k: str) -> bool {
+    guard not k.is_empty() else {
+        return false
+    }
+    let first = k[0]
+    let first_ok = (first >= 65 and first <= 90) or (first >= 97 and first <= 122) or first == 95
+    guard first_ok else {
+        return false
+    }
+    for i in 1..k.len() {
+        let b = k[i]
+        let ok = (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 95
+        if not ok {
+            return false
+        }
+    }
+    return true
+}
+
+fn parse_env(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
+    guard d.kind(n) == toml.Kind.Table else {
+        return Err("[env]: expected table")
+    }
+    for i in 0..d.len(n) {
+        let c = d.child(n, i)
+        let k = d.key(c)
+        guard valid_env_name(k) else {
+            return Err("env.{k}: invalid environment variable name")
+        }
+        let v = try expect_str(d, c, "env.{k}")
+        var updated = false
+        for j in 0..cfg.env.len() {
+            if cfg.env[j].0 == k {
+                cfg.env[j] = (k.clone(), v.clone())
+                updated = true
+                break
+            }
+        }
+        if not updated {
+            cfg.env.push((k, v))
+        }
+    }
+    return Ok(())
+}
+
+fn parse_cursor(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
+    guard d.kind(n) == toml.Kind.Table else {
+        return Err("[cursor]: expected table")
+    }
+    for i in 0..d.len(n) {
+        let c = d.child(n, i)
+        let k = d.key(c)
+        match k {
+            "size" => {
+                let v = try expect_int(d, c, "cursor.size")
+                guard v >= 8 and v <= 128 else {
+                    return Err("cursor.size must be in 8..128")
+                }
+                cfg.cursor.size = i32(v)
+            }
+            "hide-when-typing" => cfg.cursor.hide_when_typing = try expect_bool(d, c, "cursor.hide-when-typing")
+            "hide-after-inactive-ms" => {
+                let v = try expect_int(d, c, "cursor.hide-after-inactive-ms")
+                guard v >= 0 and v <= 600000 else {
+                    return Err("cursor.hide-after-inactive-ms must be in 0..600000")
+                }
+                cfg.cursor.hide_after_inactive_ms = v
+            }
+            _ => { return Err("unknown key 'cursor.{k}'") }
+        }
+    }
+    return Ok(())
+}
+
+fn parse_touchpad(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
+    guard d.kind(n) == toml.Kind.Table else {
+        return Err("[input.touchpad]: expected table")
+    }
+    for i in 0..d.len(n) {
+        let c = d.child(n, i)
+        let k = d.key(c)
+        match k {
+            "tap-to-click" => cfg.input.touchpad.tap_to_click = try expect_bool(d, c, "input.touchpad.tap-to-click")
+            "natural-scroll" => cfg.input.touchpad.natural_scroll = try expect_bool(d, c, "input.touchpad.natural-scroll")
+            "accel" => {
+                let v = try expect_num(d, c, "input.touchpad.accel")
+                guard v >= -1.0 and v <= 1.0 else {
+                    return Err("input.touchpad.accel must be in -1.0..1.0")
+                }
+                cfg.input.touchpad.accel = v
+            }
+            "accel-profile" => cfg.input.touchpad.accel_profile = try schema.AccelProfile.from_str(try expect_str(d, c, "input.touchpad.accel-profile"))
+            "dwt" => cfg.input.touchpad.dwt = try expect_bool(d, c, "input.touchpad.dwt")
+            "left-handed" => cfg.input.touchpad.left_handed = try expect_bool(d, c, "input.touchpad.left-handed")
+            _ => { return Err("unknown key 'input.touchpad.{k}'") }
+        }
+    }
+    return Ok(())
+}
+
+fn parse_mouse(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
+    guard d.kind(n) == toml.Kind.Table else {
+        return Err("[input.mouse]: expected table")
+    }
+    for i in 0..d.len(n) {
+        let c = d.child(n, i)
+        let k = d.key(c)
+        match k {
+            "natural-scroll" => cfg.input.mouse.natural_scroll = try expect_bool(d, c, "input.mouse.natural-scroll")
+            "accel" => {
+                let v = try expect_num(d, c, "input.mouse.accel")
+                guard v >= -1.0 and v <= 1.0 else {
+                    return Err("input.mouse.accel must be in -1.0..1.0")
+                }
+                cfg.input.mouse.accel = v
+            }
+            "accel-profile" => cfg.input.mouse.accel_profile = try schema.AccelProfile.from_str(try expect_str(d, c, "input.mouse.accel-profile"))
+            "left-handed" => cfg.input.mouse.left_handed = try expect_bool(d, c, "input.mouse.left-handed")
+            _ => { return Err("unknown key 'input.mouse.{k}'") }
+        }
+    }
+    return Ok(())
+}
+
 fn parse_input(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
     guard d.kind(n) == toml.Kind.Table else {
         return Err("[input]: expected table")
@@ -223,16 +365,8 @@ fn parse_input(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
                 }
                 cfg.input.repeat_delay = i32(v)
             }
-            "tap-to-click" => cfg.input.tap_to_click = try expect_bool(d, c, "input.tap-to-click")
-            "natural-scroll" => cfg.input.natural_scroll = try expect_bool(d, c, "input.natural-scroll")
-            "accel" => {
-                let v = try expect_num(d, c, "input.accel")
-                guard v >= -1.0 and v <= 1.0 else {
-                    return Err("input.accel must be in -1.0..1.0")
-                }
-                cfg.input.accel = v
-            }
-            "left-handed" => cfg.input.left_handed = try expect_bool(d, c, "input.left-handed")
+            "touchpad" => try parse_touchpad(d, c, mut cfg)
+            "mouse" => try parse_mouse(d, c, mut cfg)
             "layout" => cfg.input.layout = try expect_str(d, c, "input.layout")
             "variant" => cfg.input.variant = try expect_str(d, c, "input.variant")
             "options" => cfg.input.options = try expect_str(d, c, "input.options")
@@ -289,6 +423,7 @@ fn parse_layout(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
                 cfg.layout.preset_widths = ws
             }
             "center-focus" => cfg.layout.center_focus = try schema.CenterFocus.from_str(try expect_str(d, c, "layout.center-focus"))
+            "always-center-single-column" => cfg.layout.always_center_single_column = try expect_bool(d, c, "layout.always-center-single-column")
             "workspaces" => {
                 let v = try expect_int(d, c, "layout.workspaces")
                 guard v >= 0 and v <= 99 else {
@@ -385,6 +520,7 @@ fn parse_animation(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
             "window-close" => cfg.animation.window_close = try parse_curve(d, c, "animation.window-close")
             "focus-ring" => cfg.animation.focus_ring = try parse_curve(d, c, "animation.focus-ring")
             "overlay" => cfg.animation.overlay = try parse_curve(d, c, "animation.overlay")
+            "overview" => cfg.animation.overview = try parse_curve(d, c, "animation.overview")
             _ => { return Err("unknown key 'animation.{k}'") }
         }
     }
@@ -421,7 +557,26 @@ fn parse_binds(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
     for i in 0..d.len(n) {
         let c = d.child(n, i)
         let spec = d.key(c)
-        let act_str = try expect_str(d, c, "binds.\"{spec}\"")
+        var act_str = ""
+        var allow_locked = false
+        if d.kind(c) == toml.Kind.Str {
+            act_str = d.as_str(c)
+        } else if d.kind(c) == toml.Kind.Table {
+            for j in 0..d.len(c) {
+                let sub = d.child(c, j)
+                let sk = d.key(sub)
+                match sk {
+                    "action" => act_str = try expect_str(d, sub, "binds.\"{spec}\".action")
+                    "allow-when-locked" => allow_locked = try expect_bool(d, sub, "binds.\"{spec}\".allow-when-locked")
+                    _ => { return Err("unknown key 'binds.\"{spec}\".{sk}'") }
+                }
+            }
+            guard not act_str.is_empty() else {
+                return Err("binds.\"{spec}\": 'action' is required")
+            }
+        } else {
+            return Err("binds.\"{spec}\": expected action string or inline table with 'action' and optional 'allow-when-locked'")
+        }
         let combo = try keys.KeyCombo.parse(spec)
         let act = try action.Action.parse(act_str)
         // Replace existing binding with the same combo, or remove on "none".
@@ -439,7 +594,7 @@ fn parse_binds(d: toml.Doc, n: int, mut cfg: Config) -> Result[(), str] {
                 }
             }
             _ => {
-                let b = keys.Binding { combo, act }
+                let b = keys.Binding { combo, act, allow_when_locked: allow_locked }
                 if found >= 0 {
                     cfg.binds[found] = b
                 } else {
@@ -517,7 +672,30 @@ fn parse_outputs(d: toml.Doc, arr: int, mut cfg: Config) -> Result[(), str] {
                     o.pos_x = Some(try expect_num(d, d.child(c, 0), "output[{idx}].position[0]"))
                     o.pos_y = Some(try expect_num(d, d.child(c, 1), "output[{idx}].position[1]"))
                 }
-                "vrr" => o.vrr = Some(try expect_bool(d, c, "output[{idx}].vrr"))
+                "vrr" => {
+                    if d.kind(c) == toml.Kind.Bool {
+                        o.vrr = Some(if d.as_bool(c) { schema.VrrMode.On } else { schema.VrrMode.Off })
+                    } else if d.kind(c) == toml.Kind.Str {
+                        o.vrr = Some(try schema.VrrMode.from_str(d.as_str(c)))
+                    } else {
+                        return Err("output[{idx}].vrr: expected boolean or \"on-demand\"")
+                    }
+                }
+                "hdr" => o.hdr = Some(try expect_bool(d, c, "output[{idx}].hdr"))
+                "sdr-nits" => {
+                    let v = try expect_num(d, c, "output[{idx}].sdr-nits")
+                    guard v >= 10.0 and v <= 2000.0 else {
+                        return Err("output[{idx}].sdr-nits must be in 10..2000")
+                    }
+                    o.sdr_nits = f32(v)
+                }
+                "max-nits" => {
+                    let v = try expect_num(d, c, "output[{idx}].max-nits")
+                    guard v >= 100.0 and v <= 10000.0 else {
+                        return Err("output[{idx}].max-nits must be in 100..10000")
+                    }
+                    o.max_nits = f32(v)
+                }
                 "enabled" => o.enabled = try expect_bool(d, c, "output[{idx}].enabled")
                 _ => { return Err("unknown key 'output[{idx}].{k}'") }
             }
@@ -575,9 +753,24 @@ fn parse_window_rules(d: toml.Doc, arr: int, mut cfg: Config) -> Result[(), str]
                     }
                     r.default_width = Some(v)
                 }
+                "default-floating-size" => {
+                    guard d.kind(c) == toml.Kind.Array and d.len(c) == 2 else {
+                        return Err("window-rule[{idx}].default-floating-size: expected [width, height]")
+                    }
+                    let fw = try expect_num(d, d.child(c, 0), "window-rule[{idx}].default-floating-size[0]")
+                    let fh = try expect_num(d, d.child(c, 1), "window-rule[{idx}].default-floating-size[1]")
+                    guard fw >= 64.0 and fh >= 64.0 else {
+                        return Err("window-rule[{idx}].default-floating-size dimensions must be >= 64")
+                    }
+                    r.default_floating_w = Some(fw)
+                    r.default_floating_h = Some(fh)
+                }
                 "floating" => r.floating = Some(try expect_bool(d, c, "window-rule[{idx}].floating"))
                 "fullscreen" => r.fullscreen = Some(try expect_bool(d, c, "window-rule[{idx}].fullscreen"))
                 "maximized" => r.maximized = Some(try expect_bool(d, c, "window-rule[{idx}].maximized"))
+                "open-focused" => r.open_focused = Some(try expect_bool(d, c, "window-rule[{idx}].open-focused"))
+                "block-out-from-screencast" => r.block_out_from_screencast = Some(try expect_bool(d, c, "window-rule[{idx}].block-out-from-screencast"))
+                "variable-refresh-rate" => r.variable_refresh_rate = Some(try expect_bool(d, c, "window-rule[{idx}].variable-refresh-rate"))
                 "workspace" => {
                     let v = try expect_int(d, c, "window-rule[{idx}].workspace")
                     guard v >= 1 and v <= 99 else {
@@ -617,9 +810,11 @@ pub fn parse_toml(src: str) -> Result[Config, str] {
                 }
                 cfg.autostart = cmds
             }
+            "env" => try parse_env(d, c, mut cfg)
             "xwayland" => try parse_xwayland(d, c, mut cfg)
             "output" => try parse_outputs(d, c, mut cfg)
             "input" => try parse_input(d, c, mut cfg)
+            "cursor" => try parse_cursor(d, c, mut cfg)
             "layout" => try parse_layout(d, c, mut cfg)
             "window" => try parse_window(d, c, mut cfg)
             "animation" => try parse_animation(d, c, mut cfg)

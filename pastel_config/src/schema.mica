@@ -34,6 +34,38 @@ pub fn CenterFocus.from_str(s: str) -> Result[CenterFocus, str] {
     }
 }
 
+/// Variable refresh rate policy for an output.
+pub enum VrrMode {
+    Off
+    On
+    OnDemand
+}
+
+pub fn VrrMode.from_str(s: str) -> Result[VrrMode, str] {
+    return match s.trim().to_lower() {
+        "off" or "false" => Ok(VrrMode.Off)
+        "on" or "true" => Ok(VrrMode.On)
+        "on-demand" => Ok(VrrMode.OnDemand)
+        _ => Err("unknown vrr mode '{s}' (expected false, true, or \"on-demand\")")
+    }
+}
+
+/// Pointer acceleration profile passed to libinput.
+pub enum AccelProfile {
+    Default
+    Flat
+    Adaptive
+}
+
+pub fn AccelProfile.from_str(s: str) -> Result[AccelProfile, str] {
+    return match s.trim().to_lower() {
+        "default" => Ok(AccelProfile.Default)
+        "flat" => Ok(AccelProfile.Flat)
+        "adaptive" => Ok(AccelProfile.Adaptive)
+        _ => Err("unknown accel-profile '{s}' (expected default, flat, adaptive)")
+    }
+}
+
 pub struct XWaylandConfig {
     pub enabled: bool = true
     pub path: str = "xwayland-satellite"
@@ -49,8 +81,34 @@ pub struct OutputConfig {
     pub scale: Option[f64] = None
     pub pos_x: Option[f64] = None
     pub pos_y: Option[f64] = None
-    pub vrr: Option[bool] = None
+    pub vrr: Option[VrrMode] = None
+    pub hdr: Option[bool] = None
+    pub sdr_nits: f32 = 203.0
+    pub max_nits: f32 = 1000.0
     pub enabled: bool = true
+}
+
+pub struct TouchpadConfig {
+    pub tap_to_click: bool = true
+    pub natural_scroll: bool = false
+    pub accel: f64 = 0.0
+    pub accel_profile: AccelProfile = AccelProfile.Default
+    pub dwt: bool = true
+    pub left_handed: bool = false
+}
+
+pub struct MouseConfig {
+    pub natural_scroll: bool = false
+    pub accel: f64 = 0.0
+    pub accel_profile: AccelProfile = AccelProfile.Default
+    pub left_handed: bool = false
+}
+
+pub struct CursorConfig {
+    pub size: i32 = 24
+    pub hide_when_typing: bool = false
+    /// Milliseconds of pointer inactivity before auto-hiding the cursor (0 disables).
+    pub hide_after_inactive_ms: int = 0
 }
 
 pub struct InputConfig {
@@ -60,10 +118,8 @@ pub struct InputConfig {
     pub warp_mouse_to_focus: bool = false
     pub repeat_rate: i32 = 25
     pub repeat_delay: i32 = 600
-    pub tap_to_click: bool = true
-    pub natural_scroll: bool = false
-    pub accel: f64 = 0.0
-    pub left_handed: bool = false
+    pub touchpad: TouchpadConfig = TouchpadConfig {}
+    pub mouse: MouseConfig = MouseConfig {}
     pub layout: str = ""
     pub variant: str = ""
     pub options: str = ""
@@ -75,6 +131,8 @@ pub struct LayoutConfig {
     pub default_width: f64 = 0.5
     pub preset_widths: List[f64] = []
     pub center_focus: CenterFocus = CenterFocus.Never
+    /// Center the sole column on a workspace even when `center_focus` is `never` or `on-overflow`.
+    pub always_center_single_column: bool = false
     /// 0 = dynamic niri-style workspaces; >0 = fixed dwm-style workspaces.
     pub workspaces: int = 0
 }
@@ -109,6 +167,7 @@ pub struct AnimationConfig {
     pub window_close: core.CurveSpec = core.CurveSpec.Ease(core.Ease { ms: 140.0, kind: core.EaseKind.OutQuad })
     pub focus_ring: core.CurveSpec = core.CurveSpec.Ease(core.Ease { ms: 120.0, kind: core.EaseKind.OutCubic })
     pub overlay: core.CurveSpec = core.CurveSpec.Ease(core.Ease { ms: 140.0, kind: core.EaseKind.OutCubic })
+    pub overview: core.CurveSpec = core.CurveSpec.Spring(core.Spring { stiffness: 850.0, damping: 1.0 })
 }
 
 pub struct OverlayConfig {
@@ -125,9 +184,14 @@ pub struct WindowRule {
     pub corner_radius: Option[f32] = None
     pub border_width: Option[f32] = None
     pub default_width: Option[f64] = None
+    pub default_floating_w: Option[f64] = None
+    pub default_floating_h: Option[f64] = None
     pub floating: Option[bool] = None
     pub fullscreen: Option[bool] = None
     pub maximized: Option[bool] = None
+    pub open_focused: Option[bool] = None
+    pub block_out_from_screencast: Option[bool] = None
+    pub variable_refresh_rate: Option[bool] = None
     pub workspace: Option[int] = None
     pub monitor: str = ""
 }
@@ -191,9 +255,14 @@ pub struct ResolvedWindow {
     pub corner_radius: f32 = 0.0
     pub border_width: f32 = 2.0
     pub default_width: f64 = 0.5
+    pub default_floating_w: Option[f64] = None
+    pub default_floating_h: Option[f64] = None
     pub floating: Option[bool] = None
     pub fullscreen: Option[bool] = None
     pub maximized: Option[bool] = None
+    pub open_focused: bool = true
+    pub block_out_from_screencast: bool = false
+    pub variable_refresh_rate: Option[bool] = None
     pub workspace: Option[int] = None
     pub monitor: str = ""
 }

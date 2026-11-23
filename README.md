@@ -6,13 +6,14 @@ A lightweight, high-performance scrolling-tiling Wayland compositor (niri-style)
 
 ## Highlights
 
-- **Scrolling tiling**: Infinite horizontal strip of columns per workspace, vertical stacking within columns, preset column widths, maximize/center column, dynamic (niri-style) or fixed (dwm-tag-style) workspaces, floating windows, and multi-monitor support.
-- **Analytical animation system**: Refresh-rate-independent exact ODE spring solver and easing curves with momentum-preserving in-flight retargeting for window movement, camera scrolling, workspace switching, window open/close, focus-ring color transitions, and overlay transitions.
-- **Visual effects**: Square corners by default (`corner-radius = 0.0`, configurable), GPU SDF hollow borders, soft shadows, per-window transparency, and GPU Dual-Kawase frosted-glass blur (both zero-steady-state-cost X-Ray mode and live backdrop blur).
+- **Scrolling tiling & Overview**: Infinite horizontal strip of columns per workspace, vertical stacking & lightweight GPU-pill tabbed columns (occluding inactive tabs), directional consume/expel, whole-column workspace/monitor moves, preset column widths, expand-to-available-width, single-column centering, dynamic (niri-style) or fixed (dwm-tag-style) workspaces, floating windows, multi-monitor support, and zero-VRAM animated **Overview** thumbnail mode (`Mod+O` / 4-finger swipe).
+- **Analytical animation system**: Refresh-rate-independent exact ODE spring solver and easing curves with momentum-preserving in-flight retargeting for window movement, camera scrolling, workspace switching, window open/close, focus-ring & bell pulses, hotkey overlay, and Overview transitions.
+- **Visual effects & HDR**: Square corners by default (`corner-radius = 0.0`, configurable), GPU SDF hollow borders, soft shadows, per-window transparency, GPU Dual-Kawase frosted-glass blur (zero-steady-state-cost X-Ray mode + live backdrop blur), **10-bit/FP16 HDR** (`wp-color-management-v1` + DRM `HDR_OUTPUT_METADATA` / `BT2020_RGB`), **on-demand VRR** (`vrr = "on-demand"`), **gamma LUT night light** (`wlr-gamma-control-unstable-v1`), and **screencast privacy redaction** (`block-out-from-screencast`).
+- **Session security & input**: Lock-screen shortcut isolation (`ext-session-lock-v1`, with explicit `allow-when-locked = true` opt-in), DPMS power control (`power-off-monitors` / auto-wake on input), split `[input.touchpad]` / `[input.mouse]` with `accel-profile = "flat"` / `"adaptive"` and `dwt`, full XKB keysyms (media/brightness keys), configurable mouse & wheel bindings, `[cursor]` auto-hide, and virtual pointer support (`wlr-virtual-pointer-unstable-v1`).
 - **Config-consistent hotkey overlay**: Clean niri-style keybinding overlay shown at startup (configurable) and toggled via `Mod+Shift+/`, rendered with smooth system TrueType/OpenType fonts (`[overlay].font = "sans-serif"`, loaded dynamically via FreeType2/Fontconfig) and automatically styled to match `[window]` borders, corner radius, accent color, shadow, live blur, and animations.
 - **Pluggable & modular**: Monomorphized structural traits (`Curve`, `LayoutPolicy`, `luminaria.plug.Output`, `luminaria.plug.Renderer`) with zero dynamic dispatch overhead.
-- **Edge-device friendly**: Minimal binary footprint, low RSS, zero extra C font/UI libraries, lazy GPU blur allocation, and **zero wakeups when idle**.
-- **TOML configuration with live reload**: Strict schema validation (`pastel --check`), an empty file yields a full working desktop, and saving/reloading applies changes live.
+- **Edge-device friendly**: Minimal binary footprint, low RSS, zero extra link-time C dependencies beyond `luminaria` + Vulkan 1.3, lazy blur/HDR pipeline allocation, and **zero wakeups when idle**.
+- **TOML configuration with live reload**: Strict schema validation (`pastel --check`), `[env]` session environment injection, an empty file yields a full working desktop, and saving/reloading applies changes live.
 - **JSON-lines IPC**: `pastel msg <action>`, `pastel msg --state`, and `pastel msg --subscribe` over a Unix socket for status bars, launchers, and scripts.
 
 ## Building
@@ -53,26 +54,29 @@ Default terminal is `foot` and default launcher is `fuzzel` (override in `[binds
 | Key | Action |
 |---|---|
 | `Mod+Shift+/` | Toggle hotkey overlay |
+| `Mod+O` | Toggle Overview thumbnail mode |
 | `Mod+Return` / `Mod+D` | Spawn terminal / application launcher |
 | `Mod+Q` | Close focused window |
 | `Mod+H` / `Mod+L` | Focus column left / right |
-| `Mod+J` / `Mod+K` | Focus window down / up in column |
+| `Mod+J` / `Mod+K` | Focus window down / up in column (or switch tabs) |
 | `Mod+Shift+H` / `Mod+Shift+L` | Move column left / right |
 | `Mod+Shift+J` / `Mod+Shift+K` | Move window down / up |
-| `Mod+[` / `Mod+]` | Consume window into column / expel window out |
+| `Mod+Comma` / `Mod+Period` | Consume or expel window left / right (`Mod+[` / `Mod+]` also supported) |
+| `Mod+W` | Toggle tabbed column display |
 | `Mod+R` / `Mod+F` / `Mod+C` | Cycle preset width / maximize column / center column |
+| `Mod+Ctrl+F` / `Mod+Ctrl+R` | Expand column to available width / reset window height |
 | `Mod+Minus` / `Mod+Equal` | Shrink / grow column width (`Mod+Shift+-/=` adjusts row height) |
 | `Mod+Shift+F` | Toggle fullscreen |
 | `Mod+V` / `Mod+Shift+V` | Toggle floating / switch focus between tiled and floating |
-| `Mod+U` / `Mod+I` | Focus previous / next workspace |
-| `Mod+1` .. `Mod+9` | Focus workspace 1..9 |
-| `Mod+Shift+1` .. `Mod+Shift+9` | Move window to workspace 1..9 |
+| `Mod+U` / `Mod+I` / `Mod+Tab` | Focus previous / next / previously visited workspace |
+| `Mod+1` .. `Mod+9` | Focus workspace 1..9 (`Mod+Shift+1..9` moves window) |
 | `Mod+Ctrl+H/J/K/L` | Focus monitor left / down / up / right (`+Shift` moves window) |
+| `Mod+Shift+P` | Power off monitors (DPMS; any input wakes) |
 | `Mod+Shift+R` | Reload configuration live |
 | `Mod+Shift+E` | Quit Pastel |
-| `Mod+Scroll` | Scroll columns horizontally |
+| `Mod+WheelUp` / `Mod+WheelDown` | Focus column left / right (`Mod+Shift+Wheel*` switches workspaces) |
 | `Mod+Left Drag` / `Mod+Right Drag` | Move floating or pan tiled strip / resize floating window |
-| 3-finger touchpad swipe | Horizontal column pan / vertical workspace switch |
+| 3-finger / 4-finger touchpad swipe | Column pan & workspace switch / toggle Overview |
 
 ## Configuration
 

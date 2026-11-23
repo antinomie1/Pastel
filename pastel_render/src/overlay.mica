@@ -241,22 +241,23 @@ fn whole(val: i32, scale: i32) -> i32 {
 pub fn render_hotkey_overlay(c: cfg.Config, effective_mod: cfg.ModKey, scale_f: f64) -> Option[OverlayImage] {
     let sc = i32(max(scale_f.round(), 1.0))
     let times = f32(sc)
-    guard let Some(b_font) = font.Font.open(c.overlay.font, font_size * times) else {
+    guard let Some(f) = font.Font.open(c.overlay.font, title_size * times) else {
         return None
     }
-    var body = b_font
-    defer body.close()
-    guard let Some(h_font) = font.Font.open(c.overlay.font, title_size * times) else {
-        return None
-    }
-    var heading = h_font
-    defer heading.close()
+    var face = f
+    defer face.close()
 
     let pad = padding_px * sc
     let key_gap = key_gap_px * sc
     let col_gap = column_gap_px * sc
     let sec_gap = section_gap_px * sc
-    let line = body.height() + line_gap_px * sc
+    let title_w = face.measure("Hotkeys")
+    let title_ascent = face.ascent()
+    let header_h = face.height() + sec_gap
+    guard face.set_size(font_size * times) else {
+        return None
+    }
+    let line = face.height() + line_gap_px * sc
     let cols = split_columns(build_groups(c, effective_mod))
 
     var key_widths: List[i32] = []
@@ -266,8 +267,8 @@ pub fn render_hotkey_overlay(c: cfg.Config, effective_mod: cfg.ModKey, scale_f: 
         var tw: i32 = 0
         for g in col {
             for r in g.rows {
-                kw = max(kw, body.measure(r.keys))
-                tw = max(tw, body.measure(r.title))
+                kw = max(kw, face.measure(r.keys))
+                tw = max(tw, face.measure(r.title))
             }
         }
         key_widths.push(kw)
@@ -279,10 +280,8 @@ pub fn render_hotkey_overlay(c: cfg.Config, effective_mod: cfg.ModKey, scale_f: 
         inner += key_widths[i] + key_gap + text_widths[i]
     }
     let gaps = col_gap * i32(max(cols.len() - 1, 0))
-    let title_w = heading.measure("Hotkeys")
     let content_w = max(inner + gaps, title_w)
     let width = whole(content_w + 2 * pad, sc)
-    let header_h = heading.height() + sec_gap
     var tallest: i32 = 0
     for col in cols {
         tallest = max(tallest, column_height(col, line, sec_gap))
@@ -314,25 +313,27 @@ pub fn render_hotkey_overlay(c: cfg.Config, effective_mod: cfg.ModKey, scale_f: 
     let accent = c.window.active_color.with_alpha(1.0)
     let max_x = width - pad
 
-    // Title
-    heading.draw(mut px, width, height, pad, pad + heading.ascent(), "Hotkeys", text_ink, max_x)
-
     // Two clean columns: section header in dim gray, keys in active accent, descriptions in bright text.
     var left = pad
     for ci, col in cols {
-        var y = pad + header_h + body.ascent()
+        var y = pad + header_h + face.ascent()
         for g in col {
-            body.draw(mut px, width, height, left, y, g.title, dim_ink, max_x)
+            face.draw(mut px, width, height, left, y, g.title, dim_ink, max_x)
             y += line
             for r in g.rows {
-                body.draw(mut px, width, height, left, y, r.keys, accent, max_x)
+                face.draw(mut px, width, height, left, y, r.keys, accent, max_x)
                 let tx = left + key_widths[ci] + key_gap
-                body.draw(mut px, width, height, tx, y, r.title, text_ink, max_x)
+                face.draw(mut px, width, height, tx, y, r.title, text_ink, max_x)
                 y += line
             }
             y += sec_gap
         }
         left += key_widths[ci] + key_gap + text_widths[ci] + col_gap
+    }
+
+    // Title (switch size once at the end).
+    if face.set_size(title_size * times) {
+        face.draw(mut px, width, height, pad, pad + title_ascent, "Hotkeys", text_ink, max_x)
     }
 
     return Some(OverlayImage { width, height, scale: sc, pixels: px })

@@ -51,6 +51,8 @@ pub struct AnimState {
     pub outputs: map.Map[u64, OutputAnim]
     pub closing: List[ClosingAnim] = []
     pub overlay_alpha: core.Anim
+    pub overview: core.Anim
+    pub bell_until: map.Map[u64, int]
     pub active: bool = false
 }
 
@@ -59,6 +61,8 @@ pub fn AnimState.new() -> AnimState {
         windows: map.Map.new(),
         outputs: map.Map.new(),
         overlay_alpha: core.Anim.unit(0.0),
+        overview: core.Anim.unit(0.0),
+        bell_until: map.Map.new(),
         active: false,
     }
 }
@@ -144,8 +148,20 @@ pub fn AnimState.set_overlay(mut self, visible: bool, ac: cfg.AnimationConfig, n
     self.overlay_alpha.retarget(target_a, ac.overlay, now_ns, ac.enabled, ac.slowdown)
 }
 
+/// Animate smoothly into or out of Overview thumbnail mode (0.0 = normal, 1.0 = overview).
+pub fn AnimState.set_overview(mut self, open: bool, ac: cfg.AnimationConfig, now_ns: int) {
+    let target = if open { 1.0 } else { 0.0 }
+    self.overview.retarget(target, ac.overview, now_ns, ac.enabled, ac.slowdown)
+}
+
+/// Trigger a 350 ms visual focus-ring pulse on window `id` (for `Event.Bell`).
+pub fn AnimState.trigger_bell(mut self, id: u64, now_ns: int) {
+    discard self.bell_until.insert(id, now_ns + 350000000)
+}
+
 pub fn AnimState.remove_window(mut self, id: u64) {
     discard self.windows.remove(id)
+    discard self.bell_until.remove(id)
 }
 
 pub fn AnimState.remove_output(mut self, output_id: u64) {
@@ -218,6 +234,29 @@ pub fn AnimState.tick_overlay(mut self, now_ns: int) -> (f32, f64) {
         self.active = true
     }
     return (f32(a), (1.0 - a) * 12.0)
+}
+
+/// Evaluate Overview progress in `0.0..1.0` at `now_ns`.
+pub fn AnimState.tick_overview(mut self, now_ns: int) -> f64 {
+    let v = self.overview.tick(now_ns).clamp(0.0, 1.0)
+    if self.overview.active {
+        self.active = true
+    }
+    return v
+}
+
+/// Evaluate bell pulse intensity in `0.0..1.0` for window `id` at `now_ns`.
+pub fn AnimState.bell_alpha(mut self, id: u64, now_ns: int) -> f32 {
+    guard let Some(end_ns) = self.bell_until.get(id) else {
+        return 0.0
+    }
+    if now_ns >= end_ns {
+        discard self.bell_until.remove(id)
+        return 0.0
+    }
+    self.active = true
+    let rem = f64(end_ns - now_ns) / 350000000.0
+    return f32(rem.clamp(0.0, 1.0))
 }
 
 /// Reset per-frame activity accumulator before ticking all visible elements.

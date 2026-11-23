@@ -138,3 +138,101 @@ test "xwayland-satellite config, wildcard window rules, floating actions, and la
     let combo = cfg.KeyCombo.parse("Mod+Shift+/").expect("combo")
     assert(combo.matches_with_base(u32(0x005f), u32(0x002f), true, false, false, true, cfg.ModKey.Super))
 }
+
+test "split touchpad/mouse input, cursor, env, HDR, on-demand VRR, lock-allowed binds, wheel/mouse triggers, and full XKB keysyms" {
+    let toml = """
+    [env]
+    QT_QPA_PLATFORM = "wayland"
+    MY_FLAG = "1"
+
+    [cursor]
+    size = 32
+    hide-when-typing = true
+    hide-after-inactive-ms = 3000
+
+    [input.touchpad]
+    tap-to-click = false
+    natural-scroll = true
+    accel = 0.25
+    accel-profile = "adaptive"
+    dwt = false
+
+    [input.mouse]
+    accel = -0.2
+    accel-profile = "flat"
+    left-handed = true
+
+    [layout]
+    always-center-single-column = true
+
+    [[output]]
+    name = "DP-1"
+    vrr = "on-demand"
+    hdr = true
+    sdr-nits = 250.0
+    max-nits = 1200.0
+
+    [binds]
+    "XF86AudioPlay" = \{ action = "spawn playerctl play-pause", allow-when-locked = true \}
+    "Mod+MouseBack" = "focus-column-left"
+    "Mod+WheelRight" = "focus-column-right"
+
+    [[window-rule]]
+    app-id = "org.keepassxc.KeePassXC"
+    block-out-from-screencast = true
+    open-focused = false
+    default-floating-size = [640, 480]
+    variable-refresh-rate = true
+    """
+    let c = cfg.from_toml(toml).expect("parse extended config")
+    assert_eq(c.env.len(), 2)
+    assert_eq(c.cursor.size, i32(32))
+    assert(c.cursor.hide_when_typing)
+    assert_eq(c.cursor.hide_after_inactive_ms, 3000)
+    assert(not c.input.touchpad.tap_to_click)
+    assert(c.input.touchpad.natural_scroll)
+    assert(not c.input.touchpad.dwt)
+    assert_eq(c.input.mouse.accel_profile, cfg.AccelProfile.Flat)
+    assert(c.input.mouse.left_handed)
+    assert(c.layout.always_center_single_column)
+    assert_eq(c.outputs.len(), 1)
+    assert_eq(c.outputs[0].vrr, Some(cfg.VrrMode.OnDemand))
+    assert_eq(c.outputs[0].hdr, Some(true))
+    assert((c.outputs[0].max_nits - 1200.0).abs() < 0.01)
+
+    let r = c.resolve_window("org.keepassxc.KeePassXC", "Vault")
+    assert(r.block_out_from_screencast)
+    assert(not r.open_focused)
+    assert_eq(r.default_floating_w, Some(640.0))
+    assert_eq(r.default_floating_h, Some(480.0))
+    assert_eq(r.variable_refresh_rate, Some(true))
+
+    let play = cfg.KeyCombo.parse("XF86AudioPlay").expect("XF86AudioPlay via xkbcommon")
+    let mb = cfg.KeyCombo.parse("Mod+MouseBack").expect("Mod+MouseBack")
+    let wr = cfg.KeyCombo.parse("Mod+WheelRight").expect("Mod+WheelRight")
+    assert(mb.matches_button(cfg.keys.mouse_back, false, false, false, true, cfg.ModKey.Super))
+    assert(wr.matches_wheel(cfg.keys.wheel_right, false, false, false, true, cfg.ModKey.Super))
+    var saw_locked_play = false
+    for b in c.binds {
+        if b.combo.same(play) and b.allow_when_locked {
+            saw_locked_play = true
+        }
+    }
+    assert(saw_locked_play)
+
+    assert(cfg.Action.parse("toggle-overview").is_ok())
+    assert(cfg.Action.parse("toggle-column-tabbed-display").is_ok())
+    assert(cfg.Action.parse("power-off-monitors").is_ok())
+    assert(cfg.Action.parse("power-on-monitors").is_ok())
+    assert(cfg.Action.parse("consume-or-expel-window-left").is_ok())
+    assert(cfg.Action.parse("consume-or-expel-window-right").is_ok())
+    assert(cfg.Action.parse("move-column-to-workspace 3").is_ok())
+    assert(cfg.Action.parse("move-column-to-monitor-right").is_ok())
+    assert(cfg.Action.parse("move-window-to-workspace-silent 4").is_ok())
+    assert(cfg.Action.parse("focus-workspace-previous").is_ok())
+    assert(cfg.Action.parse("reset-window-height").is_ok())
+    assert(cfg.Action.parse("expand-column-to-available-width").is_ok())
+    assert(cfg.Action.parse("switch-layout next").is_ok())
+    assert(cfg.Action.parse("focus-window 42").is_ok())
+    assert(cfg.Action.parse("close-window 42").is_ok())
+}
