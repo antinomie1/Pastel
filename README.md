@@ -6,7 +6,7 @@ A lightweight, high-performance scrolling-tiling Wayland compositor (niri-style)
 
 ## Highlights
 
-- **Scrolling tiling & Overview**: Infinite horizontal strip of columns per workspace, vertical stacking & lightweight GPU-pill tabbed columns (occluding inactive tabs), directional consume/expel, whole-column workspace/monitor moves, preset column widths, expand-to-available-width, single-column centering, dynamic (niri-style) or fixed (dwm-tag-style) workspaces, floating windows, multi-monitor support, and zero-VRAM animated **Overview** thumbnail mode (`Mod+O` / 4-finger swipe).
+- **Scrolling tiling & Overview**: Infinite horizontal strip of columns per workspace, vertical stacking & lightweight GPU-pill tabbed columns (occluding inactive tabs), directional consume/expel, whole-column workspace/monitor moves, preset column widths, expand-to-available-width, single-column centering, dynamic (niri-style) or fixed (dwm-tag-style) workspaces, floating windows (tabs torn off with `xdg-toplevel-drag` float under the pointer), multi-monitor support, and zero-VRAM animated **Overview** thumbnail mode (`Mod+O` / 4-finger swipe).
 - **Analytical animation system**: Refresh-rate-independent exact ODE spring solver and easing curves with momentum-preserving in-flight retargeting for window movement, camera scrolling, workspace switching, window open/close, focus-ring & bell pulses, hotkey overlay, and Overview transitions.
 - **Visual effects & HDR**: Square corners by default (`corner-radius = 0.0`, configurable), GPU SDF hollow borders, soft shadows, per-window transparency, GPU Dual-Kawase frosted-glass blur (zero-steady-state-cost X-Ray mode + live backdrop blur), **10-bit/FP16 HDR** (`wp-color-management-v1` + DRM `HDR_OUTPUT_METADATA` / `BT2020_RGB`), **on-demand VRR** (`vrr = "on-demand"`), **gamma LUT night light** (`wlr-gamma-control-unstable-v1`), and **screencast privacy redaction** (`block-out-from-screencast`).
 - **Session security & input**: Lock-screen shortcut isolation (`ext-session-lock-v1`, with explicit `allow-when-locked = true` opt-in), DPMS power control (`power-off-monitors` / auto-wake on input), split `[input.touchpad]` / `[input.mouse]` with `accel-profile = "flat"` / `"adaptive"` and `dwt`, full XKB keysyms (media/brightness keys), configurable mouse & wheel bindings, `[cursor]` auto-hide, and virtual pointer support (`wlr-virtual-pointer-unstable-v1`).
@@ -14,7 +14,7 @@ A lightweight, high-performance scrolling-tiling Wayland compositor (niri-style)
 - **Pluggable & modular**: Monomorphized structural traits (`Curve`, `LayoutPolicy`, `luminaria.plug.Output`, `luminaria.plug.Renderer`) with zero dynamic dispatch overhead.
 - **Edge-device friendly**: Minimal binary footprint, low RSS, zero extra link-time C dependencies beyond `luminaria` + Vulkan 1.3, lazy blur/HDR pipeline allocation, and **zero wakeups when idle**.
 - **TOML configuration with live reload**: Strict schema validation (`pastel --check`), `[env]` session environment injection, an empty file yields a full working desktop, and saving/reloading applies changes live.
-- **JSON-lines IPC**: `pastel msg <action>`, `pastel msg --state`, and `pastel msg --subscribe` over a Unix socket for status bars, launchers, and scripts.
+- **JSON-lines IPC**: `pastel msg <action>`, `pastel msg --state`, and `pastel msg --subscribe` over a Unix socket for status bars, launchers, and scripts; standard taskbars and docks work through `wlr-foreign-toplevel-management` (activate, close, maximize, fullscreen).
 
 ## Building
 
@@ -56,7 +56,7 @@ Default terminal is `foot` and default launcher is `fuzzel` (override in `[binds
 | `Mod+Shift+/` | Toggle hotkey overlay |
 | `Mod+O` | Toggle Overview thumbnail mode |
 | `Mod+Return` / `Mod+D` | Spawn terminal / application launcher |
-| `Mod+Q` | Close focused window |
+| `Mod+Q` | Close focused window (pressed again after 1 s on a hung app: kill it) |
 | `Mod+H` / `Mod+L` | Focus column left / right |
 | `Mod+J` / `Mod+K` | Focus window down / up in column (or switch tabs) |
 | `Mod+Shift+H` / `Mod+Shift+L` | Move column left / right |

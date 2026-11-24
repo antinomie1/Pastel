@@ -45,7 +45,7 @@ Architecture docs live in [docs/README.md](docs/README.md).
 ## 3. Cross-Layer Invariants
 
 1. **No time in `pastel_layout`**: Layouts are pure spatial functions (state -> target rects). Time, springs, and transitions live exclusively in `pastel_core` and `pastel_render.anim_state`, so any custom `LayoutPolicy` gets full animations automatically.
-2. **No double animation**: Pastel drives all window/camera/workspace/overlay animations at `Event.Frame(o, vblank_ns)` and passes `transition_ms = 0` to `luminaria` for real windows/images. Only a 1x1 offscreen tick sentinel signals `luminaria`'s adaptive vblank clock while Pastel animations are active; removing it returns to 0 wakeups/sec.
+2. **No double animation**: Pastel drives all window/camera/workspace/overlay animations at `Event.Frame(o, vblank_ns)` and passes `transition_ms = 0` to `luminaria` for real windows/images. While Pastel animations are active, `sync_layout` calls `d.want_frame()` for the next `Frame`; once they settle no frame is asked for (0 wakeups/sec).
 3. **Preserve hardware fast paths**: Fullscreen opaque windows without active blur or overlays above them must continue to pass through `PastelRenderer.scanout()` (zero-copy direct scanout) and `overlay_candidates()` (KMS MPO planes).
 4. **Blur damage expansion**: Whenever a region uses live backdrop blur, damage rectangles touching that region must expand by the blur kernel radius so partial redraw never shows seams.
 5. **Visual parity**: Hotkey overlay styling must always derive from the active `Config` (`[window]` + `background` + `[animation].overlay`), never hardcode diverging corner radii or palette colors.

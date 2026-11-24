@@ -62,8 +62,6 @@ pub struct Pastel[O: lum.plug.Output, R: lum.plug.Renderer] {
     pub overlay_w: f64 = 0.0
     pub overlay_h: f64 = 0.0
     pub overlay_scale: f64 = 1.0
-    pub anim_tick_img: Option[lum.Image] = None
-    pub tick_flip: bool = false
     pub last_anim_ns: int = 0
     /// When a layout transaction opened (0: none): its animations start
     /// with the first frame after it.
@@ -111,7 +109,6 @@ pub fn Pastel[O, R].new(take d: lum.display.Display[O, R], take config: cfg.Conf
         id_by_out: map.Map.new(),
         vrr_state: map.Map.new(),
     }
-    p.ensure_tick_img()
     outputs.apply_keymap(mut p, false)
     for so in p.d.outputs() {
         outputs.apply_output_config(mut p, so)
@@ -123,18 +120,6 @@ pub fn Pastel[O, R].new(take d: lum.display.Display[O, R], take config: cfg.Conf
     }
     p.sync_layout(time.now_ns())
     return p
-}
-
-/// Create or recreate the 1x1 offscreen sentinel image used to drive luminaria's adaptive
-/// vblank clock ONLY while Pastel animations are active (0 wakeups when idle).
-pub fn Pastel[O, R].ensure_tick_img(mut self) {
-    if let Some(old) = self.anim_tick_img.take() {
-        self.d.drop_image(old)
-    }
-    let px: List[u8] = [0, 0, 0, 0]
-    if let Ok(img) = self.d.image(1, 1, px, false) {
-        self.anim_tick_img = Some(img)
-    }
 }
 
 /// Start listening on the Unix JSON-lines IPC socket and register its fd with `Display.watch`.
@@ -712,13 +697,7 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
         self.sheet.set_output_all(oi, self.cfg.background, blur_cfg, mem.replace(mut out_effects[oi], []), mem.replace(mut out_closing[oi], []), mem.replace(mut out_tabs[oi], []), mem.replace(mut out_frames[oi], []))
     }
 
-    // 5. Commit placement list to luminaria. Include culled offscreen tick sentinel ONLY while animating.
-    let active = self.anims.is_active()
-    if active {
-        self.tick_flip = not self.tick_flip
-    }
-    let tick_x = if self.tick_flip { -10000.0 } else { -10001.0 }
-    let tick_img = self.anim_tick_img
+    // 5. Commit placement list to luminaria.
     let ov_img_opt = self.overlay_img
     let ov_rad = wc.corner_radius
     let ov_shd = wc.shadow_size
@@ -736,12 +715,11 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
                 l.image(img, ov_x, ov_y, ov_w, ov_h, lum.Style { opacity: ov_eff_alpha, radius: ov_rad, shadow: ov_shd, scale: 1.0, transition_ms: 0 })
             }
         }
-        if active {
-            if let Some(timg) = tick_img {
-                l.image(timg, tick_x, -10000.0, 1.0, 1.0, lum.Style { opacity: 0.0, transition_ms: 250 })
-            }
-        }
     })
+    // Running animations ask for the next frame; idle, none is drawn.
+    if self.anims.is_active() {
+        self.d.want_frame()
+    }
     if any_size_txn {
         self.d.end(25)
     }
@@ -968,6 +946,8 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
         RequestMaximize(w, on) => windows.on_request_maximize(mut self, w, on)
         RequestFullscreen(w, target_out, on) => windows.on_request_fullscreen(mut self, w, target_out, on)
         Moved(w, dx, dy) => windows.on_moved(mut self, w, dx, dy)
+        WindowDragged(w) => windows.on_window_dragged(mut self, w)
+        RequestClose(w) => input.close_window(mut self, w)
         Resized(w, dx, dy, width, height) => windows.on_resized(mut self, w, dx, dy, width, height)
         Panned(dx, _) => {
             if not self.desktop.monitors.is_empty() {
@@ -1006,7 +986,6 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
             }
         }
         GpuReset => {
-            self.ensure_tick_img()
             self.rebuild_overlay()
             self.needs_layout = true
         }
@@ -1066,9 +1045,6 @@ pub fn Pastel[O, R].shutdown(mut self) {
         srv.close()
     }
     if let Some(img) = self.overlay_img.take() {
-        self.d.drop_image(img)
-    }
-    if let Some(img) = self.anim_tick_img.take() {
         self.d.drop_image(img)
     }
 }

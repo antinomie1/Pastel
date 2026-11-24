@@ -98,6 +98,16 @@ fn maybe_warp_pointer[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composito
 }
 
 /// Dispatch any compositor action (from keybindings or IPC).
+/// Ask `w` to close; a client that left the ping of an earlier close
+/// unanswered for a second is hung and is killed instead.
+pub fn close_window[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], w: lum.Window) {
+    if p.d.hung(w, 1000) {
+        p.d.kill(w)
+    } else {
+        p.d.close(w)
+    }
+}
+
 pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], act: cfg.Action) -> Result[(), str] {
     let now = time.now_ns()
     match act {
@@ -123,7 +133,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         CloseWindow => {
             if let Some(id) = p.desktop.focused_window() {
                 if let Some(w) = p.win_by_id.get(id) {
-                    p.d.close(w)
+                    close_window(mut p, w)
                 }
             }
         }
@@ -131,7 +141,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             guard let Some(w) = p.win_by_id.get(id) else {
                 return Err("unknown window id {id}")
             }
-            p.d.close(w)
+            close_window(mut p, w)
         }
         FocusWindow(id) => {
             guard p.desktop.focus_window(id) else {

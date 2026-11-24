@@ -30,7 +30,8 @@ pub fn on_window_new[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor
     p.d.decorate(w, true)
     let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
     let is_dialog = p.d.parent(w).is_some() or p.d.modal(w)
-    let float = rule.floating.unwrap_or(is_dialog)
+    // A window torn off by a drag (xdg-toplevel-drag) floats under the pointer.
+    let float = rule.floating.unwrap_or(is_dialog) or p.d.dragged(w)
     if float or p.desktop.monitors.is_empty() {
         let fw = i32(rule.default_floating_w.unwrap_or(0.0).round())
         let fh = i32(rule.default_floating_h.unwrap_or(0.0).round())
@@ -60,7 +61,7 @@ pub fn on_window_mapped[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composi
     discard p.meta_rule_done.insert(id, not app_id.is_empty() or not title.is_empty())
     let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
     let is_dialog = p.d.parent(w).is_some() or p.d.modal(w)
-    let float = rule.floating.unwrap_or(is_dialog)
+    let float = rule.floating.unwrap_or(is_dialog) or p.d.dragged(w)
     let (nw, nh) = p.d.size(w)
     let eff_nw = rule.default_floating_w.unwrap_or(f64(nw))
     let eff_nh = rule.default_floating_h.unwrap_or(f64(nh))
@@ -191,6 +192,33 @@ pub fn on_moved[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Past
             p.needs_layout = true
         }
     }
+}
+
+/// A drag carries the window (xdg-toplevel-drag): it floats, and luminaria
+/// holds it under the pointer until the drop ends it like a move (`on_moved`).
+pub fn on_window_dragged[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], w: lum.Window) {
+    let id = window_id(w)
+    guard let Some(loc) = p.desktop.locate(id) else {
+        return
+    }
+    if not loc.floating {
+        guard p.desktop.toggle_floating(id) else {
+            return
+        }
+        p.broadcast_window_changed(id)
+    }
+    // No animation toward the floating rect: the drop's offset is measured from it.
+    if let Some(nl) = p.desktop.locate(id) {
+        if let Some(r) = floating_rect(p, nl.monitor_idx, nl.workspace_idx, id) {
+            if let Some(wa) = p.anims.windows.get(id) {
+                var copy = wa
+                copy.rect.snap(r)
+                discard p.anims.windows.insert(id, copy)
+            }
+        }
+    }
+    p.sync_focus()
+    p.needs_layout = true
 }
 
 pub fn on_resized[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], w: lum.Window, dx: f64, dy: f64, width: i32, height: i32) {

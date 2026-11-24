@@ -40,4 +40,4 @@ Pastel runs a single-threaded epoll event loop owned by `luminaria.Display`:
 
 1. `d.next()` returns queued events immediately; when the queue empties, `luminaria` finishes due frames, flushes all clients in a single `sendmsg` per client, and sleeps in `epoll_wait(-1)`.
 2. Pastel watches its own IPC listener and client sockets via `d.watch(fd, token)` — no background polling threads.
-3. While any animation is active, Pastel evaluates springs/eases at `Event.Frame(o, vblank_ns)` and signals `luminaria`'s adaptive vblank clock via a culled 1x1 offscreen tick sentinel. The moment all animations settle, the sentinel is omitted and the compositor sleeps with **0 wakeups/second** and **0.0% CPU**.
+3. While any animation is active, Pastel evaluates springs/eases at `Event.Frame(o, vblank_ns)` and asks `luminaria` for the next frame with `d.want_frame()`. The moment all animations settle, no frame is asked for and the compositor sleeps with **0 wakeups/second** and **0.0% CPU**.
