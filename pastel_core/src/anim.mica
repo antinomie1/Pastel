@@ -58,6 +58,14 @@ pub fn Anim.retarget(mut self, next_target: f64, spec: curve.CurveSpec, now_ns: 
     self.active = true
 }
 
+/// Start an animation in flight `dt_ns` later, as if no time had passed
+/// meanwhile (a frame held back by a layout transaction).
+pub fn Anim.delay(mut self, dt_ns: int) {
+    if self.active {
+        self.t0 += dt_ns
+    }
+}
+
 /// Evaluate `(position, velocity)` at `now_ns` without mutating state.
 pub fn Anim.sample(self, now_ns: int) -> (f64, f64) {
     guard self.active else {
@@ -109,6 +117,13 @@ pub fn AnimRect.retarget(mut self, r: geom.Rect, spec: curve.CurveSpec, now_ns: 
     self.y.retarget(r.y, spec, now_ns, enabled, slowdown)
     self.w.retarget(r.w, spec, now_ns, enabled, slowdown)
     self.h.retarget(r.h, spec, now_ns, enabled, slowdown)
+}
+
+pub fn AnimRect.delay(mut self, dt_ns: int) {
+    self.x.delay(dt_ns)
+    self.y.delay(dt_ns)
+    self.w.delay(dt_ns)
+    self.h.delay(dt_ns)
 }
 
 pub fn AnimRect.tick(mut self, now_ns: int) -> geom.Rect {
@@ -168,6 +183,10 @@ pub fn AnimColor.sample(self, now_ns: int) -> color.Color {
 pub fn AnimColor.tick(mut self, now_ns: int) -> color.Color {
     let p = self.progress.tick(now_ns)
     return self.from.lerp(self.to, f32(p))
+}
+
+pub fn AnimColor.delay(mut self, dt_ns: int) {
+    self.progress.delay(dt_ns)
 }
 
 pub fn AnimColor.is_active(self) -> bool {

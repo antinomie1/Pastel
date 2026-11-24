@@ -65,6 +65,9 @@ pub struct Pastel[O: lum.plug.Output, R: lum.plug.Renderer] {
     pub anim_tick_img: Option[lum.Image] = None
     pub tick_flip: bool = false
     pub last_anim_ns: int = 0
+    /// When a layout transaction opened (0: none): its animations start
+    /// with the first frame after it.
+    pub held_since: int = 0
     pub targets_scratch: List[lay.TileTarget] = []
     pub overview_targets_scratch: List[lay.TileTarget] = []
     pub closing_scratch: List[ren.ClosingFrame] = []
@@ -351,6 +354,7 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
                 if geom_changed and not any_size_txn and not self.anims.is_active() {
                     self.d.begin()
                     any_size_txn = true
+                    self.held_since = anim_ns
                 }
                 let tiled = not t.floating and not t.fullscreen
                 let st = lum.States {
@@ -463,6 +467,11 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
             bc = bc.lerp(core.Color.rgb(1.0, 1.0, 1.0), bell_a * 0.75)
         }
         let loc_mi = t.monitor_idx
+        // Slide by whole physical pixels from a pixel-aligned target: windows
+        // moving together keep exact gaps and borders instead of shimmering.
+        let k = monitor_scale(self, out_rects, loc_mi)
+        r.x = snap_px(t.rect.x, k) + snap_px(r.x - t.rect.x, k)
+        r.y = snap_px(t.rect.y, k) + snap_px(r.y - t.rect.y, k)
         let wy = if loc_mi >= 0 and loc_mi < ws_off_y.len() and not t.fullscreen { ws_off_y[loc_mi] } else { 0.0 }
         // Center open-scale subtly around the window midpoint.
         var sx = r.x + r.w * (1.0 - f64(open_sc)) * 0.5
@@ -700,7 +709,7 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
         offset: wc.blur_offset,
     }
     for oi in 0..out_rects.len() {
-        self.sheet.set_output_all(oi, self.cfg.background, blur_cfg, out_effects[oi].clone(), out_closing[oi].clone(), out_tabs[oi].clone(), out_frames[oi].clone())
+        self.sheet.set_output_all(oi, self.cfg.background, blur_cfg, mem.replace(mut out_effects[oi], []), mem.replace(mut out_closing[oi], []), mem.replace(mut out_tabs[oi], []), mem.replace(mut out_frames[oi], []))
     }
 
     // 5. Commit placement list to luminaria. Include culled offscreen tick sentinel ONLY while animating.
@@ -740,6 +749,25 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
     self.overview_targets_scratch = ov_targets
     self.place_scratch = place_wins
     self.ws_off_scratch = ws_off_y
+}
+
+/// `v` on the physical pixel grid of scale `k`.
+fn snap_px(v: f64, k: f64) -> f64 {
+    return (v * k).round() / k
+}
+
+/// Scale of the output showing monitor `mi` (1.0 when unknown).
+fn monitor_scale[O: lum.plug.Output, R: lum.plug.Renderer](p: Pastel[O, R], out_rects: &[(f64, f64, f64, f64, f64, u64)], mi: int) -> f64 {
+    guard mi >= 0 and mi < p.desktop.monitors.len() else {
+        return 1.0
+    }
+    let id = p.desktop.monitors[mi].id
+    for (_, _, _, _, sc, oid) in out_rects {
+        if oid == id and sc > 0.0 {
+            return sc
+        }
+    }
+    return 1.0
 }
 
 fn Pastel[O, R].send_ipc(mut self, fd: int, payload: str) -> bool {
@@ -891,6 +919,11 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
             }
         }
         Frame(_, vblank_ns) => {
+            if self.held_since > 0 {
+                // No frame was drawn while the transaction waited for clients.
+                self.anims.delay(time.now_ns() - self.held_since)
+                self.held_since = 0
+            }
             if self.anims.is_active() or self.needs_layout {
                 self.sync_layout(vblank_ns)
             }

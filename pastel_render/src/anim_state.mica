@@ -10,7 +10,6 @@ pub struct WindowAnim {
     pub opacity: core.Anim
     pub scale: core.Anim
     pub border_color: core.AnimColor
-    pub initialized: bool = false
 }
 
 /// In-flight close transition driven by `[animation].window-close`.
@@ -75,7 +74,6 @@ pub fn AnimState.open_window(mut self, id: u64, target: core.Rect, target_opacit
         opacity: core.Anim.unit(if ac.enabled { 0.0 } else { f64(target_opacity) }),
         scale: core.Anim.unit(if ac.enabled { 0.94 } else { 1.0 }),
         border_color: core.AnimColor.new(border),
-        initialized: true,
     }
     wa.opacity.retarget(f64(target_opacity), ac.window_open, now_ns, ac.enabled, ac.slowdown)
     wa.scale.retarget(1.0, ac.window_open, now_ns, ac.enabled, ac.slowdown)
@@ -157,6 +155,34 @@ pub fn AnimState.set_overview(mut self, open: bool, ac: cfg.AnimationConfig, now
 /// Trigger a 350 ms visual focus-ring pulse on window `id` (for `Event.Bell`).
 pub fn AnimState.trigger_bell(mut self, id: u64, now_ns: int) {
     discard self.bell_until.insert(id, now_ns + 350000000)
+}
+
+/// Push every animation in flight `dt_ns` later: what started while a layout
+/// transaction held frames back begins with the first frame shown instead
+/// of jumping ahead by the wait.
+pub fn AnimState.delay(mut self, dt_ns: int) {
+    guard dt_ns > 0 else {
+        return
+    }
+    for id in self.windows.keys() {
+        discard self.windows.update(id, fn(mut wa) {
+            wa.rect.delay(dt_ns)
+            wa.opacity.delay(dt_ns)
+            wa.scale.delay(dt_ns)
+            wa.border_color.delay(dt_ns)
+        })
+    }
+    for id in self.outputs.keys() {
+        discard self.outputs.update(id, fn(mut oa) {
+            oa.ws_offset_y.delay(dt_ns)
+        })
+    }
+    for i in 0..self.closing.len() {
+        self.closing[i].opacity.delay(dt_ns)
+        self.closing[i].scale.delay(dt_ns)
+    }
+    self.overlay_alpha.delay(dt_ns)
+    self.overview.delay(dt_ns)
 }
 
 pub fn AnimState.remove_window(mut self, id: u64) {

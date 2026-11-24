@@ -36,7 +36,12 @@ When a user rapidly taps `Mod+L` three times mid-scroll, `Anim.set_target(new_ta
 
 An animation settles to its exact target once $|x(t) - x_{\text{target}}| < \epsilon_x$ and $|\dot{x}(t)| < \epsilon_v$, guaranteeing clean termination and returning the compositor to zero-wakeup idle.
 
-## 4. Animated Channels
+## 4. Frame Alignment
+
+- **Held transactions**: a resize opens a layout transaction that shows nothing until the clients redraw (at most 25 ms). Animations started with it are pushed back by that wait (`AnimState.delay`) on the next `Event.Frame`, so the first frame shown is the start of the motion, not a jump ahead.
+- **Whole-pixel motion**: each window is drawn at its target snapped to the output's physical pixel grid plus its animated displacement, also snapped. Windows sliding together move by the same pixels, so gaps and borders stay exact at any scale.
+
+## 5. Animated Channels
 
 - **Window geometry & strip scroll** (`window-movement`): X, Y, W, H per window (smoothly interpolating column/camera shifts)
 - **Workspace switch** (`workspace-switch`): vertical strip slide between workspaces

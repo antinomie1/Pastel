@@ -1,6 +1,6 @@
 import pastel_core as core
 
-test "geometry intersection and inset" {
+test "geometry intersection and growth" {
     let a = core.Rect.new(10.0, 20.0, 100.0, 80.0)
     let b = core.Rect.new(60.0, 50.0, 100.0, 80.0)
     assert(a.overlaps(b))
@@ -9,7 +9,7 @@ test "geometry intersection and inset" {
     assert_eq(inter.y, 50.0)
     assert_eq(inter.w, 50.0)
     assert_eq(inter.h, 50.0)
-    let ins = a.inset(5.0)
+    let ins = a.grow(-5.0)
     assert_eq(ins.w, 90.0)
     assert_eq(ins.h, 70.0)
 }
@@ -79,4 +79,18 @@ test "high-slowdown spring scales timeout instead of snapping at 5s" {
     let v = a.tick(5500000000)
     assert(a.active)
     assert(v > 500.0 and v < 999.0)
+}
+
+test "a delayed animation resumes where it was held" {
+    var a = core.Anim.new(0.0)
+    a.retarget(100.0, core.CurveSpec.spring(800.0, 1.0), 1000, true, 1.0)
+    let held = a.sample(1000 + 20000000)
+    a.delay(30000000)
+    // 30 ms later it is where it was 30 ms earlier.
+    let (x, _) = a.sample(1000 + 50000000)
+    assert((x - held.0).abs() < 1e-9)
+    // Idle animations are not moved.
+    var b = core.Anim.new(5.0)
+    b.delay(30000000)
+    assert_eq(b.t0, 0)
 }

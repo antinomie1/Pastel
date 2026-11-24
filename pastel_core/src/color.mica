@@ -129,12 +129,3 @@ pub fn Color.to_rgba8_premul(self) -> [4]u8 {
     let au = u8((a * 255.0 + 0.5).clamp(0.0, 255.0))
     return [r, g, b, au]
 }
-
-/// Straight 8-bit RGBA bytes.
-pub fn Color.to_rgba8(self) -> [4]u8 {
-    let r = u8((self.r.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
-    let g = u8((self.g.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
-    let b = u8((self.b.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
-    let a = u8((self.a.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
-    return [r, g, b, a]
-}
