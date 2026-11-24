@@ -93,6 +93,49 @@ fn placement_rect(p: types.Placement, t: gpu.Texture) -> draw2d.Rect {
     return draw2d.Rect { x: p.x, y: p.y, w: pw, h: ph }
 }
 
+/// Bounds of placement `p`, falling back to `p.w`/`p.h` when its old texture was already freed on resize.
+fn placement_rect_opt(p: types.Placement, t_opt: Option[gpu.Texture]) -> Option[draw2d.Rect] {
+    if let Some(t) = t_opt {
+        return Some(placement_rect(p, t))
+    }
+    if p.w > 0.0 and p.h > 0.0 {
+        return Some(draw2d.Rect { x: p.x, y: p.y, w: p.w, h: p.h })
+    }
+    return None
+}
+
+/// Visible window frame rectangle in output pixels (`xdg_surface.set_window_geometry` when set,
+/// excluding client-side drop-shadow margins; otherwise identical to `placement_rect`).
+fn frame_rect(p: types.Placement, t: gpu.Texture) -> draw2d.Rect {
+    if p.geometry.w > 0.0 and p.geometry.h > 0.0 {
+        return draw2d.Rect { x: p.geometry.x, y: p.geometry.y, w: p.geometry.w, h: p.geometry.h }
+    }
+    return placement_rect(p, t)
+}
+
+fn rect_union(a: draw2d.Rect, b: draw2d.Rect) -> draw2d.Rect {
+    let x0 = min(a.x, b.x)
+    let y0 = min(a.y, b.y)
+    let x1 = max(a.x + a.w, b.x + b.w)
+    let y1 = max(a.y + a.h, b.y + b.h)
+    return draw2d.Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+}
+
+/// Full visual bounds covering both the surface texture and padded frame decorations (border/shadow).
+fn placement_bounds_opt(p: types.Placement, t_opt: Option[gpu.Texture], fx: effects.OutputEffects, fi: int) -> Option[draw2d.Rect] {
+    let pad = placement_pad(p, fx, fi)
+    let tex_opt = placement_rect_opt(p, t_opt)
+    let has_geo = p.geometry.w > 0.0 and p.geometry.h > 0.0
+    if has_geo {
+        let frame_padded = draw2d.Rect { x: p.geometry.x, y: p.geometry.y, w: p.geometry.w, h: p.geometry.h }.grow(pad)
+        return match tex_opt {
+            Some(tr) => Some(rect_union(tr, frame_padded))
+            None => Some(frame_padded)
+        }
+    }
+    return tex_opt.map(fn(tr) => tr.grow(pad))
+}
+
 fn effect_bounds(ef: effects.WindowEffect) -> draw2d.Rect {
     let pad = max(ef.border_width, ef.shadow_size) + 4.0
     return draw2d.Rect { x: ef.x - pad, y: ef.y - pad, w: ef.w + pad * 2.0, h: ef.h + pad * 2.0 }
@@ -129,10 +172,11 @@ fn same_frame(a: effects.OverviewFrame, b: effects.OverviewFrame) -> bool {
 }
 
 fn same_placement(a: types.Placement, b: types.Placement) -> bool {
-    return a.key == b.key and a.x == b.x and a.y == b.y and a.w == b.w and a.h == b.h and a.src.x == b.src.x and a.src.y == b.src.y and a.src.w == b.src.w and a.src.h == b.src.h and a.transform == b.transform and a.opacity == b.opacity and a.radius == b.radius and a.shadow == b.shadow and a.opaque.x == b.opaque.x and a.opaque.y == b.opaque.y and a.opaque.w == b.opaque.w and a.opaque.h == b.opaque.h and a.color_space == b.color_space
+    return a.key == b.key and a.x == b.x and a.y == b.y and a.w == b.w and a.h == b.h and a.geometry.x == b.geometry.x and a.geometry.y == b.geometry.y and a.geometry.w == b.geometry.w and a.geometry.h == b.geometry.h and a.src.x == b.src.x and a.src.y == b.src.y and a.src.w == b.src.w and a.src.h == b.src.h and a.transform == b.transform and a.opacity == b.opacity and a.radius == b.radius and a.shadow == b.shadow and a.opaque.x == b.opaque.x and a.opaque.y == b.opaque.y and a.opaque.w == b.opaque.w and a.opaque.h == b.opaque.h and a.color_space == b.color_space
 }
 
-/// True when `p` with texture `t` has transparency (either reduced opacity or non-opaque surface buffer).
+/// True when `p` with texture `t` has transparency inside its visible window frame
+/// (so opaque CSD windows with transparent shadow margins are not misclassified as translucent).
 fn surface_translucent(p: types.Placement, t: gpu.Texture) -> bool {
     if p.opacity < 0.995 {
         return true
@@ -140,8 +184,8 @@ fn surface_translucent(p: types.Placement, t: gpu.Texture) -> bool {
     if t.opaque() {
         return false
     }
-    let r = placement_rect(p, t)
-    return p.opaque.w < r.w - 0.5 or p.opaque.h < r.h - 0.5
+    let frame = frame_rect(p, t)
+    return p.opaque.w < frame.w - 0.5 or p.opaque.h < frame.h - 0.5
 }
 
 struct Shm {
@@ -329,12 +373,16 @@ fn find_effect_unused(fx: effects.OutputEffects, p: types.Placement, used: &[boo
     }
     var best = -1
     var best_err: f32 = 1.0e9
+    let gx = if p.geometry.w > 0.0 and p.geometry.h > 0.0 { p.geometry.x } else { p.x }
+    let gy = if p.geometry.w > 0.0 and p.geometry.h > 0.0 { p.geometry.y } else { p.y }
+    let gw = if p.geometry.w > 0.0 and p.geometry.h > 0.0 { p.geometry.w } else { p.w }
+    let gh = if p.geometry.w > 0.0 and p.geometry.h > 0.0 { p.geometry.h } else { p.h }
     for i, item in fx.items {
         if not used[i] and item.key == 0 {
-            let dx = (item.x - p.x).abs()
-            let dy = (item.y - p.y).abs()
-            let dw = (item.w - p.w).abs()
-            let dh = (item.h - p.h).abs()
+            let dx = (item.x - gx).abs()
+            let dy = (item.y - gy).abs()
+            let dw = (item.w - gw).abs()
+            let dh = (item.h - gh).abs()
             if dx <= 2.0 and dy <= 2.0 and dw <= 4.0 and dh <= 4.0 {
                 let err = dx + dy + dw + dh
                 if err < best_err {
@@ -595,12 +643,12 @@ pub fn PastelRenderer.layout(mut self, o: int, placements: &[types.Placement]) {
             let a = prev_ps[i]
             let b = out.last_ps[i]
             if not same_placement(a, b) {
-                if let Some(ta) = self.texs.get(a.tex) {
-                    let pfi = if i < prev_ps_fx.len() { prev_ps_fx[i] } else { -1 }
-                    add_fx_damage(mut out, placement_rect(a, ta).grow(placement_pad(a, prev_fx, pfi)))
+                let pfi = if i < prev_ps_fx.len() { prev_ps_fx[i] } else { -1 }
+                if let Some(ba) = placement_bounds_opt(a, self.texs.get(a.tex), prev_fx, pfi) {
+                    add_fx_damage(mut out, ba)
                 }
-                if let Some(tb) = self.texs.get(b.tex) {
-                    add_fx_damage(mut out, placement_rect(b, tb).grow(placement_pad(b, out.fx, out.ps_fx[i])))
+                if let Some(bb) = placement_bounds_opt(b, self.texs.get(b.tex), out.fx, out.ps_fx[i]) {
+                    add_fx_damage(mut out, bb)
                 }
                 if first_window_idx > 0 and i < first_window_idx {
                     backdrop_changed = true
@@ -616,9 +664,9 @@ pub fn PastelRenderer.layout(mut self, o: int, placements: &[types.Placement]) {
                 if out.last_ps[j].key == a.key {
                     matched = true
                     if i != j or not same_placement(a, out.last_ps[j]) {
-                        if let Some(ta) = self.texs.get(a.tex) {
-                            let pfi = if i < prev_ps_fx.len() { prev_ps_fx[i] } else { -1 }
-                            add_fx_damage(mut out, placement_rect(a, ta).grow(placement_pad(a, prev_fx, pfi)))
+                        let pfi = if i < prev_ps_fx.len() { prev_ps_fx[i] } else { -1 }
+                        if let Some(ba) = placement_bounds_opt(a, self.texs.get(a.tex), prev_fx, pfi) {
+                            add_fx_damage(mut out, ba)
                         }
                         if (prev_first_win > 0 and i < prev_first_win) or (first_window_idx > 0 and j < first_window_idx) {
                             backdrop_changed = true
@@ -628,9 +676,9 @@ pub fn PastelRenderer.layout(mut self, o: int, placements: &[types.Placement]) {
                 }
             }
             if not matched {
-                if let Some(ta) = self.texs.get(a.tex) {
-                    let pfi = if i < prev_ps_fx.len() { prev_ps_fx[i] } else { -1 }
-                    add_fx_damage(mut out, placement_rect(a, ta).grow(placement_pad(a, prev_fx, pfi)))
+                let pfi = if i < prev_ps_fx.len() { prev_ps_fx[i] } else { -1 }
+                if let Some(ba) = placement_bounds_opt(a, self.texs.get(a.tex), prev_fx, pfi) {
+                    add_fx_damage(mut out, ba)
                 }
                 if prev_first_win > 0 and i < prev_first_win {
                     backdrop_changed = true
@@ -644,16 +692,16 @@ pub fn PastelRenderer.layout(mut self, o: int, placements: &[types.Placement]) {
                 if prev_ps[i].key == b.key {
                     matched = true
                     if i != j or not same_placement(prev_ps[i], b) {
-                        if let Some(tb) = self.texs.get(b.tex) {
-                            add_fx_damage(mut out, placement_rect(b, tb).grow(placement_pad(b, out.fx, out.ps_fx[j])))
+                        if let Some(bb) = placement_bounds_opt(b, self.texs.get(b.tex), out.fx, out.ps_fx[j]) {
+                            add_fx_damage(mut out, bb)
                         }
                     }
                     break
                 }
             }
             if not matched {
-                if let Some(tb) = self.texs.get(b.tex) {
-                    add_fx_damage(mut out, placement_rect(b, tb).grow(placement_pad(b, out.fx, out.ps_fx[j])))
+                if let Some(bb) = placement_bounds_opt(b, self.texs.get(b.tex), out.fx, out.ps_fx[j]) {
+                    add_fx_damage(mut out, bb)
                 }
                 if first_window_idx > 0 and j < first_window_idx {
                     backdrop_changed = true
@@ -826,8 +874,8 @@ pub fn PastelRenderer.set_overlays(mut self, o: int, keys: &[u64]) {
         let was = out.overlay_keys.contains(p.key)
         let now = next_keys.contains(p.key)
         if was != now {
-            if let Some(t) = self.texs.get(p.tex) {
-                add_fx_damage(mut out, placement_rect(p, t).grow(placement_pad(p, out.fx, out.ps_fx[pi])))
+            if let Some(b) = placement_bounds_opt(p, self.texs.get(p.tex), out.fx, out.ps_fx[pi]) {
+                add_fx_damage(mut out, b)
             }
         }
     }
@@ -977,8 +1025,9 @@ pub fn PastelRenderer.targets(mut self, w: types.Want) -> Result[List[types.Targ
         return Err("render target format {w.format:08x} is not supported")
     }
     let desc = gpu.TextureDesc { width: u32(w.width), height: u32(w.height), format: vf, target: true }
+    let do_export = w.export and self.dev.can_export_dmabuf()
     var mods: List[u64] = []
-    if w.export {
+    if do_export {
         let gpu_mods = self.dev.dmabuf_modifiers(vf, true)
         for m in gpu_mods {
             if w.modifiers.is_empty() or w.modifiers.contains(m) {
@@ -993,7 +1042,7 @@ pub fn PastelRenderer.targets(mut self, w: types.Want) -> Result[List[types.Targ
     for _ in 0..w.count {
         let key = self.next_target
         self.next_target += 1
-        if w.export {
+        if do_export {
             let (t, b) = try self.dev.export_dmabuf_with(desc, mods)
             discard self.targets.insert(key, t)
             let n = b.plane_count()
@@ -1110,10 +1159,11 @@ fn PastelRenderer.render_with_effects(mut self, mut out: Output, mut cv: draw2d.
         if not out.overlay_keys.contains(p.key) {
             if let Some(t) = self.texs.get(p.tex) {
                 let fi = if pi < out.ps_fx.len() { out.ps_fx[pi] } else { -1 }
-                let bounds = placement_rect(p, t).grow(placement_pad(p, out.fx, fi))
-                if area.overlaps(bounds) {
-                    e.acquire(t)
-                    use_tex = true
+                if let Some(bounds) = placement_bounds_opt(p, Some(t), out.fx, fi) {
+                    if area.overlaps(bounds) {
+                        e.acquire(t)
+                        use_tex = true
+                    }
                 }
             }
         }
@@ -1147,7 +1197,8 @@ fn PastelRenderer.render_with_effects(mut self, mut out: Output, mut cv: draw2d.
         let fi = if pi < out.ps_fx.len() { out.ps_fx[pi] } else { -1 }
         let v = to_view(p, t)
         let r = placement_rect(p, t)
-        let bounds = r.grow(placement_pad(p, out.fx, fi))
+        let frame = frame_rect(p, t)
+        let bounds = rect_union(r, frame.grow(placement_pad(p, out.fx, fi)))
         guard area.overlaps(bounds) else {
             continue
         }
@@ -1167,7 +1218,7 @@ fn PastelRenderer.render_with_effects(mut self, mut out: Output, mut cv: draw2d.
             // If this placement needs backdrop blur and overlaps damaged area:
             // - X-Ray mode: reuse cached blurred background/wallpaper (0 extra steady-state passes).
             // - Live mode (or overlay/floating): flush layers below into `dst` and run Dual-Kawase blur.
-            if not is_hw_overlay and blur_cfg.enabled and ef.blur and ef.blur_opacity > 0.01 and surface_translucent(p, t) and area.overlaps(r) {
+            if not is_hw_overlay and blur_cfg.enabled and ef.blur and ef.blur_opacity > 0.01 and surface_translucent(p, t) and area.overlaps(frame) {
                 try cv.draw(mut self.dev, mut e, gpu.Pass { target: dst, load: gpu.Load.Keep }, clips)
                 cv.clear()
                 cv.set_output_color(out.dst_color, out.sdr_nits, out.max_nits)
@@ -1175,17 +1226,19 @@ fn PastelRenderer.render_with_effects(mut self, mut out: Output, mut cv: draw2d.
                 let blurred = if use_xray {
                     try out.blur_pyr.ensure_xray(mut self.dev, pipes, mut e, dst, w, h, blur_cfg.passes, blur_cfg.offset, out.background)
                 } else {
-                    try out.blur_pyr.blur_from(mut self.dev, pipes, mut e, dst, w, h, blur_cfg.passes, blur_cfg.offset)
+                    try out.blur_pyr.blur_region(mut self.dev, pipes, mut e, dst, w, h, blur_cfg.passes, blur_cfg.offset, frame)
                 }
-                blur.composite_clips(pipes, mut e, blurred, dst, r, ef.radius, ef.blur_opacity, clips)
+                blur.composite_clips(pipes, mut e, blurred, dst, frame, ef.radius, ef.blur_opacity, clips)
             }
 
             if not is_hw_overlay {
                 if ef.shadow_size > 0.0 {
                     let sc = vec4(ef.shadow_color.x, ef.shadow_color.y, ef.shadow_color.z, ef.shadow_color.w * v.opacity)
-                    cv.shadow(r, sc, ef.radius, ef.shadow_size)
+                    cv.shadow(frame, sc, ef.radius, ef.shadow_size)
                 }
-                cv.texture_color(t, r, src_rect, v.transform, vec4(1.0, 1.0, 1.0, v.opacity), ef.radius, v.color_space)
+                let has_csd_margin = p.geometry.w > 0.0 and p.geometry.h > 0.0 and (frame.x > r.x + 0.5 or frame.y > r.y + 0.5 or frame.x + frame.w < r.x + r.w - 0.5 or frame.y + frame.h < r.y + r.h - 0.5)
+                let tex_radius = if has_csd_margin { f32(0.0) } else { ef.radius }
+                cv.texture_color(t, r, src_rect, v.transform, vec4(1.0, 1.0, 1.0, v.opacity), tex_radius, v.color_space)
                 if not surface_translucent(p, t) {
                     let opq = if t.opaque() { r } else { draw2d.Rect { x: r.x + p.opaque.x, y: r.y + p.opaque.y, w: p.opaque.w, h: p.opaque.h }.intersect(r) }
                     cv.opaque(opq)
@@ -1193,13 +1246,13 @@ fn PastelRenderer.render_with_effects(mut self, mut out: Output, mut cv: draw2d.
             }
             if ef.border_width > 0.0 {
                 let bw = ef.border_width
-                let br = draw2d.Rect { x: r.x - bw, y: r.y - bw, w: r.w + bw * 2.0, h: r.h + bw * 2.0 }
+                let br = draw2d.Rect { x: frame.x - bw, y: frame.y - bw, w: frame.w + bw * 2.0, h: frame.h + bw * 2.0 }
                 let bc = vec4(ef.border_color.x, ef.border_color.y, ef.border_color.z, ef.border_color.w * v.opacity)
                 cv.border(br, bc, ef.radius, bw)
             }
         } else if not is_hw_overlay {
             if v.shadow > 0.0 {
-                cv.shadow(r, vec4(0.0, 0.0, 0.0, 0.45 * v.opacity), v.radius, v.shadow)
+                cv.shadow(frame, vec4(0.0, 0.0, 0.0, 0.45 * v.opacity), v.radius, v.shadow)
             }
             cv.texture_color(t, r, src_rect, v.transform, vec4(1.0, 1.0, 1.0, v.opacity), v.radius, v.color_space)
             if not surface_translucent(p, t) {
@@ -1341,7 +1394,7 @@ pub fn PastelRenderer.render(mut self, o: int, key: u64, age: u32) -> Result[Opt
                         need_full_xray = true
                     }
                 } else {
-                    live_blur_rects.push(placement_rect(p, ptex))
+                    live_blur_rects.push(frame_rect(p, ptex))
                 }
             }
         }
@@ -1407,8 +1460,13 @@ pub fn PastelRenderer.render(mut self, o: int, key: u64, age: u32) -> Result[Opt
         self.dev.cancel(take e)
         return Ok(None)
     }
-    let (_, fence) = try self.dev.submit_sync_file(take e)
-    return Ok(Some(int(fence)))
+    if self.dev.can_export_sync_file() {
+        let (_, fence) = try self.dev.submit_sync_file(take e)
+        return Ok(Some(int(fence)))
+    }
+    let ticket = try self.dev.submit(take e)
+    try self.dev.wait(ticket)
+    return Ok(Some(-1))
 }
 
 pub fn PastelRenderer.read(mut self, key: u64) -> Result[List[u8], str] {
@@ -1591,20 +1649,32 @@ pub fn PastelRenderer.render_offscreen_dmabuf(mut self, dst_buf: types.Dmabuf, p
     return Ok(int(fence))
 }
 
+fn push_clamped_rect(r: draw2d.Rect, max_w: i32, max_h: i32, mut out: List[(i32, i32, i32, i32)]) {
+    let x0 = max(i32(r.x.floor()), 0)
+    let y0 = max(i32(r.y.floor()), 0)
+    let x1 = min(i32((r.x + r.w).ceil()), max_w)
+    let y1 = min(i32((r.y + r.h).ceil()), max_h)
+    if x1 > x0 and y1 > y0 {
+        out.push((x0, y0, x1 - x0, y1 - y0))
+    }
+}
+
 pub fn PastelRenderer.changed(self, o: int, mut out: List[(i32, i32, i32, i32)]) {
     guard o < self.outputs.len() else {
         return
     }
+    let mw = i32(self.outputs[o].width)
+    let mh = i32(self.outputs[o].height)
     if self.outputs[o].fx_prev_used {
         if not self.outputs[o].fx_history.is_empty() {
             for r in self.outputs[o].fx_history[0].rects() {
-                out.push((i32(r.x), i32(r.y), i32(r.w), i32(r.h)))
+                push_clamped_rect(r, mw, mh, mut out)
             }
         }
         return
     }
     for r in self.outputs[o].scene.changed() {
-        out.push((i32(r.x), i32(r.y), i32(r.w), i32(r.h)))
+        push_clamped_rect(r, mw, mh, mut out)
     }
 }
 

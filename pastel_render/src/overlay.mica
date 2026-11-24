@@ -14,6 +14,23 @@ let key_gap_px: i32 = 20
 let section_gap_px: i32 = 14
 let line_gap_px: i32 = 5
 let keys_per_row: int = 3
+let max_title_len: int = 36
+
+fn format_title(s: str) -> str {
+    var out = s.clone()
+    if out.starts_with("Launch /") {
+        let rest = out.slice(7, out.len())
+        let sp = rest.find(" ").unwrap_or(rest.len())
+        let bin = rest.slice(0, sp)
+        if let Some(slash) = bin.rfind("/") {
+            out = "Launch " + rest.slice(slash + 1, rest.len())
+        }
+    }
+    guard out.len() > max_title_len else {
+        return out
+    }
+    return out.slice(0, max_title_len - 1).trim() + "…"
+}
 
 /// Rasterized hotkey overlay texture ready for `Display.image` (premultiplied RGBA8).
 pub struct OverlayImage {
@@ -177,7 +194,7 @@ fn build_groups(c: cfg.Config, effective_mod: cfg.ModKey) -> List[Group] {
         if not titles.is_empty() {
             var rows: List[Row] = []
             for i in 0..titles.len() {
-                rows.push(Row { keys: fold_labels(keys_list[i]), title: titles[i].clone() })
+                rows.push(Row { keys: fold_labels(keys_list[i]), title: format_title(titles[i]) })
             }
             groups.push(Group { title: sec.clone(), rows })
         }

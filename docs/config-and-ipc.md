@@ -28,4 +28,4 @@ and exports `PASTEL_SOCKET` to child processes spawned by Pastel.
 - **Protocol**: Newline-delimited JSON objects:
   - Action request: `{"cmd":"action","action":"focus-workspace 2"}` -> `{"ok":true}`
   - State query (`pastel msg --state`): `{"cmd":"state"}` -> JSON snapshot of outputs, workspaces, focused window, and window list.
-  - Event subscription (`pastel msg --subscribe`): `{"cmd":"subscribe"}` -> streams newline-delimited JSON events (`workspace-changed`, `focus-changed`, `window-opened`, `window-closed`, `overview-changed`, `locked`, `bell`, `layout-changed`, `config-reloaded`) whenever desktop state changes.
+  - Event subscription (`pastel msg --subscribe`): `{"cmd":"subscribe"}` -> streams newline-delimited JSON events (`workspace-changed`, `focus-changed`, `window-opened`, `window-closed`, `window-changed`, `outputs-changed`, `overview-changed`, `locked`, `bell`, `layout-changed`, `config-reloaded`) whenever desktop state changes.

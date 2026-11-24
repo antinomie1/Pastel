@@ -46,6 +46,40 @@ fn tiled_focused[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[
     return p.desktop.monitors[mi].workspaces[wi].fullscreen.is_none() and not p.desktop.monitors[mi].workspaces[wi].focus_floating and not p.desktop.monitors[mi].workspaces[wi].strip.is_empty()
 }
 
+/// True when the active tiled column on the focused monitor/workspace is maximized.
+fn active_column_maximized[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R]) -> bool {
+    guard not p.desktop.monitors.is_empty() else {
+        return false
+    }
+    let mi = p.desktop.active_monitor
+    let wi = p.desktop.monitors[mi].active_ws
+    guard wi < p.desktop.monitors[mi].workspaces.len() else {
+        return false
+    }
+    let ci = p.desktop.monitors[mi].workspaces[wi].strip.active_col
+    guard ci >= 0 and ci < p.desktop.monitors[mi].workspaces[wi].strip.columns.len() else {
+        return false
+    }
+    return p.desktop.monitors[mi].workspaces[wi].strip.columns[ci].maximized
+}
+
+/// Exit fullscreen on the active workspace (if any) and notify IPC subscribers.
+fn clear_fullscreen[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], mi: int, wi: int) {
+    if let Some(fs_id) = p.desktop.monitors[mi].workspaces[wi].fullscreen.take() {
+        p.broadcast_window_changed(fs_id)
+    }
+}
+
+/// Broadcast `workspace-changed` for the currently active monitor (e.g. after monitor focus change).
+fn notify_active_monitor[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) {
+    guard not p.desktop.monitors.is_empty() else {
+        return
+    }
+    let mi = p.desktop.active_monitor
+    let ws = p.desktop.monitors[mi].active_ws
+    p.broadcast_event("workspace-changed", json.obj().with("monitor", json.Value.Str(p.desktop.monitors[mi].name.clone())).with("workspace", json.Value.Int(ws + 1)))
+}
+
 /// Optional cursor warp to the newly focused monitor or window center when `[input].warp-mouse-to-focus` is enabled.
 fn maybe_warp_pointer[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) {
     guard p.cfg.input.warp_mouse_to_focus and not p.desktop.monitors.is_empty() else {
@@ -111,7 +145,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
-                p.desktop.monitors[mi].workspaces[wi].fullscreen = None
+                clear_fullscreen(mut p, mi, wi)
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(-1, 0)
                 p.sync_focus()
@@ -122,7 +156,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
-                p.desktop.monitors[mi].workspaces[wi].fullscreen = None
+                clear_fullscreen(mut p, mi, wi)
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(1, 0)
                 p.sync_focus()
@@ -133,7 +167,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
-                p.desktop.monitors[mi].workspaces[wi].fullscreen = None
+                clear_fullscreen(mut p, mi, wi)
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_first()
                 p.sync_focus()
@@ -144,7 +178,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
-                p.desktop.monitors[mi].workspaces[wi].fullscreen = None
+                clear_fullscreen(mut p, mi, wi)
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_last()
                 p.sync_focus()
@@ -155,7 +189,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
-                p.desktop.monitors[mi].workspaces[wi].fullscreen = None
+                clear_fullscreen(mut p, mi, wi)
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(0, 1)
                 p.sync_focus()
@@ -166,7 +200,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
-                p.desktop.monitors[mi].workspaces[wi].fullscreen = None
+                clear_fullscreen(mut p, mi, wi)
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(0, -1)
                 p.sync_focus()
@@ -255,6 +289,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
                 let wi = p.desktop.monitors[mi].active_ws
                 if p.desktop.monitors[mi].workspaces[wi].strip.toggle_tabbed() {
                     p.sync_focus()
+                    p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
                     p.needs_layout = true
                 }
             }
@@ -263,8 +298,12 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                let was_max = active_column_maximized(p)
                 let presets = p.cfg.layout.preset_widths.clone()
                 if p.desktop.monitors[mi].workspaces[wi].strip.cycle_preset_width(presets) {
+                    if was_max and not active_column_maximized(p) {
+                        p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
+                    }
                     p.needs_layout = true
                 }
             }
@@ -273,7 +312,11 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                let was_max = active_column_maximized(p)
                 if p.desktop.monitors[mi].workspaces[wi].strip.set_column_width(frac) {
+                    if was_max and not active_column_maximized(p) {
+                        p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
+                    }
                     p.needs_layout = true
                 }
             }
@@ -282,7 +325,11 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                let was_max = active_column_maximized(p)
                 if p.desktop.monitors[mi].workspaces[wi].strip.adjust_column_width(delta) {
+                    if was_max and not active_column_maximized(p) {
+                        p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
+                    }
                     p.needs_layout = true
                 }
             }
@@ -309,9 +356,13 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if tiled_focused(p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                let was_max = active_column_maximized(p)
                 let area = p.desktop.monitors[mi].usable_rect
                 let gap = p.desktop.gap
                 if p.desktop.monitors[mi].workspaces[wi].strip.expand_to_available_width(area, gap) {
+                    if was_max and not active_column_maximized(p) {
+                        p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
+                    }
                     p.needs_layout = true
                 }
             }
@@ -321,6 +372,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 if p.desktop.monitors[mi].workspaces[wi].strip.toggle_maximize_column() {
+                    p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
                     p.needs_layout = true
                 }
             }
@@ -336,6 +388,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         ToggleFullscreen => {
             if let Some(id) = p.desktop.focused_window() {
                 if p.desktop.toggle_fullscreen(id) {
+                    p.broadcast_window_changed(id)
                     p.needs_layout = true
                 }
             }
@@ -344,6 +397,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if let Some(id) = p.desktop.focused_window() {
                 if p.desktop.toggle_floating(id) {
                     p.sync_focus()
+                    p.broadcast_window_changed(id)
                     p.needs_layout = true
                 }
             }
@@ -393,8 +447,10 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         MoveWindowToWorkspaceSilent(n) => {
+            let moved_id = p.desktop.focused_window().unwrap_or(0)
             if p.desktop.move_focused_to_workspace_silent(n) {
                 p.sync_focus()
+                p.broadcast_window_changed(moved_id)
                 p.needs_layout = true
             }
         }
@@ -426,6 +482,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         FocusMonitorLeft => {
             if p.desktop.focus_monitor_2d(-1, 0) {
                 p.sync_focus()
+                notify_active_monitor(mut p)
                 maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
@@ -433,6 +490,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         FocusMonitorRight => {
             if p.desktop.focus_monitor_2d(1, 0) {
                 p.sync_focus()
+                notify_active_monitor(mut p)
                 maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
@@ -440,6 +498,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         FocusMonitorUp => {
             if p.desktop.focus_monitor_2d(0, -1) {
                 p.sync_focus()
+                notify_active_monitor(mut p)
                 maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
@@ -447,6 +506,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         FocusMonitorDown => {
             if p.desktop.focus_monitor_2d(0, 1) {
                 p.sync_focus()
+                notify_active_monitor(mut p)
                 maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
@@ -454,6 +514,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         MoveWindowToMonitorLeft => {
             if p.desktop.move_focused_to_monitor_2d(-1, 0) {
                 p.sync_focus()
+                p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
                 maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
@@ -461,6 +522,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         MoveWindowToMonitorRight => {
             if p.desktop.move_focused_to_monitor_2d(1, 0) {
                 p.sync_focus()
+                p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
                 maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
@@ -468,6 +530,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         MoveWindowToMonitorUp => {
             if p.desktop.move_focused_to_monitor_2d(0, -1) {
                 p.sync_focus()
+                p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
                 maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
@@ -475,6 +538,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         MoveWindowToMonitorDown => {
             if p.desktop.move_focused_to_monitor_2d(0, 1) {
                 p.sync_focus()
+                p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
                 maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
@@ -482,6 +546,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         MoveColumnToMonitorLeft => {
             if p.desktop.move_column_to_monitor_2d(-1, 0) {
                 p.sync_focus()
+                p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
                 maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
@@ -489,6 +554,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         MoveColumnToMonitorRight => {
             if p.desktop.move_column_to_monitor_2d(1, 0) {
                 p.sync_focus()
+                p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
                 maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
@@ -496,6 +562,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         MoveColumnToMonitorUp => {
             if p.desktop.move_column_to_monitor_2d(0, -1) {
                 p.sync_focus()
+                p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
                 maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
@@ -503,6 +570,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         MoveColumnToMonitorDown => {
             if p.desktop.move_column_to_monitor_2d(0, 1) {
                 p.sync_focus()
+                p.broadcast_window_changed(p.desktop.focused_window().unwrap_or(0))
                 maybe_warp_pointer(mut p)
                 p.needs_layout = true
             }
@@ -712,8 +780,10 @@ pub fn on_button[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pas
             let fi = p.desktop.monitors[loc.monitor_idx].workspaces[loc.workspace_idx].find_floating(id)
             if fi >= 0 {
                 let r = p.desktop.monitors[loc.monitor_idx].workspaces[loc.workspace_idx].floating[fi].rect
-                let h: u32 = if b.x < r.x + f64(ww) * 0.5 { 4 } else { 8 }
-                let t: u32 = if b.y < r.y + f64(wh) * 0.5 { 1 } else { 2 }
+                let eff_w = if ww > 0 { f64(ww) } else { r.w }
+                let eff_h = if wh > 0 { f64(wh) } else { r.h }
+                let h: u32 = if b.x < r.x + eff_w * 0.5 { 4 } else { 8 }
+                let t: u32 = if b.y < r.y + eff_h * 0.5 { 1 } else { 2 }
                 p.d.manipulate_resize(w, h | t)
                 return true
             }

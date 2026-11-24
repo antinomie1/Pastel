@@ -110,29 +110,62 @@ pub fn BlurPyramid.ensure(mut self, mut dev: gpu.Device, w: u32, h: u32, passes:
 
 /// Run Dual-Kawase downsample -> upsample on `src` and return the blurred level-0 texture.
 pub fn BlurPyramid.blur_from(mut self, mut dev: gpu.Device, pipes: BlurPipelines, mut e: gpu.Encoder, src: gpu.Texture, w: u32, h: u32, passes: int, offset: f32) -> Result[gpu.Texture, str] {
+    let full = draw2d.Rect { w: f32(w), h: f32(h) }
+    return self.blur_region(mut dev, pipes, mut e, src, w, h, passes, offset, full)
+}
+
+/// Run Dual-Kawase downsample -> upsample on `src` scissored to `region` expanded by the
+/// blur kernel radius, avoiding full-screen blur passes when moving/resizing floating windows.
+pub fn BlurPyramid.blur_region(mut self, mut dev: gpu.Device, pipes: BlurPipelines, mut e: gpu.Encoder, src: gpu.Texture, w: u32, h: u32, passes: int, offset: f32, region: draw2d.Rect) -> Result[gpu.Texture, str] {
     try self.ensure(mut dev, w, h, passes, src.format())
     let n = self.levels.len()
     let off = offset.clamp(0.5, 8.0)
+    let fw = max(f32(w), 1.0)
+    let fh = max(f32(h), 1.0)
+    let pad = kernel_radius(passes, off)
+    let bx0 = max(region.x - pad, 0.0)
+    let by0 = max(region.y - pad, 0.0)
+    let bx1 = min(region.x + region.w + pad, fw)
+    let by1 = min(region.y + region.h + pad, fh)
+    let use_scissor = bx1 > bx0 and by1 > by0 and ((bx1 - bx0) < fw * 0.92 or (by1 - by0) < fh * 0.92)
+    let extra = i32(off.ceil()) + 2
 
     // Downsample chain: src -> level[0] -> level[1] -> ... -> level[n-1]
     var prev = src
-    var pw = f32(w)
-    var ph = f32(h)
+    var pw = fw
+    var ph = fh
     for i in 0..n {
         let dst = self.levels[i]
+        let dw = dst.width()
+        let dh = dst.height()
         let push = BlurPush {
             tex: prev.index(),
             dx: off / max(pw, 1.0),
             dy: off / max(ph, 1.0),
         }
-        e.render(gpu.Pass { target: dst, load: gpu.Load.Discard }, fn(mut r) {
-            r.bind(pipes.down)
-            r.push(bytes_of(push))
-            r.draw(3, 1)
-        })
+        if use_scissor {
+            let sx0 = max(i32((bx0 * f32(dw) / fw).floor()) - extra, 0)
+            let sy0 = max(i32((by0 * f32(dh) / fh).floor()) - extra, 0)
+            let sx1 = min(i32((bx1 * f32(dw) / fw).ceil()) + extra, i32(dw))
+            let sy1 = min(i32((by1 * f32(dh) / fh).ceil()) + extra, i32(dh))
+            let sw = u32(max(sx1 - sx0, 1))
+            let sh = u32(max(sy1 - sy0, 1))
+            e.render(gpu.Pass { target: dst, load: gpu.Load.Discard }, fn(mut r) {
+                r.bind(pipes.down)
+                r.scissor(sx0, sy0, sw, sh)
+                r.push(bytes_of(push))
+                r.draw(3, 1)
+            })
+        } else {
+            e.render(gpu.Pass { target: dst, load: gpu.Load.Discard }, fn(mut r) {
+                r.bind(pipes.down)
+                r.push(bytes_of(push))
+                r.draw(3, 1)
+            })
+        }
         prev = dst
-        pw = f32(dst.width())
-        ph = f32(dst.height())
+        pw = f32(dw)
+        ph = f32(dh)
     }
 
     // Upsample chain: level[n-1] -> level[n-2] -> ... -> level[0]
@@ -140,16 +173,33 @@ pub fn BlurPyramid.blur_from(mut self, mut dev: gpu.Device, pipes: BlurPipelines
     while i >= 0 {
         let src_t = self.levels[i + 1]
         let dst_t = self.levels[i]
+        let dw = dst_t.width()
+        let dh = dst_t.height()
         let push = BlurPush {
             tex: src_t.index(),
-            dx: off / max(f32(dst_t.width()), 1.0),
-            dy: off / max(f32(dst_t.height()), 1.0),
+            dx: off / max(f32(dw), 1.0),
+            dy: off / max(f32(dh), 1.0),
         }
-        e.render(gpu.Pass { target: dst_t, load: gpu.Load.Discard }, fn(mut r) {
-            r.bind(pipes.up)
-            r.push(bytes_of(push))
-            r.draw(3, 1)
-        })
+        if use_scissor {
+            let sx0 = max(i32((bx0 * f32(dw) / fw).floor()) - extra, 0)
+            let sy0 = max(i32((by0 * f32(dh) / fh).floor()) - extra, 0)
+            let sx1 = min(i32((bx1 * f32(dw) / fw).ceil()) + extra, i32(dw))
+            let sy1 = min(i32((by1 * f32(dh) / fh).ceil()) + extra, i32(dh))
+            let sw = u32(max(sx1 - sx0, 1))
+            let sh = u32(max(sy1 - sy0, 1))
+            e.render(gpu.Pass { target: dst_t, load: gpu.Load.Discard }, fn(mut r) {
+                r.bind(pipes.up)
+                r.scissor(sx0, sy0, sw, sh)
+                r.push(bytes_of(push))
+                r.draw(3, 1)
+            })
+        } else {
+            e.render(gpu.Pass { target: dst_t, load: gpu.Load.Discard }, fn(mut r) {
+                r.bind(pipes.up)
+                r.push(bytes_of(push))
+                r.draw(3, 1)
+            })
+        }
         i -= 1
     }
     return Ok(self.levels[0])

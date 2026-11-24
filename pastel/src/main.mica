@@ -96,6 +96,7 @@ fn run_compositor(cfg_path: str, backend_name: str, validation: bool, startup: s
         keymap: names.clone(),
         repeat_rate: config.input.repeat_rate,
         repeat_delay: config.input.repeat_delay,
+        buffers: 3,
         background: config.background.premul_array(),
         cursor_theme_size: int(config.cursor.size),
         title: "Pastel",

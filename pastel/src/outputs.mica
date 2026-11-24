@@ -1,5 +1,6 @@
 // Output management, rotation-invariant scale computation, mode parsing, multi-monitor sync, and input device config.
 
+import std.json
 import luminaria as lum
 import pastel_core as core
 import pastel_config as cfg
@@ -223,6 +224,7 @@ pub fn on_output_added[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         p.rebuild_overlay()
     }
     p.sync_focus()
+    p.broadcast_event("outputs-changed", json.obj())
     p.needs_layout = true
 }
 
@@ -242,6 +244,7 @@ pub fn on_output_removed[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compos
         p.rebuild_overlay()
     }
     p.sync_focus()
+    p.broadcast_event("outputs-changed", json.obj())
     p.needs_layout = true
 }
 

@@ -126,13 +126,17 @@ pub fn on_window_meta[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composito
     let already = p.meta_rule_done.get(id).unwrap_or(false)
     let app_id = p.d.app_id(w)
     let title = p.d.title(w)
-    if not already and (not app_id.is_empty() or not title.is_empty()) and p.desktop.locate(id).is_some() {
+    let mapped = p.desktop.locate(id).is_some()
+    if not already and (not app_id.is_empty() or not title.is_empty()) and mapped {
         discard p.meta_rule_done.insert(id, true)
         if let Some(rule) = p.win_rules.get(id) {
             if p.desktop.apply_late_rule(id, rule.floating, rule.fullscreen, rule.maximized, rule.default_width, rule.monitor, rule.workspace) {
                 p.sync_focus()
             }
         }
+    }
+    if mapped {
+        p.broadcast_window_changed(id)
     }
     p.needs_layout = true
 }
@@ -141,6 +145,7 @@ pub fn on_window_meta[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composito
 pub fn on_request_maximize[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], w: lum.Window, on: bool) {
     let id = window_id(w)
     if p.desktop.set_maximized(id, on) {
+        p.broadcast_window_changed(id)
         p.needs_layout = true
     }
 }
@@ -148,13 +153,15 @@ pub fn on_request_maximize[O: lum.plug.Output, R: lum.plug.Renderer](mut p: comp
 /// Respect client `xdg_toplevel.set_fullscreen` / `unset_fullscreen`, including optional target output.
 pub fn on_request_fullscreen[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], w: lum.Window, target_out: Option[lum.Output], on: bool) {
     let id = window_id(w)
+    var moved = false
     if on {
         if let Some(so) = target_out {
-            discard p.desktop.move_window_to_monitor(id, outputs.output_id(so))
+            moved = p.desktop.move_window_to_monitor(id, outputs.output_id(so))
         }
     }
-    if p.desktop.set_fullscreen(id, on) {
+    if p.desktop.set_fullscreen(id, on) or moved {
         p.sync_focus()
+        p.broadcast_window_changed(id)
         p.needs_layout = true
     }
 }
@@ -177,6 +184,7 @@ pub fn on_moved[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Past
                 if dst_mi >= 0 and dst_mi != loc.monitor_idx {
                     if p.desktop.relocate_floating_to_monitor(id, dst_mi) {
                         p.sync_focus()
+                        p.broadcast_window_changed(id)
                     }
                 }
             }
@@ -195,6 +203,14 @@ pub fn on_resized[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pa
                     var copy = wa
                     copy.rect.snap(fi_rect)
                     discard p.anims.windows.insert(id, copy)
+                }
+                // `end_manipulation` already sent the final non-resizing configure for `(width, height)`,
+                // so sync `configured_sizes` to avoid a redundant 25ms blocking transaction on release.
+                let cw = i32(max(fi_rect.w.round(), 1.0))
+                let ch = i32(max(fi_rect.h.round(), 1.0))
+                if cw == width and ch == height {
+                    let focused = p.desktop.focused_window() == Some(id)
+                    discard p.configured_sizes.insert(id, (cw, ch, focused, false, true, false))
                 }
             }
             p.needs_layout = true

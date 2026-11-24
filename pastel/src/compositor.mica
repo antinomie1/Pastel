@@ -64,6 +64,7 @@ pub struct Pastel[O: lum.plug.Output, R: lum.plug.Renderer] {
     pub overlay_scale: f64 = 1.0
     pub anim_tick_img: Option[lum.Image] = None
     pub tick_flip: bool = false
+    pub last_anim_ns: int = 0
     pub targets_scratch: List[lay.TileTarget] = []
     pub overview_targets_scratch: List[lay.TileTarget] = []
     pub closing_scratch: List[ren.ClosingFrame] = []
@@ -238,6 +239,12 @@ pub fn Pastel[O, R].broadcast_event(mut self, kind: str, take detail: json.Value
     self.ipc_srv = Some(srv)
 }
 
+/// Notify IPC subscribers that a window's state (maximized, fullscreen, floating, tabbed,
+/// title/app_id, workspace, or monitor) changed so status bars refresh immediately.
+pub fn Pastel[O, R].broadcast_window_changed(mut self, id: u64) {
+    self.broadcast_event("window-changed", json.obj().with("id", json.Value.Int(int(id))))
+}
+
 /// Synchronize Wayland keyboard focus with `self.desktop.focused_window()`.
 pub fn Pastel[O, R].sync_focus(mut self) {
     let want = self.desktop.focused_window().unwrap_or(0)
@@ -309,6 +316,10 @@ pub fn Pastel[O, R].state_json(self) -> str {
 /// animations to `now_ns`, update the GPU `EffectSheet`, and commit `d.layout`.
 pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
     self.needs_layout = false
+    // Keep animation time monotonic so mid-frame `time.now_ns()` calls never
+    // step backwards relative to a prior `Frame(_, vblank_ns)` prediction.
+    let anim_ns = max(now_ns, self.last_anim_ns)
+    self.last_anim_ns = anim_ns
     outputs.sync_vrr_on_demand(mut self)
     var targets = mem.replace(mut self.targets_scratch, [])
     self.desktop.compute_all(mut targets)
@@ -317,23 +328,29 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
     let fallback_rule = self.cfg.resolve_window("", "")
 
     // 1. Update animation targets and send configures only for windows whose size/state changed.
-    var any_configure = false
+    // Open a brief layout transaction only for geometry/state transitions while idle so
+    // focus-only changes and ongoing animations never stall behind a configure wait.
+    var any_size_txn = false
     for i in 0..targets.len() {
         let t = targets[i]
         let rule = match self.win_rules.get(t.id) {
             Some(r) => r
             None => fallback_rule.clone()
         }
-        self.anims.update_window(t.id, t.rect, rule.opacity, t.focused, ac, wc, now_ns)
+        self.anims.update_window(t.id, t.rect, rule.opacity, t.focused, ac, wc, anim_ns)
         if let Some(w) = self.win_by_id.get(t.id) {
             let cw = i32(max(t.rect.w.round(), 1.0))
             let ch = i32(max(t.rect.h.round(), 1.0))
             let want = (cw, ch, t.focused, t.fullscreen, t.floating, t.maximized)
             let prev = self.configured_sizes.get(t.id)
             if prev != Some(want) {
-                if not any_configure {
+                let geom_changed = match prev {
+                    Some((pw, ph, _, pfs, _, pmax)) => pw != cw or ph != ch or pfs != t.fullscreen or pmax != t.maximized
+                    None => false
+                }
+                if geom_changed and not any_size_txn and not self.anims.is_active() {
                     self.d.begin()
-                    any_configure = true
+                    any_size_txn = true
                 }
                 let tiled = not t.floating and not t.fullscreen
                 let st = lum.States {
@@ -351,9 +368,9 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
         }
     }
 
-    // 2. Tick animations to `now_ns` and build placement + per-output visual effect lists.
+    // 2. Tick animations to `anim_ns` and build placement + per-output visual effect lists.
     self.anims.begin_frame()
-    let ov_t = self.anims.tick_overview(now_ns)
+    let ov_t = self.anims.tick_overview(anim_ns)
     var ov_targets = mem.replace(mut self.overview_targets_scratch, [])
     var ov_bands = mem.replace(mut self.overview_bands, [])
     ov_targets.clear()
@@ -418,7 +435,7 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
     var ws_off_y = mem.replace(mut self.ws_off_scratch, [])
     ws_off_y.clear()
     for mi in 0..self.desktop.monitors.len() {
-        ws_off_y.push(self.anims.tick_output_y(self.desktop.monitors[mi].id, now_ns))
+        ws_off_y.push(self.anims.tick_output_y(self.desktop.monitors[mi].id, anim_ns))
     }
 
     for i in 0..targets.len() {
@@ -430,7 +447,7 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
             Some(r) => r
             None => fallback_rule.clone()
         }
-        let ticked = self.anims.tick_window(t.id, now_ns)
+        let ticked = self.anims.tick_window(t.id, anim_ns)
         var r = t.rect
         var open_sc: f32 = 1.0
         var op = rule.opacity
@@ -441,7 +458,7 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
             op = aop
             bc = abc
         }
-        let bell_a = self.anims.bell_alpha(t.id, now_ns)
+        let bell_a = self.anims.bell_alpha(t.id, anim_ns)
         if bell_a > 0.001 {
             bc = bc.lerp(core.Color.rgb(1.0, 1.0, 1.0), bell_a * 0.75)
         }
@@ -595,7 +612,7 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
 
     // 2b. Closing-window fade+scale ghost animations (`[animation].window-close`).
     var closing_frames = mem.replace(mut self.closing_scratch, [])
-    self.anims.tick_closing(now_ns, mut closing_frames)
+    self.anims.tick_closing(anim_ns, mut closing_frames)
     let close_fill = core.Color.rgba(self.cfg.background.r, self.cfg.background.g, self.cfg.background.b, 0.35).as_vec4()
     for cf in closing_frames {
         let sx = cf.rect.x + cf.rect.w * (1.0 - f64(cf.scale)) * 0.5
@@ -628,28 +645,37 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
     self.closing_scratch = closing_frames
 
     // 3. Hotkey overlay placement & visually unified effect (inherits [window] & [overlay] styling).
-    let (ov_alpha, ov_slide) = self.anims.tick_overlay(now_ns)
+    let (ov_alpha, ov_slide) = self.anims.tick_overlay(anim_ns)
     let ov_eff_alpha = ov_alpha * self.cfg.overlay.opacity
     var show_ov = false
     var ov_x = 0.0
     var ov_y = 0.0
+    var ov_w = self.overlay_w
+    var ov_h = self.overlay_h
     if ov_eff_alpha > 0.005 {
         if let Some(ov_img) = self.overlay_img {
             if not self.desktop.monitors.is_empty() {
                 let u = self.desktop.monitors[self.desktop.active_monitor].usable_rect
-                ov_x = u.x + (u.w - self.overlay_w) * 0.5
-                ov_y = u.y + (u.h - self.overlay_h) * 0.5 + ov_slide
+                let max_w = max(u.w - 24.0, 120.0)
+                let max_h = max(u.h - 24.0, 120.0)
+                if ov_w > 0.0 and ov_h > 0.0 {
+                    let fit = min(1.0, min(max_w / ov_w, max_h / ov_h))
+                    ov_w *= fit
+                    ov_h *= fit
+                }
+                ov_x = u.x + (u.w - ov_w) * 0.5
+                ov_y = max(u.y + (u.h - ov_h) * 0.5 + ov_slide, u.y + 8.0)
                 show_ov = true
                 let ok = ikey(ov_img)
                 for oi in 0..out_rects.len() {
                     let (ox, oy, ow, oh, scale, _) = out_rects[oi]
-                    if ov_x < ox + ow and ov_y < oy + oh and ov_x + self.overlay_w > ox and ov_y + self.overlay_h > oy {
+                    if ov_x < ox + ow and ov_y < oy + oh and ov_x + ov_w > ox and ov_y + ov_h > oy {
                         out_effects[oi].push(ren.WindowEffect {
                             key: ok,
                             x: f32(((ov_x - ox) * scale).round()),
                             y: f32(((ov_y - oy) * scale).round()),
-                            w: f32((self.overlay_w * scale).round()),
-                            h: f32((self.overlay_h * scale).round()),
+                            w: f32((ov_w * scale).round()),
+                            h: f32((ov_h * scale).round()),
                             radius: wc.corner_radius * f32(scale),
                             border_width: wc.border_width * f32(scale),
                             border_color: wc.active_color.as_vec4(),
@@ -685,8 +711,6 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
     let tick_x = if self.tick_flip { -10000.0 } else { -10001.0 }
     let tick_img = self.anim_tick_img
     let ov_img_opt = self.overlay_img
-    let ov_w = self.overlay_w
-    let ov_h = self.overlay_h
     let ov_rad = wc.corner_radius
     let ov_shd = wc.shadow_size
     self.d.layout(fn(mut l) {
@@ -709,8 +733,8 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
             }
         }
     })
-    if any_configure {
-        self.d.end(60)
+    if any_size_txn {
+        self.d.end(25)
     }
     self.targets_scratch = targets
     self.overview_targets_scratch = ov_targets

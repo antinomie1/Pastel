@@ -387,3 +387,79 @@ test "PastelRenderer HDR10 target, TabBar pills, OverviewFrame, and AnimState ov
     }
     r.close()
 }
+
+test "CSD window border hugs Placement.geometry instead of outer shadow buffer and skips redundant live blur" {
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(rr) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped: no Vulkan device")
+        return
+    }
+    var r = rr
+    r.add_output(0, 200, 200, vec4(0.0, 0.0, 0.0, 1.0))
+    let ts = r.targets(types.Want { width: 200, height: 200, format: types.buffer.xrgb8888, count: 1, export: false }).expect("target")
+    let tkey = ts[0].key
+
+    // Simulate a 120x120 ARGB CSD surface (at 20,20) with a 20px transparent drop-shadow ring
+    // and an opaque 80x80 visible window geometry at output pixels (40,40..120,120).
+    var px: List[u8] = []
+    for y in 0..120 {
+        for x in 0..120 {
+            let inside = x >= 20 and x < 100 and y >= 20 and y < 100
+            if inside {
+                px.push(40)
+                px.push(40)
+                px.push(180)
+                px.push(255)
+            } else {
+                px.push(0)
+                px.push(0)
+                px.push(0)
+                px.push(0)
+            }
+        }
+    }
+    let wkey: u64 = 77
+    assert(r.image(wkey, 120, 120, types.buffer.abgr8888, px, 120 * 4))
+    sheet.set_output(0, core.Color.rgb(0.0, 0.0, 0.0), ren.BlurSettings { enabled: true, xray: false, passes: 2, offset: 2.0 }, [
+        ren.WindowEffect {
+            key: wkey,
+            x: 40.0,
+            y: 40.0,
+            w: 80.0,
+            h: 80.0,
+            border_width: 4.0,
+            border_color: vec4(0.0, 1.0, 0.0, 1.0),
+            shadow_size: 0.0,
+            blur: true,
+            blur_xray: false,
+            blur_opacity: 1.0,
+            is_overlay: true,
+        },
+    ])
+    r.layout(0, [
+        types.Placement {
+            key: wkey,
+            tex: wkey,
+            x: 20.0,
+            y: 20.0,
+            w: 120.0,
+            h: 120.0,
+            geometry: types.Rect { x: 40.0, y: 40.0, w: 80.0, h: 80.0 },
+            opaque: types.Rect { x: 20.0, y: 20.0, w: 80.0, h: 80.0 },
+            opacity: 1.0,
+        },
+    ])
+    assert(r.render(0, tkey, 0).expect("render csd").is_some())
+    let fb = r.read(tkey).expect("read csd")
+    // Pixel right outside visible geometry at (38, 80) MUST be the green border (BGRA: G > 200).
+    let on_geom_border = (80 * 200 + 38) * 4
+    assert(fb[on_geom_border + 1] > 200)
+    // Pixel right outside the outer shadow buffer at (18, 80) MUST stay pure black background (NOT border).
+    let outside_buf = (80 * 200 + 18) * 4
+    assert(fb[outside_buf] < 5 and fb[outside_buf + 1] < 5 and fb[outside_buf + 2] < 5)
+    // Pixel inside visible window at (80, 80) has the window's content (ABGR [R=40,G=40,B=180] -> BGRA B=180).
+    let inside_win = (80 * 200 + 80) * 4
+    assert(fb[inside_win] > 140)
+    r.drop_target(tkey)
+    r.close()
+}
