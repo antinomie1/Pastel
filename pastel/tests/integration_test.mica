@@ -12,6 +12,8 @@ import luminaria_wire as wire
 import luminaria_proto as proto
 import luminaria_proto.wayland as wl
 import luminaria_proto.xdg_shell as xdg
+import luminaria_proto.xdg_dialog as xdialog
+import luminaria_proto.xdg_foreign_unstable as xforeign
 import luminaria_proto.ext_session_lock as slock
 import luminaria_proto.color_management as cm
 import luminaria_proto.wlr_gamma_control_unstable as gamma
@@ -25,6 +27,8 @@ struct ClientFx {
     c: wire.Conn
     reg: wl.Registry = wl.Registry { id: 0 }
     globals: List[(u32, u16)] = []
+    configures: List[(u32, i32, i32)] = []
+    exported_handles: List[str] = []
 }
 
 fn pump[O: lum.plug.Output, R: lum.plug.Renderer](mut p: pastel.compositor.Pastel[O, R], mut fx: ClientFx, ms: int) {
@@ -43,7 +47,9 @@ fn pump[O: lum.plug.Output, R: lum.plug.Renderer](mut p: pastel.compositor.Paste
                 Ok(Some(ev)) => {
                     match ev {
                         WlRegistry(_, Global(n, i, _)) => fx.globals.push((n, proto.ifaces.by_name(i)))
+                        XdgToplevel(tl, Configure(w, h, _)) => fx.configures.push((tl.id, w, h))
                         XdgSurface(xs, Configure(serial)) => xs.ack_configure(mut fx.c, serial)
+                        ZxdgExported(_, Handle(h)) => fx.exported_handles.push(h.clone())
                         _ => {}
                     }
                 }
@@ -373,4 +379,273 @@ test "end-to-end lock-screen guard, DPMS wake, Overview, tabbed columns, HDR, on
     lock_obj.unlock_and_destroy(mut fx.c)
     pump(mut p, mut fx, 40)
     assert(not p.d.locked())
+}
+
+test "tiled windows receive (0, 0) before map and exact column size on map" {
+    let dir = fs.create_temp_dir("pastel-e2e-tile-cfg").expect("temp dir")
+    discard env.set("XDG_RUNTIME_DIR", dir)
+
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(comp_ren) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped: no Vulkan device")
+        return
+    }
+    let mode = lum.Mode { width: 1920, height: 1080, refresh_mhz: 60000 }
+    let opts = lum.Options { backend: lum.Kind.Headless, headless: [mode], title: "Pastel-TileCfg-Test" }
+    let be = lum.backend.Backend.open(lum.backend.Options { kind: lum.Kind.Headless, headless: [mode] }).expect("headless")
+    let disp = lum.display.Display.with(opts, be, comp_ren).expect("display")
+
+    let config = cfg.from_toml("").expect("default config")
+    var p = pastel.compositor.Pastel.new(disp, config, "", false, sheet)
+    defer p.shutdown()
+
+    let conn = wire.connect(p.d.socket()).expect("connect wayland")
+    var fx = ClientFx { c: conn }
+    let comp = wl.Compositor { id: bind_global(mut p, mut fx, wl.compositor_iface, 6) }
+    let shm = wl.Shm { id: bind_global(mut p, mut fx, wl.shm_iface, 1) }
+    let wm = xdg.WmBase { id: bind_global(mut p, mut fx, xdg.wm_base_iface, 2) }
+
+    // Initial configure before first buffer must be (0, 0) so clients that adjust
+    // min/max limits before mapping (e.g. SDL 3.4) receive a fresh post-map size.
+    let s = comp.create_surface(mut fx.c)
+    let xs = wm.get_xdg_surface(mut fx.c, s)
+    let tl = xs.get_toplevel(mut fx.c)
+    tl.set_app_id(mut fx.c, "com.mojang.minecraft")
+    tl.set_title(mut fx.c, "Minecraft")
+    s.commit(mut fx.c)
+    pump(mut p, mut fx, 30)
+    assert(not fx.configures.is_empty())
+    assert_eq(fx.configures[0], (tl.id, i32(0), i32(0)))
+
+    // Client sets min/max limits and maps at its default size (1280x800).
+    tl.set_min_size(mut fx.c, 320, 240)
+    tl.set_max_size(mut fx.c, 16384, 16384)
+    let fd1 = os.memfd("mc-init", 1280 * 800 * 4).expect("memfd")
+    let pool1 = shm.create_pool(mut fx.c, fd1, 1280 * 800 * 4)
+    os.close(fd1)
+    let buf1 = pool1.create_buffer(mut fx.c, 0, 1280, 800, 1280 * 4, wl.ShmFormat.Argb8888)
+    s.attach(mut fx.c, Some(buf1), 0, 0)
+    s.commit(mut fx.c)
+    pump(mut p, mut fx, 40)
+
+    // After map, Pastel must configure the exact 50% column size (942x1056 at 1920x1080, gap=12).
+    assert(fx.configures.len() >= 2)
+    let last = fx.configures[fx.configures.len() - 1]
+    assert_eq(last, (tl.id, i32(942), i32(1056)))
+}
+
+test "fixed-size dialogs, async xdg-foreign parents, late xdg-dialog modals, and explicit floating=false rules" {
+    let dir = fs.create_temp_dir("pastel-e2e-dialogs").expect("temp dir")
+    discard env.set("XDG_RUNTIME_DIR", dir)
+
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(comp_ren) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped: no Vulkan device")
+        return
+    }
+    let mode = lum.Mode { width: 1920, height: 1080, refresh_mhz: 60000 }
+    let opts = lum.Options { backend: lum.Kind.Headless, headless: [mode], title: "Pastel-Dialog-Test" }
+    let be = lum.backend.Backend.open(lum.backend.Options { kind: lum.Kind.Headless, headless: [mode] }).expect("headless")
+    let disp = lum.display.Display.with(opts, be, comp_ren).expect("display")
+
+    let cfg_text = """
+    [[window-rule]]
+    app-id = "force-tiled-dialog"
+    floating = false
+    """
+    let config = cfg.from_toml(cfg_text).expect("dialog test config")
+    var p = pastel.compositor.Pastel.new(disp, config, "", false, sheet)
+    defer p.shutdown()
+
+    let conn = wire.connect(p.d.socket()).expect("connect wayland")
+    var fx = ClientFx { c: conn }
+    let comp = wl.Compositor { id: bind_global(mut p, mut fx, wl.compositor_iface, 6) }
+    let shm = wl.Shm { id: bind_global(mut p, mut fx, wl.shm_iface, 1) }
+    let wm = xdg.WmBase { id: bind_global(mut p, mut fx, xdg.wm_base_iface, 2) }
+    let exporter = xforeign.Exporter { id: bind_global(mut p, mut fx, xforeign.exporter_iface, 1) }
+    let importer = xforeign.Importer { id: bind_global(mut p, mut fx, xforeign.importer_iface, 1) }
+    let wm_dialog = xdialog.WmDialog { id: bind_global(mut p, mut fx, xdialog.wm_dialog_iface, 1) }
+
+    // 1. Main VS Code window maps tiled as column 0.
+    let s_main = comp.create_surface(mut fx.c)
+    let xs_main = wm.get_xdg_surface(mut fx.c, s_main)
+    let tl_main = xs_main.get_toplevel(mut fx.c)
+    tl_main.set_app_id(mut fx.c, "code-oss")
+    tl_main.set_title(mut fx.c, "Visual Studio Code")
+    tl_main.set_min_size(mut fx.c, 1, 1)
+    tl_main.set_max_size(mut fx.c, 2147483647, 2147483647)
+    s_main.commit(mut fx.c)
+    pump(mut p, mut fx, 30)
+    let fd_m = os.memfd("main", 800 * 600 * 4).expect("memfd")
+    let pool_m = shm.create_pool(mut fx.c, fd_m, 800 * 600 * 4)
+    os.close(fd_m)
+    let buf_m = pool_m.create_buffer(mut fx.c, 0, 800, 600, 800 * 4, wl.ShmFormat.Argb8888)
+    s_main.attach(mut fx.c, Some(buf_m), 0, 0)
+    s_main.commit(mut fx.c)
+    pump(mut p, mut fx, 40)
+    let main_id = p.desktop.focused_window().unwrap()
+    assert(not p.desktop.locate(main_id).unwrap().floating)
+    assert_eq(p.desktop.monitors[0].workspaces[0].strip.columns.len(), 1)
+
+    // 2. Electron/GTK3 "Save changes?" pattern: no parent or size hints at initial commit,
+    //    then min_size == max_size == (531, 160) on the first buffer commit -> must float immediately!
+    let s_save = comp.create_surface(mut fx.c)
+    let xs_save = wm.get_xdg_surface(mut fx.c, s_save)
+    let tl_save = xs_save.get_toplevel(mut fx.c)
+    tl_save.set_app_id(mut fx.c, "code-oss")
+    tl_save.set_title(mut fx.c, "Visual Studio Code")
+    s_save.commit(mut fx.c)
+    pump(mut p, mut fx, 30)
+    tl_save.set_min_size(mut fx.c, 531, 160)
+    tl_save.set_max_size(mut fx.c, 531, 160)
+    let fd_s = os.memfd("save-dlg", 531 * 160 * 4).expect("memfd")
+    let pool_s = shm.create_pool(mut fx.c, fd_s, 531 * 160 * 4)
+    os.close(fd_s)
+    let buf_s = pool_s.create_buffer(mut fx.c, 0, 531, 160, 531 * 4, wl.ShmFormat.Argb8888)
+    s_save.attach(mut fx.c, Some(buf_s), 0, 0)
+    s_save.commit(mut fx.c)
+    pump(mut p, mut fx, 40)
+    let save_id = p.desktop.focused_window().unwrap()
+    assert(save_id != main_id)
+    assert(p.desktop.locate(save_id).unwrap().floating)
+    assert_eq(p.desktop.monitors[0].workspaces[0].strip.columns.len(), 1)
+    assert_eq(p.desktop.monitors[0].workspaces[0].floating.len(), 1)
+    assert_eq(p.desktop.monitors[0].workspaces[0].floating[0].rect.w, 531.0)
+    assert_eq(p.desktop.monitors[0].workspaces[0].floating[0].rect.h, 160.0)
+    tl_save.destroy(mut fx.c)
+    xs_save.destroy(mut fx.c)
+    s_save.destroy(mut fx.c)
+    pump(mut p, mut fx, 40)
+    assert_eq(p.desktop.focused_window(), Some(main_id))
+
+    // 3. Resizable file dialog whose xdg-foreign `set_parent_of` arrives AFTER initial map:
+    //    must be promoted from tiled to floating at its natural 700x480 size and restore focus on close.
+    let s_file = comp.create_surface(mut fx.c)
+    let xs_file = wm.get_xdg_surface(mut fx.c, s_file)
+    let tl_file = xs_file.get_toplevel(mut fx.c)
+    tl_file.set_app_id(mut fx.c, "xdg-desktop-portal-gtk")
+    tl_file.set_title(mut fx.c, "Save File")
+    tl_file.set_min_size(mut fx.c, 320, 240)
+    s_file.commit(mut fx.c)
+    pump(mut p, mut fx, 30)
+    let fd_f = os.memfd("file-dlg", 700 * 480 * 4).expect("memfd")
+    let pool_f = shm.create_pool(mut fx.c, fd_f, 700 * 480 * 4)
+    os.close(fd_f)
+    let buf_f = pool_f.create_buffer(mut fx.c, 0, 700, 480, 700 * 4, wl.ShmFormat.Argb8888)
+    s_file.attach(mut fx.c, Some(buf_f), 0, 0)
+    s_file.commit(mut fx.c)
+    pump(mut p, mut fx, 40)
+    let file_id = p.desktop.focused_window().unwrap()
+    assert(not p.desktop.locate(file_id).unwrap().floating)
+    assert_eq(p.desktop.monitors[0].workspaces[0].strip.columns.len(), 2)
+
+    // Asynchronous xdg-foreign parent assignment arrives after map.
+    let exp = exporter.export_toplevel(mut fx.c, s_main)
+    pump(mut p, mut fx, 30)
+    assert(not fx.exported_handles.is_empty())
+    let handle = fx.exported_handles[fx.exported_handles.len() - 1].clone()
+    let imp = importer.import_toplevel(mut fx.c, handle)
+    imp.set_parent_of(mut fx.c, s_file)
+    pump(mut p, mut fx, 40)
+
+    assert(p.desktop.locate(file_id).unwrap().floating)
+    assert_eq(p.desktop.monitors[0].workspaces[0].strip.columns.len(), 1)
+    assert_eq(p.desktop.monitors[0].workspaces[0].floating.len(), 1)
+    assert_eq(p.desktop.monitors[0].workspaces[0].floating[0].rect.w, 700.0)
+    assert_eq(p.desktop.monitors[0].workspaces[0].floating[0].rect.h, 480.0)
+    assert_eq(p.desktop.focused_window(), Some(file_id))
+
+    // User manually toggling back to tiled must NOT be overridden by another parent/modal event.
+    pastel.input.dispatch_action(mut p, cfg.Action.ToggleFloating).expect("tile override")
+    assert(not p.desktop.locate(file_id).unwrap().floating)
+    let dlg_obj = wm_dialog.get_xdg_dialog(mut fx.c, tl_file)
+    dlg_obj.set_modal(mut fx.c)
+    pump(mut p, mut fx, 30)
+    assert(not p.desktop.locate(file_id).unwrap().floating)
+    dlg_obj.destroy(mut fx.c)
+    imp.destroy(mut fx.c)
+    exp.destroy(mut fx.c)
+    tl_file.destroy(mut fx.c)
+    xs_file.destroy(mut fx.c)
+    s_file.destroy(mut fx.c)
+    pump(mut p, mut fx, 40)
+    assert_eq(p.desktop.focused_window(), Some(main_id))
+
+    // 4. Late xdg-dialog `set_modal` after map promotes a resizable dialog to floating.
+    let s_mod = comp.create_surface(mut fx.c)
+    let xs_mod = wm.get_xdg_surface(mut fx.c, s_mod)
+    let tl_mod = xs_mod.get_toplevel(mut fx.c)
+    tl_mod.set_app_id(mut fx.c, "app")
+    tl_mod.set_title(mut fx.c, "Confirm")
+    s_mod.commit(mut fx.c)
+    pump(mut p, mut fx, 30)
+    let fd_md = os.memfd("mod-dlg", 460 * 220 * 4).expect("memfd")
+    let pool_md = shm.create_pool(mut fx.c, fd_md, 460 * 220 * 4)
+    os.close(fd_md)
+    let buf_md = pool_md.create_buffer(mut fx.c, 0, 460, 220, 460 * 4, wl.ShmFormat.Argb8888)
+    s_mod.attach(mut fx.c, Some(buf_md), 0, 0)
+    s_mod.commit(mut fx.c)
+    pump(mut p, mut fx, 40)
+    let mod_id = p.desktop.focused_window().unwrap()
+    assert(not p.desktop.locate(mod_id).unwrap().floating)
+    let d_mod = wm_dialog.get_xdg_dialog(mut fx.c, tl_mod)
+    d_mod.set_modal(mut fx.c)
+    pump(mut p, mut fx, 40)
+    assert(p.desktop.locate(mod_id).unwrap().floating)
+    assert_eq(p.desktop.monitors[0].workspaces[0].floating[0].rect.w, 460.0)
+    assert_eq(p.desktop.monitors[0].workspaces[0].floating[0].rect.h, 220.0)
+    d_mod.destroy(mut fx.c)
+    tl_mod.destroy(mut fx.c)
+    xs_mod.destroy(mut fx.c)
+    s_mod.destroy(mut fx.c)
+    pump(mut p, mut fx, 40)
+
+    // 5. Late fixed-size hints committed after initial map promote to floating via post-map check.
+    let s_lf = comp.create_surface(mut fx.c)
+    let xs_lf = wm.get_xdg_surface(mut fx.c, s_lf)
+    let tl_lf = xs_lf.get_toplevel(mut fx.c)
+    tl_lf.set_app_id(mut fx.c, "late-fixed")
+    tl_lf.set_title(mut fx.c, "Splash")
+    s_lf.commit(mut fx.c)
+    pump(mut p, mut fx, 30)
+    let fd_lf = os.memfd("lf-dlg", 420 * 180 * 4).expect("memfd")
+    let pool_lf = shm.create_pool(mut fx.c, fd_lf, 420 * 180 * 4)
+    os.close(fd_lf)
+    let buf_lf = pool_lf.create_buffer(mut fx.c, 0, 420, 180, 420 * 4, wl.ShmFormat.Argb8888)
+    s_lf.attach(mut fx.c, Some(buf_lf), 0, 0)
+    s_lf.commit(mut fx.c)
+    pump(mut p, mut fx, 40)
+    let lf_id = p.desktop.focused_window().unwrap()
+    assert(not p.desktop.locate(lf_id).unwrap().floating)
+    tl_lf.set_min_size(mut fx.c, 420, 180)
+    tl_lf.set_max_size(mut fx.c, 420, 180)
+    s_lf.commit(mut fx.c)
+    pump(mut p, mut fx, 60)
+    assert(p.desktop.locate(lf_id).unwrap().floating)
+    assert_eq(p.desktop.monitors[0].workspaces[0].floating[0].rect.w, 420.0)
+    assert_eq(p.desktop.monitors[0].workspaces[0].floating[0].rect.h, 180.0)
+    tl_lf.destroy(mut fx.c)
+    xs_lf.destroy(mut fx.c)
+    s_lf.destroy(mut fx.c)
+    pump(mut p, mut fx, 40)
+
+    // 6. Explicit `floating = false` window rule still overrides auto-floating for fixed-size dialogs.
+    let s_ov = comp.create_surface(mut fx.c)
+    let xs_ov = wm.get_xdg_surface(mut fx.c, s_ov)
+    let tl_ov = xs_ov.get_toplevel(mut fx.c)
+    tl_ov.set_app_id(mut fx.c, "force-tiled-dialog")
+    tl_ov.set_title(mut fx.c, "Forced Tile")
+    tl_ov.set_min_size(mut fx.c, 400, 200)
+    tl_ov.set_max_size(mut fx.c, 400, 200)
+    s_ov.commit(mut fx.c)
+    pump(mut p, mut fx, 30)
+    let fd_ov = os.memfd("ov-dlg", 400 * 200 * 4).expect("memfd")
+    let pool_ov = shm.create_pool(mut fx.c, fd_ov, 400 * 200 * 4)
+    os.close(fd_ov)
+    let buf_ov = pool_ov.create_buffer(mut fx.c, 0, 400, 200, 400 * 4, wl.ShmFormat.Argb8888)
+    s_ov.attach(mut fx.c, Some(buf_ov), 0, 0)
+    s_ov.commit(mut fx.c)
+    pump(mut p, mut fx, 40)
+    let ov_id = p.desktop.focused_window().unwrap()
+    assert(not p.desktop.locate(ov_id).unwrap().floating)
 }

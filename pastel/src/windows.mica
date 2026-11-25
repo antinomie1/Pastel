@@ -5,12 +5,73 @@ import std.mem
 import std.time
 import luminaria as lum
 import pastel_core as core
-import pastel_layout as lay
+import pastel_config as cfg
 import compositor
 import outputs
 
+let late_fixed_window_ns: int = 1000000000
+
 pub fn window_id(w: lum.Window) -> u64 {
     return (u64(w.id.index) << 32) | u64(w.id.gen)
+}
+
+/// True when `xdg_toplevel` size hints constrain at least one axis to a fixed non-zero size
+/// (standard Wayland heuristic for non-resizable dialogs, prompts, and splash windows).
+pub fn is_fixed_size(min_w: i32, min_h: i32, max_w: i32, max_h: i32) -> bool {
+    let fixed_w = min_w > 0 and max_w > 0 and min_w == max_w
+    let fixed_h = min_h > 0 and max_h > 0 and min_h == max_h
+    return fixed_w or fixed_h
+}
+
+fn should_auto_float[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R], w: lum.Window) -> bool {
+    if p.d.parent(w).is_some() or p.d.modal(w) {
+        return true
+    }
+    let (min_w, min_h, max_w, max_h) = p.d.size_hints(w)
+    return is_fixed_size(min_w, min_h, max_w, max_h)
+}
+
+fn clamp_hint(val: f64, lo: i32, hi: i32) -> f64 {
+    var out = val
+    if lo > 0 and out > 0.0 and out < f64(lo) {
+        out = f64(lo)
+    }
+    if hi > 0 and (lo <= 0 or hi >= lo) and out > f64(hi) {
+        out = f64(hi)
+    }
+    if lo > 0 and hi > 0 and lo == hi {
+        out = f64(lo)
+    }
+    return out
+}
+
+fn preferred_floating_size[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R], w: lum.Window, id: u64, rule: cfg.ResolvedWindow) -> (f64, f64) {
+    let (cur_w, cur_h) = p.d.size(w)
+    let (base_w, base_h) = match p.initial_sizes.get(id) {
+        Some((iw, ih)) => if iw > 0 and ih > 0 { (iw, ih) } else { (cur_w, cur_h) }
+        None => (cur_w, cur_h)
+    }
+    let (min_w, min_h, max_w, max_h) = p.d.size_hints(w)
+    let nat_w = clamp_hint(f64(base_w), min_w, max_w)
+    let nat_h = clamp_hint(f64(base_h), min_h, max_h)
+    return (rule.default_floating_w.unwrap_or(nat_w), rule.default_floating_h.unwrap_or(nat_h))
+}
+
+fn drop_pending_fixed[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], id: u64) {
+    var i = 0
+    while i < p.pending_fixed_check.len() {
+        if p.pending_fixed_check[i].0 == id {
+            discard p.pending_fixed_check.remove(i)
+        } else {
+            i += 1
+        }
+    }
+}
+
+/// Record that the user explicitly toggled floating on `id`, so late dialog heuristics do not override it.
+pub fn mark_float_override[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], id: u64) {
+    discard p.auto_float_done.insert(id, true)
+    drop_pending_fixed(mut p, id)
 }
 
 /// Resolve rules for `w` and cache them by window id.
@@ -21,6 +82,11 @@ pub fn resolve_rules[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor
 }
 
 /// New unmapped window: request server-side borders and send an initial configure.
+/// Tiled windows receive `(0, 0)` with tiled states before mapping (matching
+/// sway/wlroots) and get their exact layout size in `sync_layout` once mapped:
+/// rules/fullscreen/maximize are only finalized at map, and toolkits that adjust
+/// min/max hints between initial configure and first buffer (e.g. SDL 3.4)
+/// otherwise reset to their floating size and ignore an identical post-map configure.
 pub fn on_window_new[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], w: lum.Window) {
     let id = window_id(w)
     discard p.win_by_id.insert(id, w)
@@ -29,7 +95,7 @@ pub fn on_window_new[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor
     // Prefer server-side decorations (Pastel's GPU SDF hollow border) unless client insists on CSD.
     p.d.decorate(w, true)
     let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
-    let is_dialog = p.d.parent(w).is_some() or p.d.modal(w)
+    let is_dialog = should_auto_float(p, w)
     // A window torn off by a drag (xdg-toplevel-drag) floats under the pointer.
     let float = rule.floating.unwrap_or(is_dialog) or p.d.dragged(w)
     if float or p.desktop.monitors.is_empty() {
@@ -37,12 +103,8 @@ pub fn on_window_new[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor
         let fh = i32(rule.default_floating_h.unwrap_or(0.0).round())
         discard p.d.configure(w, fw, fh, lum.States { activated: rule.open_focused })
     } else {
-        let named_mi = p.desktop.find_monitor_by_name(rule.monitor)
-        let mi = if named_mi >= 0 { named_mi } else { p.desktop.active_monitor }
-        let u = p.desktop.monitors[mi].usable_rect
-        let cw = i32(lay.column.width_for_frac(u.w, p.desktop.gap, rule.default_width))
-        let ch = i32(max((u.h - p.desktop.gap * 2.0).floor(), 128.0))
-        discard p.d.configure(w, cw, ch, lum.States { activated: rule.open_focused, tiled_left: true, tiled_right: true, tiled_top: true, tiled_bottom: true })
+        discard p.d.configure(w, 0, 0, lum.States { activated: rule.open_focused, tiled_left: true, tiled_right: true, tiled_top: true, tiled_bottom: true })
+        discard p.configured_sizes.insert(id, (0, 0, rule.open_focused, false, false, false))
     }
 }
 
@@ -59,13 +121,34 @@ pub fn on_window_mapped[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composi
     let app_id = p.d.app_id(w)
     let title = p.d.title(w)
     discard p.meta_rule_done.insert(id, not app_id.is_empty() or not title.is_empty())
-    let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
-    let is_dialog = p.d.parent(w).is_some() or p.d.modal(w)
-    let float = rule.floating.unwrap_or(is_dialog) or p.d.dragged(w)
     let (nw, nh) = p.d.size(w)
-    let eff_nw = rule.default_floating_w.unwrap_or(f64(nw))
-    let eff_nh = rule.default_floating_h.unwrap_or(f64(nh))
-    p.desktop.add_window_full(id, float, rule.default_width, eff_nw, eff_nh, rule.monitor, rule.workspace, rule.open_focused)
+    if nw > 0 and nh > 0 {
+        discard p.initial_sizes.insert(id, (nw, nh))
+    }
+    let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
+    let is_dialog = should_auto_float(p, w)
+    let float = rule.floating.unwrap_or(is_dialog) or p.d.dragged(w)
+    let now = time.now_ns()
+    if float or rule.floating.is_some() {
+        discard p.auto_float_done.insert(id, true)
+        drop_pending_fixed(mut p, id)
+    } else {
+        p.pending_fixed_check.push((id, now))
+    }
+    let (eff_nw, eff_nh) = preferred_floating_size(p, w, id, rule.clone())
+    var target_monitor = rule.monitor.clone()
+    var target_ws = rule.workspace
+    if float and target_monitor.is_empty() and target_ws.is_none() {
+        if let Some(pw) = p.d.parent(w) {
+            if let Some(ploc) = p.desktop.locate(window_id(pw)) {
+                if ploc.monitor_idx >= 0 and ploc.monitor_idx < p.desktop.monitors.len() {
+                    target_monitor = p.desktop.monitors[ploc.monitor_idx].name.clone()
+                    target_ws = Some(ploc.workspace_idx + 1)
+                }
+            }
+        }
+    }
+    p.desktop.add_window_full(id, float, rule.default_width, eff_nw, eff_nh, target_monitor, target_ws, rule.open_focused)
     if let Some(want_max) = rule.maximized {
         discard p.desktop.set_maximized(id, want_max)
     }
@@ -76,7 +159,6 @@ pub fn on_window_mapped[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composi
     // Precompute target rect so the open animation starts in place with subtle scale + fade.
     var targets = mem.replace(mut p.targets_scratch, [])
     p.desktop.compute_all(mut targets)
-    let now = time.now_ns()
     let ac = p.cfg.animation
     let wc = p.cfg.window
     for t in targets {
@@ -91,11 +173,127 @@ pub fn on_window_mapped[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composi
     p.sync_focus()
 }
 
+fn promote_to_floating[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], w: lum.Window, id: u64, rule: cfg.ResolvedWindow) {
+    discard p.auto_float_done.insert(id, true)
+    drop_pending_fixed(mut p, id)
+    let (eff_nw, eff_nh) = preferred_floating_size(p, w, id, rule.clone())
+    let parent_id = p.d.parent(w).map(fn(pw) => window_id(pw))
+    guard p.desktop.set_floating_sized(id, true, eff_nw, eff_nh, parent_id) else {
+        return
+    }
+    // Start the open animation in place at the centered floating rect rather than
+    // shrinking across the workspace from a temporary tiled column.
+    var targets = mem.replace(mut p.targets_scratch, [])
+    p.desktop.compute_all(mut targets)
+    let now = time.now_ns()
+    let ac = p.cfg.animation
+    let wc = p.cfg.window
+    for t in targets {
+        if t.id == id {
+            p.anims.open_window(id, t.rect, rule.opacity, t.focused, ac, wc, now)
+            break
+        }
+    }
+    p.targets_scratch = targets
+    p.broadcast_window_changed(id)
+    p.sync_focus()
+    p.needs_layout = true
+}
+
+/// Parent or modal state changed (`xdg_toplevel.set_parent`, `xdg-foreign` `set_parent_of`,
+/// or `xdg-dialog` `set_modal`). Handles asynchronous parent/modal assignment both before
+/// first buffer map and after map (e.g. Electron GTK dialogs and xdg-desktop-portal dialogs).
+pub fn on_window_parent[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], w: lum.Window) {
+    let id = window_id(w)
+    guard p.win_by_id.get(id).is_some() else {
+        return
+    }
+    let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
+    let want_float = rule.floating.unwrap_or(should_auto_float(p, w)) or p.d.dragged(w)
+    guard let Some(loc) = p.desktop.locate(id) else {
+        if want_float {
+            let fw = i32(rule.default_floating_w.unwrap_or(0.0).round())
+            let fh = i32(rule.default_floating_h.unwrap_or(0.0).round())
+            discard p.d.configure(w, fw, fh, lum.States { activated: rule.open_focused })
+            discard p.configured_sizes.remove(id)
+        }
+        return
+    }
+    guard not loc.floating and want_float and not p.auto_float_done.get(id).unwrap_or(false) else {
+        return
+    }
+    promote_to_floating(mut p, w, id, rule)
+}
+
+/// Client committed a resized buffer: trigger layout refresh and promote newly-mapped
+/// dialogs whose fixed min/max size constraints arrived after initial map.
+pub fn on_window_resized[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], w: lum.Window) {
+    let id = window_id(w)
+    if not p.auto_float_done.get(id).unwrap_or(false) {
+        if let Some(loc) = p.desktop.locate(id) {
+            if not loc.floating {
+                let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
+                if rule.floating.is_none() and should_auto_float(p, w) {
+                    promote_to_floating(mut p, w, id, rule)
+                    return
+                }
+            }
+        }
+    }
+    p.needs_layout = true
+}
+
+/// Check recently mapped tiled windows for fixed `min_size == max_size` constraints committed
+/// right after first buffer map (no-op with zero allocations once windows settle).
+pub fn check_late_auto_float[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], now_ns: int) {
+    guard not p.pending_fixed_check.is_empty() else {
+        return
+    }
+    var i = 0
+    while i < p.pending_fixed_check.len() {
+        let (id, mapped_ns) = p.pending_fixed_check[i]
+        guard not p.auto_float_done.get(id).unwrap_or(false) else {
+            discard p.pending_fixed_check.remove(i)
+            continue
+        }
+        guard let Some(w) = p.win_by_id.get(id) else {
+            discard p.pending_fixed_check.remove(i)
+            continue
+        }
+        guard let Some(loc) = p.desktop.locate(id) else {
+            discard p.pending_fixed_check.remove(i)
+            continue
+        }
+        if loc.floating {
+            discard p.pending_fixed_check.remove(i)
+            continue
+        }
+        let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
+        if rule.floating.is_some() {
+            discard p.auto_float_done.insert(id, true)
+            discard p.pending_fixed_check.remove(i)
+            continue
+        }
+        if should_auto_float(p, w) {
+            discard p.pending_fixed_check.remove(i)
+            promote_to_floating(mut p, w, id, rule)
+            continue
+        }
+        if now_ns - mapped_ns > late_fixed_window_ns {
+            discard p.pending_fixed_check.remove(i)
+            continue
+        }
+        i += 1
+    }
+}
+
 /// Window closed or unmapped: run `[animation].window-close`, remove from layout, and emit one IPC event.
 pub fn on_window_unmapped[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], w: lum.Window) {
     let id = window_id(w)
     let loc = p.desktop.locate(id)
     let was_managed = loc.is_some()
+    let was_focused = p.desktop.focused_window() == Some(id)
+    let parent_id = p.d.parent(w).map(fn(pw) => window_id(pw))
     if let Some(l) = loc {
         let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
         let is_fs = l.monitor_idx < p.desktop.monitors.len() and l.workspace_idx < p.desktop.monitors[l.monitor_idx].workspaces.len() and p.desktop.monitors[l.monitor_idx].workspaces[l.workspace_idx].fullscreen == Some(id)
@@ -109,9 +307,25 @@ pub fn on_window_unmapped[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compo
     let removed = p.desktop.remove_window(id)
     discard p.win_rules.remove(id)
     discard p.meta_rule_done.remove(id)
+    discard p.initial_sizes.remove(id)
+    discard p.auto_float_done.remove(id)
+    drop_pending_fixed(mut p, id)
     discard p.win_by_id.remove(id)
     discard p.id_by_win.remove(w)
     discard p.configured_sizes.remove(id)
+    if was_focused {
+        if let Some(l) = loc {
+            if l.floating {
+                if let Some(pid) = parent_id {
+                    if let Some(ploc) = p.desktop.locate(pid) {
+                        if ploc.monitor_idx == l.monitor_idx and ploc.workspace_idx == l.workspace_idx {
+                            discard p.desktop.focus_window(pid)
+                        }
+                    }
+                }
+            }
+        }
+    }
     if was_managed or removed {
         p.broadcast_event("window-closed", json.obj().with("id", json.Value.Int(int(id))))
         p.needs_layout = true
@@ -131,8 +345,24 @@ pub fn on_window_meta[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composito
     if not already and (not app_id.is_empty() or not title.is_empty()) and mapped {
         discard p.meta_rule_done.insert(id, true)
         if let Some(rule) = p.win_rules.get(id) {
-            if p.desktop.apply_late_rule(id, rule.floating, rule.fullscreen, rule.maximized, rule.default_width, rule.monitor, rule.workspace) {
+            if rule.floating.is_some() {
+                discard p.auto_float_done.insert(id, true)
+                drop_pending_fixed(mut p, id)
+            }
+            let (eff_nw, eff_nh) = preferred_floating_size(p, w, id, rule.clone())
+            if p.desktop.apply_late_rule_sized(id, rule.floating, rule.fullscreen, rule.maximized, rule.default_width, eff_nw, eff_nh, rule.monitor, rule.workspace) {
                 p.sync_focus()
+            }
+        }
+    }
+    if mapped and not p.auto_float_done.get(id).unwrap_or(false) {
+        if let Some(loc) = p.desktop.locate(id) {
+            if not loc.floating {
+                let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
+                if rule.floating.is_none() and should_auto_float(p, w) {
+                    promote_to_floating(mut p, w, id, rule)
+                    return
+                }
             }
         }
     }

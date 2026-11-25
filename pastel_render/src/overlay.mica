@@ -58,7 +58,7 @@ fn split_label(label: str) -> (str, str) {
 }
 
 /// Fold `["Super + H", "Super + Left"]` into `"Super + H / Left"`.
-fn fold_labels(labels: &[str]) -> str {
+fn fold_labels(labels: Slice[str]) -> str {
     guard not labels.is_empty() else {
         return ""
     }
@@ -241,7 +241,7 @@ fn split_columns(take groups: List[Group]) -> List[List[Group]] {
     return out
 }
 
-fn column_height(col: &[Group], line: i32, sec_gap: i32) -> i32 {
+fn column_height(col: Slice[Group], line: i32, sec_gap: i32) -> i32 {
     var rows = 0
     for g in col {
         rows += g.rows.len() + 1

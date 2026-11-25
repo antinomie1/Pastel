@@ -362,7 +362,7 @@ fn to_view(p: types.Placement, t: gpu.Texture) -> vc.View {
 
 /// Match an unused decoration entry against `p`: exact key match first (compositor images),
 /// then closest output-pixel bounds among client surface placements (never matching images/cursors).
-fn find_effect_unused(fx: effects.OutputEffects, p: types.Placement, used: &[bool]) -> int {
+fn find_effect_unused(fx: effects.OutputEffects, p: types.Placement, used: Slice[bool]) -> int {
     for i, item in fx.items {
         if not used[i] and item.key != 0 and item.key == p.key {
             return i
@@ -428,7 +428,7 @@ fn PastelRenderer.alive_index(self, o: int) -> int {
     return rank
 }
 
-pub fn PastelRenderer.layout(mut self, o: int, placements: &[types.Placement]) {
+pub fn PastelRenderer.layout(mut self, o: int, placements: Slice[types.Placement]) {
     guard o < self.outputs.len() and self.outputs[o].alive else {
         return
     }
@@ -719,7 +719,7 @@ pub fn PastelRenderer.layout(mut self, o: int, placements: &[types.Placement]) {
     self.outputs[o] = out
 }
 
-pub fn PastelRenderer.commit(mut self, key: u64, rects: &[(i32, i32, i32, i32)]) {
+pub fn PastelRenderer.commit(mut self, key: u64, rects: Slice[(i32, i32, i32, i32)]) {
     for o in 0..self.outputs.len() {
         guard let Some((id, _, _)) = self.outputs[o].by_key.get(key) else {
             continue
@@ -851,7 +851,7 @@ pub fn PastelRenderer.overlay_candidates(self, o: int, max_count: int) -> List[t
     return out
 }
 
-pub fn PastelRenderer.set_overlays(mut self, o: int, keys: &[u64]) {
+pub fn PastelRenderer.set_overlays(mut self, o: int, keys: Slice[u64]) {
     guard o < self.outputs.len() and self.outputs[o].alive else {
         return
     }
@@ -927,7 +927,7 @@ pub fn PastelRenderer.solid(mut self, key: u64, rgba: [4]u32) -> bool {
     return self.image(key, 1, 1, fourcc, px, 4)
 }
 
-pub fn PastelRenderer.image(mut self, key: u64, width: i32, height: i32, fourcc: u32, pixels: &[u8], stride: int) -> bool {
+pub fn PastelRenderer.image(mut self, key: u64, width: i32, height: i32, fourcc: u32, pixels: Slice[u8], stride: int) -> bool {
     guard self.target(key, width, height, fourcc) else {
         return false
     }
@@ -935,7 +935,7 @@ pub fn PastelRenderer.image(mut self, key: u64, width: i32, height: i32, fourcc:
     return self.write(key, pixels, stride, none)
 }
 
-pub fn PastelRenderer.update(mut self, key: u64, pixels: &[u8], stride: int, rects: &[(i32, i32, i32, i32)]) -> bool {
+pub fn PastelRenderer.update(mut self, key: u64, pixels: Slice[u8], stride: int, rects: Slice[(i32, i32, i32, i32)]) -> bool {
     return self.texs.contains(key) and self.write(key, pixels, stride, rects)
 }
 
@@ -955,7 +955,7 @@ fn PastelRenderer.target(mut self, key: u64, width: i32, height: i32, fourcc: u3
     return true
 }
 
-fn PastelRenderer.write(mut self, key: u64, pixels: &[u8], stride: int, rects: &[(i32, i32, i32, i32)]) -> bool {
+fn PastelRenderer.write(mut self, key: u64, pixels: Slice[u8], stride: int, rects: Slice[(i32, i32, i32, i32)]) -> bool {
     guard let Some(t) = self.texs.get(key) else {
         return false
     }
@@ -971,7 +971,7 @@ fn PastelRenderer.write(mut self, key: u64, pixels: &[u8], stride: int, rects: &
     return ok
 }
 
-pub fn PastelRenderer.shm_commit(mut self, key: u64, width: i32, height: i32, fourcc: u32, rects: &[(i32, i32, i32, i32)]) -> bool {
+pub fn PastelRenderer.shm_commit(mut self, key: u64, width: i32, height: i32, fourcc: u32, rects: Slice[(i32, i32, i32, i32)]) -> bool {
     guard self.target(key, width, height, fourcc) else {
         return false
     }
@@ -999,7 +999,7 @@ pub fn PastelRenderer.shm_commit(mut self, key: u64, width: i32, height: i32, fo
     return true
 }
 
-pub fn PastelRenderer.shm_upload(mut self, key: u64, bytes: &[u8], stride: int) -> bool {
+pub fn PastelRenderer.shm_upload(mut self, key: u64, bytes: Slice[u8], stride: int) -> bool {
     guard let Some(s) = self.shms.get(key) else {
         return false
     }
@@ -1123,7 +1123,7 @@ fn PastelRenderer.get_blur_pipes(mut self, fmt: gpu.Format) -> Result[blur.BlurP
     return Ok(bp)
 }
 
-fn draw_overview_frames(mut cv: draw2d.Canvas, frames: &[effects.OverviewFrame], area: vc.Region) {
+fn draw_overview_frames(mut cv: draw2d.Canvas, frames: Slice[effects.OverviewFrame], area: vc.Region) {
     for fr in frames {
         guard area.overlaps(frame_bounds(fr)) else {
             continue
@@ -1476,7 +1476,7 @@ pub fn PastelRenderer.read(mut self, key: u64) -> Result[List[u8], str] {
     return self.dev.read_texture(t)
 }
 
-fn PastelRenderer.draw_placements(mut self, mut cv: draw2d.Canvas, mut e: gpu.Encoder, dst: gpu.Texture, ps: &[types.Placement]) -> Result[(), str] {
+fn PastelRenderer.draw_placements(mut self, mut cv: draw2d.Canvas, mut e: gpu.Encoder, dst: gpu.Texture, ps: Slice[types.Placement]) -> Result[(), str] {
     cv.clear()
     cv.set_output_color(types.dst_sdr, 203.0, 1000.0)
     let w = dst.width()
@@ -1543,7 +1543,7 @@ pub fn PastelRenderer.copy_dmabuf(mut self, target_key: u64, dst_buf: types.Dmab
     return Ok(int(fence))
 }
 
-pub fn PastelRenderer.render_offscreen(mut self, width: u32, height: u32, ps: &[types.Placement]) -> Result[List[u8], str] {
+pub fn PastelRenderer.render_offscreen(mut self, width: u32, height: u32, ps: Slice[types.Placement]) -> Result[List[u8], str] {
     try self.flush_uploads()
     guard width > 0 and height > 0 else {
         return Err("invalid offscreen capture size {width}x{height}")
@@ -1585,7 +1585,7 @@ pub fn PastelRenderer.render_offscreen(mut self, width: u32, height: u32, ps: &[
     return px
 }
 
-pub fn PastelRenderer.render_offscreen_dmabuf(mut self, dst_buf: types.Dmabuf, ps: &[types.Placement]) -> Result[int, str] {
+pub fn PastelRenderer.render_offscreen_dmabuf(mut self, dst_buf: types.Dmabuf, ps: Slice[types.Placement]) -> Result[int, str] {
     try self.flush_uploads()
     guard let Some((vf, _)) = format.vk_format(dst_buf.format) else {
         return Err("capture format {dst_buf.format:08x} is not supported")

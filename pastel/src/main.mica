@@ -11,7 +11,7 @@ import pastel_ipc as ipc
 import compositor
 import reload
 
-fn run_msg(args: &[str]) -> int {
+fn run_msg(args: Slice[str]) -> int {
     let sock = match ipc.discover_socket() {
         Ok(s) => s
         Err(e) => {

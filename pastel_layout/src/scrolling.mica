@@ -422,7 +422,7 @@ pub fn ScrollingStrip.expand_to_available_width(mut self, area: core.Rect, gap: 
 }
 
 /// Cycle the active column's width through `presets`.
-pub fn ScrollingStrip.cycle_preset_width(mut self, presets: &[f64]) -> bool {
+pub fn ScrollingStrip.cycle_preset_width(mut self, presets: Slice[f64]) -> bool {
     guard not self.columns.is_empty() and not presets.is_empty() else {
         return false
     }

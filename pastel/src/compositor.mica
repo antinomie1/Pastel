@@ -39,6 +39,9 @@ pub struct Pastel[O: lum.plug.Output, R: lum.plug.Renderer] {
     pub id_by_win: map.Map[lum.Window, u64]
     pub win_rules: map.Map[u64, cfg.ResolvedWindow]
     pub meta_rule_done: map.Map[u64, bool]
+    pub initial_sizes: map.Map[u64, (i32, i32)]
+    pub auto_float_done: map.Map[u64, bool]
+    pub pending_fixed_check: List[(u64, int)] = []
     pub configured_sizes: map.Map[u64, (i32, i32, bool, bool, bool, bool)]
     pub out_by_id: map.Map[u64, lum.Output]
     pub id_by_out: map.Map[lum.Output, u64]
@@ -104,6 +107,8 @@ pub fn Pastel[O, R].new(take d: lum.display.Display[O, R], take config: cfg.Conf
         id_by_win: map.Map.new(),
         win_rules: map.Map.new(),
         meta_rule_done: map.Map.new(),
+        initial_sizes: map.Map.new(),
+        auto_float_done: map.Map.new(),
         configured_sizes: map.Map.new(),
         out_by_id: map.Map.new(),
         id_by_out: map.Map.new(),
@@ -316,9 +321,12 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
     let fallback_rule = self.cfg.resolve_window("", "")
 
     // 1. Update animation targets and send configures only for windows whose size/state changed.
-    // Open a brief layout transaction only for geometry/state transitions while idle so
-    // focus-only changes and ongoing animations never stall behind a configure wait.
-    var any_size_txn = false
+    // Open a brief layout transaction only for geometry/state transitions while idle (or when a
+    // newly mapped tiled window receives its first layout size after an initial `(0, 0)` configure)
+    // so focus-only changes and ongoing animations never stall behind a configure wait.
+    var focus_only_cfgs: List[(lum.Window, u64, i32, i32, lum.States, (i32, i32, bool, bool, bool, bool))] = []
+    var geom_cfgs: List[(lum.Window, u64, i32, i32, lum.States, (i32, i32, bool, bool, bool, bool))] = []
+    var any_initial_tile = false
     for i in 0..targets.len() {
         let t = targets[i]
         let rule = match self.win_rules.get(t.id) {
@@ -333,13 +341,12 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
             let prev = self.configured_sizes.get(t.id)
             if prev != Some(want) {
                 let geom_changed = match prev {
-                    Some((pw, ph, _, pfs, _, pmax)) => pw != cw or ph != ch or pfs != t.fullscreen or pmax != t.maximized
+                    Some((pw, ph, _, pfs, pfl, pmax)) => pw != cw or ph != ch or pfs != t.fullscreen or pfl != t.floating or pmax != t.maximized
                     None => false
                 }
-                if geom_changed and not any_size_txn and not self.anims.is_active() {
-                    self.d.begin()
-                    any_size_txn = true
-                    self.held_since = anim_ns
+                let initial_tile = match prev {
+                    Some((pw, ph, _, _, pfl, _)) => pw == 0 or ph == 0 or pfl != t.floating
+                    None => false
                 }
                 let tiled = not t.floating and not t.fullscreen
                 let st = lum.States {
@@ -351,10 +358,30 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
                     tiled_top: tiled,
                     tiled_bottom: tiled,
                 }
-                discard self.d.configure(w, cw, ch, st)
-                discard self.configured_sizes.insert(t.id, want)
+                if geom_changed or initial_tile {
+                    if initial_tile {
+                        any_initial_tile = true
+                    }
+                    geom_cfgs.push((w, t.id, cw, ch, st, want))
+                } else {
+                    focus_only_cfgs.push((w, t.id, cw, ch, st, want))
+                }
             }
         }
+    }
+    for (w, tid, cw, ch, st, want) in focus_only_cfgs {
+        discard self.d.configure(w, cw, ch, st)
+        discard self.configured_sizes.insert(tid, want)
+    }
+    var any_size_txn = false
+    if not geom_cfgs.is_empty() and (not self.anims.is_active() or any_initial_tile) {
+        self.d.begin()
+        any_size_txn = true
+        self.held_since = anim_ns
+    }
+    for (w, tid, cw, ch, st, want) in geom_cfgs {
+        discard self.d.configure(w, cw, ch, st)
+        discard self.configured_sizes.insert(tid, want)
     }
 
     // 2. Tick animations to `anim_ns` and build placement + per-output visual effect lists.
@@ -735,7 +762,7 @@ fn snap_px(v: f64, k: f64) -> f64 {
 }
 
 /// Scale of the output showing monitor `mi` (1.0 when unknown).
-fn monitor_scale[O: lum.plug.Output, R: lum.plug.Renderer](p: Pastel[O, R], out_rects: &[(f64, f64, f64, f64, f64, u64)], mi: int) -> f64 {
+fn monitor_scale[O: lum.plug.Output, R: lum.plug.Renderer](p: Pastel[O, R], out_rects: Slice[(f64, f64, f64, f64, f64, u64)], mi: int) -> f64 {
     guard mi >= 0 and mi < p.desktop.monitors.len() else {
         return 1.0
     }
@@ -902,6 +929,7 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
                 self.anims.delay(time.now_ns() - self.held_since)
                 self.held_since = 0
             }
+            windows.check_late_auto_float(mut self, time.now_ns())
             if self.anims.is_active() or self.needs_layout {
                 self.sync_layout(vblank_ns)
             }
@@ -912,6 +940,8 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
         WindowClosed(w) => windows.on_window_unmapped(mut self, w)
         WindowTitle(w) => windows.on_window_meta(mut self, w)
         WindowAppId(w) => windows.on_window_meta(mut self, w)
+        WindowParent(w) => windows.on_window_parent(mut self, w)
+        WindowResized(w, _, _) => windows.on_window_resized(mut self, w)
         WindowDecoration(w, _) => self.d.decorate(w, true)
         RequestActivate(w) => {
             let id = windows.window_id(w)

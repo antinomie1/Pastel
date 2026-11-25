@@ -99,6 +99,12 @@ fn clamp_floating_to_area(r: core.Rect, u: core.Rect) -> core.Rect {
     return core.Rect.new(u.x + (u.w - w) * 0.5, u.y + (u.h - h) * 0.5, w, h)
 }
 
+fn floating_rect_for(u: core.Rect, natural_w: f64, natural_h: f64) -> core.Rect {
+    let w = if natural_w > 32.0 { min(natural_w, u.w * 0.9) } else { min(u.w * 0.5, 800.0) }
+    let h = if natural_h > 32.0 { min(natural_h, u.h * 0.9) } else { min(u.h * 0.6, 600.0) }
+    return core.Rect.new(u.x + (u.w - w) * 0.5, u.y + (u.h - h) * 0.5, w, h)
+}
+
 fn Desktop.normalize_workspaces(mut self, mi: int) {
     guard mi >= 0 and mi < self.monitors.len() else {
         return
@@ -334,9 +340,7 @@ pub fn Desktop.add_window_full(mut self, id: u64, floating: bool, width_hint: f6
     }
     let u = self.monitors[mi].usable_rect
     if floating {
-        let w = if natural_w > 32.0 { min(natural_w, u.w * 0.9) } else { min(u.w * 0.5, 800.0) }
-        let h = if natural_h > 32.0 { min(natural_h, u.h * 0.9) } else { min(u.h * 0.6, 600.0) }
-        let r = core.Rect.new(u.x + (u.w - w) * 0.5, u.y + (u.h - h) * 0.5, w, h)
+        let r = floating_rect_for(u, natural_w, natural_h)
         if open_focused {
             self.monitors[mi].workspaces[wi].insert_floating(id, r)
         } else {
@@ -390,6 +394,11 @@ pub fn Desktop.resize_focused_floating(mut self, dw: f64, dh: f64) -> bool {
 
 /// Apply structural window rules to an already-mapped window (for late-arriving `app_id`/`title`).
 pub fn Desktop.apply_late_rule(mut self, id: u64, floating: Option[bool], fullscreen: Option[bool], maximized: Option[bool], width_hint: f64, target_monitor: str, target_ws: Option[int]) -> bool {
+    return self.apply_late_rule_sized(id, floating, fullscreen, maximized, width_hint, 0.0, 0.0, target_monitor, target_ws)
+}
+
+/// Apply structural window rules to an already-mapped window, preserving natural/configured floating size.
+pub fn Desktop.apply_late_rule_sized(mut self, id: u64, floating: Option[bool], fullscreen: Option[bool], maximized: Option[bool], width_hint: f64, natural_w: f64, natural_h: f64, target_monitor: str, target_ws: Option[int]) -> bool {
     var changed = false
     if not target_monitor.is_empty() {
         let dst_m = self.find_monitor_by_name(target_monitor)
@@ -400,12 +409,8 @@ pub fn Desktop.apply_late_rule(mut self, id: u64, floating: Option[bool], fullsc
         }
     }
     if let Some(want_float) = floating {
-        if let Some(loc) = self.index.get(id) {
-            if loc.floating != want_float {
-                if self.toggle_floating(id) {
-                    changed = true
-                }
-            }
+        if self.set_floating_sized(id, want_float, natural_w, natural_h, None) {
+            changed = true
         }
     }
     if let Some(ws1) = target_ws {
@@ -516,6 +521,58 @@ pub fn Desktop.relocate_floating_to_monitor(mut self, id: u64, target_mi: int) -
     self.active_monitor = target_mi
     self.normalize_workspaces(src_m)
     self.normalize_workspaces(target_mi)
+    self.rebuild_index()
+    return true
+}
+
+/// Transition window `id` between tiled and floating using its natural/requested floating dimensions,
+/// placing child dialogs on their parent's workspace and keeping the parent column focused underneath.
+pub fn Desktop.set_floating_sized(mut self, id: u64, floating: bool, natural_w: f64, natural_h: f64, parent_id: Option[u64]) -> bool {
+    guard let Some(loc) = self.index.get(id) else {
+        return false
+    }
+    guard loc.floating != floating else {
+        return false
+    }
+    let mi = loc.monitor_idx
+    let wi = loc.workspace_idx
+    if not floating {
+        discard self.monitors[mi].workspaces[wi].remove(id)
+        self.monitors[mi].workspaces[wi].insert_tiled(id, self.default_width)
+        self.normalize_workspaces(mi)
+        self.rebuild_index()
+        return true
+    }
+    var dst_mi = mi
+    var dst_wi = wi
+    var parent_tiled = false
+    if let Some(pid) = parent_id {
+        if let Some(ploc) = self.index.get(pid) {
+            if ploc.monitor_idx >= 0 and ploc.monitor_idx < self.monitors.len() and ploc.workspace_idx >= 0 and ploc.workspace_idx < self.monitors[ploc.monitor_idx].workspaces.len() {
+                dst_mi = ploc.monitor_idx
+                dst_wi = ploc.workspace_idx
+                parent_tiled = not ploc.floating
+            }
+        }
+    }
+    let was_focused = self.monitors[mi].workspaces[wi].focused() == Some(id)
+    discard self.monitors[mi].workspaces[wi].remove(id)
+    if parent_tiled {
+        if let Some(pid) = parent_id {
+            discard self.monitors[dst_mi].workspaces[dst_wi].strip.focus_window(pid)
+        }
+    }
+    let u = self.monitors[dst_mi].usable_rect
+    let r = floating_rect_for(u, natural_w, natural_h)
+    if was_focused {
+        self.monitors[dst_mi].workspaces[dst_wi].insert_floating(id, r)
+    } else {
+        self.monitors[dst_mi].workspaces[dst_wi].insert_floating_unfocused(id, r)
+    }
+    self.normalize_workspaces(mi)
+    if dst_mi != mi {
+        self.normalize_workspaces(dst_mi)
+    }
     self.rebuild_index()
     return true
 }

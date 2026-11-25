@@ -42,7 +42,7 @@ fn valid_env_key(k: str) -> bool {
 /// optional `DISPLAY`, optional `XDG_ACTIVATION_TOKEN`, and configured `[env]` overrides).
 /// Commands are grouped in a subshell `( ... ) </dev/null >/dev/null 2>&1 &` so compound
 /// pipelines containing `;` never block the compositor event loop.
-pub fn spawn_shell(cmd: str, wayland_display: str, pastel_socket: str, xwayland_display: str, token: str, extra_env: &[(str, str)]) {
+pub fn spawn_shell(cmd: str, wayland_display: str, pastel_socket: str, xwayland_display: str, token: str, extra_env: Slice[(str, str)]) {
     let trimmed = cmd.trim()
     guard not trimmed.is_empty() else {
         return
@@ -141,7 +141,7 @@ pub fn stop_xwayland(pid: int) {
 
 /// Export session environment to D-Bus / systemd user activation when running a real session,
 /// so `xdg-desktop-portal` and screen-sharing clients pick up `WAYLAND_DISPLAY` and `[env]` automatically.
-pub fn export_session_env(wayland_display: str, xwayland_display: str, nested: bool, extra_env: &[(str, str)]) {
+pub fn export_session_env(wayland_display: str, xwayland_display: str, nested: bool, extra_env: Slice[(str, str)]) {
     guard not nested else {
         return
     }

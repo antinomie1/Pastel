@@ -18,7 +18,7 @@ pub fn output_scale(ow: f64, oh: f64, mode: lum.Mode) -> f64 {
 
 /// Parse `"WIDTHxHEIGHT"` or `"WIDTHxHEIGHT@HZ"`. When `@HZ` is omitted, selects the highest
 /// refresh rate matching `(width, height)` from `available_modes` (falling back to 60 Hz).
-fn parse_mode(spec: str, available_modes: &[lum.Mode]) -> Option[lum.Mode] {
+fn parse_mode(spec: str, available_modes: Slice[lum.Mode]) -> Option[lum.Mode] {
     let s = spec.trim()
     guard not s.is_empty() else {
         return None

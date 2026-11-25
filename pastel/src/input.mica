@@ -46,6 +46,25 @@ fn tiled_focused[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[
     return p.desktop.monitors[mi].workspaces[wi].fullscreen.is_none() and not p.desktop.monitors[mi].workspaces[wi].focus_floating and not p.desktop.monitors[mi].workspaces[wi].strip.is_empty()
 }
 
+/// `tiled_focused` for column size actions: a fullscreen window in the
+/// active column leaves fullscreen first, so resizing it gives it that size.
+fn tiled_for_resize[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) -> bool {
+    guard not p.desktop.monitors.is_empty() else {
+        return false
+    }
+    let mi = p.desktop.active_monitor
+    let wi = p.desktop.monitors[mi].active_ws
+    guard wi < p.desktop.monitors[mi].workspaces.len() else {
+        return false
+    }
+    if let Some(fs) = p.desktop.monitors[mi].workspaces[wi].fullscreen {
+        if p.desktop.monitors[mi].workspaces[wi].strip.focused() == Some(fs) {
+            clear_fullscreen(mut p, mi, wi)
+        }
+    }
+    return tiled_focused(p)
+}
+
 /// True when the active tiled column on the focused monitor/workspace is maximized.
 fn active_column_maximized[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R]) -> bool {
     guard not p.desktop.monitors.is_empty() else {
@@ -305,7 +324,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         CyclePresetWidth => {
-            if tiled_focused(p) {
+            if tiled_for_resize(mut p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 let was_max = active_column_maximized(p)
@@ -319,7 +338,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         SetColumnWidth(frac) => {
-            if tiled_focused(p) {
+            if tiled_for_resize(mut p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 let was_max = active_column_maximized(p)
@@ -332,7 +351,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         AdjustColumnWidth(delta) => {
-            if tiled_focused(p) {
+            if tiled_for_resize(mut p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 let was_max = active_column_maximized(p)
@@ -363,7 +382,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         ExpandColumnToAvailableWidth => {
-            if tiled_focused(p) {
+            if tiled_for_resize(mut p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 let was_max = active_column_maximized(p)
@@ -378,7 +397,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         MaximizeColumn => {
-            if tiled_focused(p) {
+            if tiled_for_resize(mut p) {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
                 if p.desktop.monitors[mi].workspaces[wi].strip.toggle_maximize_column() {
@@ -406,6 +425,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         ToggleFloating => {
             if let Some(id) = p.desktop.focused_window() {
                 if p.desktop.toggle_floating(id) {
+                    windows.mark_float_override(mut p, id)
                     p.sync_focus()
                     p.broadcast_window_changed(id)
                     p.needs_layout = true

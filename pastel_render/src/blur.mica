@@ -4,7 +4,8 @@ import vk_gpu as gpu
 import vk_draw2d as draw2d
 
 /// Push constant block matching `shaders/blur.glsl` (48 bytes).
-struct BlurPush derive(Bytes) {
+@derive(Bytes)
+struct BlurPush {
     tex: u32 = 0
     dx: f32 = 0.0
     dy: f32 = 0.0
@@ -253,7 +254,7 @@ pub fn kernel_radius(passes: int, offset: f32) -> f32 {
 
 /// Composite `blurred` into `dst`, scissored to the intersection of `rect` with each damage clip
 /// in `clips` (or `rect` itself when `clips` is empty).
-pub fn composite_clips(pipes: BlurPipelines, mut e: gpu.Encoder, blurred: gpu.Texture, dst: gpu.Texture, rect: draw2d.Rect, radius: f32, alpha: f32, clips: &[draw2d.Rect]) {
+pub fn composite_clips(pipes: BlurPipelines, mut e: gpu.Encoder, blurred: gpu.Texture, dst: gpu.Texture, rect: draw2d.Rect, radius: f32, alpha: f32, clips: Slice[draw2d.Rect]) {
     let sw = f32(dst.width())
     let sh = f32(dst.height())
     let rx0 = max(i32(rect.x.floor()), 0)

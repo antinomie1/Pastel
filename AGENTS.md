@@ -75,9 +75,10 @@ Architecture docs live in [docs/README.md](docs/README.md).
 
 ## 5. Mica Language Reminders
 
-- No `;`, `&`/`*`, `::`, `?`, macros, `impl`, `as`, or `let mut`.
+- No `;`, `&`/`*` (in types or unary expressions), `::`, `?`, macros, `impl`, `as`, or `let mut`. Borrowed views are `Slice[T]`, `MutSlice[T]`, and `StrSlice`.
+- Item directives use prefix `@attr` (`@derive(...)`, `@packed`, `@align(N)`, `@bits(T)`, `@inline`, ...); byte literals use `b'a'` (`u8`).
 - Use `var` for mutable locals, `mut p: T` for mutable parameters, `take p: T` for ownership transfer.
-- Explicit `return` in every function; explicit numeric casts (`f64(x)`, `i32(x)`).
+- Explicit `return` in every function; lossless integer widening is implicit, while narrowing, sign-changing, and float/int casts are explicit (`f64(x)`, `i32(x)`).
 - Move semantics for `str`, `List`, `Box`, and structs containing them; use `.clone()` when reading fields/elements or `mem.replace(mut self.field, empty)` to reuse scratch buffers without allocating.
 - Discard unused `Result` values explicitly (`discard r`).
 - Methods live in the same module as their type; structural traits require no `impl` block.

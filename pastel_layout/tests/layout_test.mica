@@ -330,3 +330,32 @@ test "move column across workspaces/monitors, silent move, previous workspace, o
         assert(t.rect.w > 10.0 and t.rect.h > 10.0)
     }
 }
+
+test "set_floating_sized preserves natural dialog dimensions and restores parent column focus" {
+    var d = lay.Desktop.new(0, 12.0, 0.5, lay.CenterMode.Never)
+    d.add_monitor(1, "DP-1", core.Rect.new(0.0, 0.0, 1920.0, 1080.0), core.Rect.new(0.0, 0.0, 1920.0, 1080.0))
+
+    // Parent (col 0) and neighbor (col 1); focus back on parent, then open a dialog temporarily as tiled.
+    d.add_window(10, false, 0.5, 800.0, 600.0, None)
+    d.add_window(20, false, 0.5, 800.0, 600.0, None)
+    assert(d.focus_window(10))
+    d.add_window(30, false, 0.5, 531.0, 160.0, None)
+    assert_eq(d.monitors[0].workspaces[0].strip.columns.len(), 3)
+
+    // Promoting 30 to floating with parent 10 removes the extra column, preserves 531x160 centered,
+    // keeps focus on floating dialog 30, and restores underlying strip focus to parent 10 (not neighbor 20).
+    assert(d.set_floating_sized(30, true, 531.0, 160.0, Some(u64(10))))
+    assert_eq(d.monitors[0].workspaces[0].strip.columns.len(), 2)
+    assert_eq(d.monitors[0].workspaces[0].strip.focused(), Some(u64(10)))
+    assert_eq(d.focused_window(), Some(u64(30)))
+    assert(d.locate(30).unwrap().floating)
+    let r = d.monitors[0].workspaces[0].floating[0].rect
+    assert_eq(r.w, 531.0)
+    assert_eq(r.h, 160.0)
+    assert((r.x - (1920.0 - 531.0) * 0.5).abs() < 0.5)
+    assert((r.y - (1080.0 - 160.0) * 0.5).abs() < 0.5)
+
+    // Closing the floating dialog returns focus straight back to parent 10.
+    assert(d.remove_window(30))
+    assert_eq(d.focused_window(), Some(u64(10)))
+}
