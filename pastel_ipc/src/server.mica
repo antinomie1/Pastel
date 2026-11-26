@@ -2,11 +2,14 @@
 // Integrates with luminaria's `Display.watch(fd, token)` — zero extra threads.
 
 import std.fs
+import std.mem
 import std.net
 import std.json
+import std.rt
 
 let max_in_buf = 65536
 let max_out_buf = 262144
+let read_chunk_cap = 4096
 
 /// Decoded IPC client request.
 pub enum Request {
@@ -40,7 +43,7 @@ pub fn decode_request(line: str) -> Result[Request, str] {
 }
 
 pub fn encode_ok() -> str {
-    return json.encode(json.obj().with("ok", json.Value.Bool(true))) + "\n"
+    return "\{\"ok\":true\}\n"
 }
 
 pub fn encode_err(msg: str) -> str {
@@ -57,6 +60,7 @@ struct Peer {
     conn: net.Conn
     buf: str = ""
     outbuf: str = ""
+    out_off: int = 0
     subscribed: bool = false
 }
 
@@ -65,6 +69,8 @@ pub struct IpcServer {
     pub path: str
     listener: net.Listener
     peers: List[Peer] = []
+    sub_count: int = 0
+    read_scratch: List[u8] = []
 }
 
 pub fn IpcServer.open(sock_path: str) -> Result[IpcServer, str] {
@@ -78,6 +84,10 @@ pub fn IpcServer.open(sock_path: str) -> Result[IpcServer, str] {
 
 pub fn IpcServer.fd(self) -> int {
     return self.listener.fd
+}
+
+pub fn IpcServer.has_subscribers(self) -> bool {
+    return self.sub_count > 0
 }
 
 /// Accept all queued non-blocking connections, returning their file descriptors for `Display.watch`.
@@ -114,43 +124,66 @@ pub fn IpcServer.read_lines(mut self, fd: int) -> (List[str], bool) {
     guard i >= 0 else {
         return ([], true)
     }
+    var scratch = mem.replace(mut self.read_scratch, [])
+    if scratch.len() < read_chunk_cap {
+        scratch.reserve(read_chunk_cap - scratch.len())
+        while scratch.len() < read_chunk_cap {
+            scratch.push(u8(0))
+        }
+    }
     var closed = false
     while true {
-        match self.peers[i].conn.read(4096) {
-            Ok(chunk) => {
-                if chunk.is_empty() {
+        match self.peers[i].conn.read_into(mut scratch) {
+            Ok(n) => {
+                if n <= 0 {
                     closed = true
                     break
                 }
-                self.peers[i].buf += chunk
-                if self.peers[i].buf.len() > max_in_buf {
+                if self.peers[i].buf.len() + n > max_in_buf {
                     closed = true
                     break
                 }
+                rt.str_push_bytes(mut self.peers[i].buf, scratch, 0, n)
             }
             Err => {
                 break
             }
         }
     }
+    self.read_scratch = scratch
     var out: List[str] = []
-    while true {
-        guard let Some(nl) = self.peers[i].buf.find("\n") else {
-            break
+    let n = self.peers[i].buf.len()
+    var start = 0
+    var j = 0
+    while j < n {
+        if self.peers[i].buf[j] == 10 {
+            var end = j
+            if end > start and self.peers[i].buf[end - 1] == 13 {
+                end -= 1
+            }
+            let line = self.peers[i].buf.slice(start, end).trim()
+            if not line.is_empty() {
+                out.push(line)
+            }
+            start = j + 1
         }
-        let line = self.peers[i].buf.slice(0, nl).trim()
-        self.peers[i].buf = self.peers[i].buf.slice(nl + 1, self.peers[i].buf.len())
-        if not line.is_empty() {
-            out.push(line)
+        j += 1
+    }
+    if start >= n {
+        if n > 0 {
+            self.peers[i].buf = ""
         }
+    } else if start > 0 {
+        self.peers[i].buf = self.peers[i].buf.slice(start, n)
     }
     return (out, closed)
 }
 
 pub fn IpcServer.mark_subscribed(mut self, fd: int) {
     let i = self.find_peer(fd)
-    if i >= 0 {
+    if i >= 0 and not self.peers[i].subscribed {
         self.peers[i].subscribed = true
+        self.sub_count += 1
     }
 }
 
@@ -159,17 +192,13 @@ fn IpcServer.flush_peer(mut self, i: int) -> bool {
     guard i >= 0 and i < self.peers.len() else {
         return false
     }
-    while not self.peers[i].outbuf.is_empty() {
-        match self.peers[i].conn.write_some(self.peers[i].outbuf, 0) {
+    while self.peers[i].out_off < self.peers[i].outbuf.len() {
+        match self.peers[i].conn.write_some(self.peers[i].outbuf, self.peers[i].out_off) {
             Ok(n) => {
                 if n <= 0 {
                     return false
                 }
-                if n >= self.peers[i].outbuf.len() {
-                    self.peers[i].outbuf = ""
-                } else {
-                    self.peers[i].outbuf = self.peers[i].outbuf.slice(n, self.peers[i].outbuf.len())
-                }
+                self.peers[i].out_off += n
             }
             Err(e) => {
                 if e.kind == net.IoKind.WouldBlock {
@@ -179,7 +208,57 @@ fn IpcServer.flush_peer(mut self, i: int) -> bool {
             }
         }
     }
+    if not self.peers[i].outbuf.is_empty() {
+        self.peers[i].outbuf = ""
+        self.peers[i].out_off = 0
+    }
     return true
+}
+
+fn IpcServer.send_to_peer(mut self, i: int, payload: str) -> bool {
+    guard not payload.is_empty() else {
+        return true
+    }
+    // Fast path: when no bytes are queued, write directly without copying into `outbuf`.
+    if self.peers[i].outbuf.is_empty() {
+        match self.peers[i].conn.write_some(payload, 0) {
+            Ok(n) => {
+                if n <= 0 {
+                    return false
+                }
+                if n >= payload.len() {
+                    return true
+                }
+                if payload.len() - n > max_out_buf {
+                    return false
+                }
+                self.peers[i].outbuf = payload.slice(n, payload.len())
+                self.peers[i].out_off = 0
+                return self.flush_peer(i)
+            }
+            Err(e) => {
+                if e.kind == net.IoKind.WouldBlock {
+                    if payload.len() > max_out_buf {
+                        return false
+                    }
+                    self.peers[i].outbuf = payload.clone()
+                    self.peers[i].out_off = 0
+                    return true
+                }
+                return false
+            }
+        }
+    }
+    let pending = self.peers[i].outbuf.len() - self.peers[i].out_off
+    if pending + payload.len() > max_out_buf {
+        return false
+    }
+    if self.peers[i].out_off > 0 and self.peers[i].outbuf.len() + payload.len() > max_out_buf {
+        self.peers[i].outbuf = self.peers[i].outbuf.slice(self.peers[i].out_off, self.peers[i].outbuf.len())
+        self.peers[i].out_off = 0
+    }
+    self.peers[i].outbuf += payload
+    return self.flush_peer(i)
 }
 
 pub fn IpcServer.send(mut self, fd: int, payload: str) -> bool {
@@ -187,25 +266,19 @@ pub fn IpcServer.send(mut self, fd: int, payload: str) -> bool {
     guard i >= 0 else {
         return false
     }
-    if self.peers[i].outbuf.len() + payload.len() > max_out_buf {
-        return false
-    }
-    self.peers[i].outbuf += payload
-    return self.flush_peer(i)
+    return self.send_to_peer(i, payload)
 }
 
 /// Broadcast a JSON-line event to all subscribed peers, returning fds of disconnected/stalled peers.
 pub fn IpcServer.broadcast(mut self, payload: str) -> List[int] {
+    guard self.sub_count > 0 else {
+        return []
+    }
     var dropped: List[int] = []
     for i in 0..self.peers.len() {
         if self.peers[i].subscribed {
-            if self.peers[i].outbuf.len() + payload.len() > max_out_buf {
+            if not self.send_to_peer(i, payload) {
                 dropped.push(self.peers[i].conn.fd)
-            } else {
-                self.peers[i].outbuf += payload
-                if not self.flush_peer(i) {
-                    dropped.push(self.peers[i].conn.fd)
-                }
             }
         }
     }
@@ -219,6 +292,9 @@ pub fn IpcServer.disconnect(mut self, fd: int) {
     let i = self.find_peer(fd)
     if i >= 0 {
         let p = self.peers.remove(i)
+        if p.subscribed and self.sub_count > 0 {
+            self.sub_count -= 1
+        }
         p.conn.close()
     }
 }
@@ -228,6 +304,8 @@ pub fn IpcServer.close(mut self) {
         p.conn.close()
     }
     self.peers.clear()
+    self.sub_count = 0
+    self.read_scratch.clear()
     self.listener.close()
     if not self.path.is_empty() and fs.exists(self.path) {
         discard fs.remove(self.path)

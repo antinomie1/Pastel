@@ -17,8 +17,7 @@ pub struct ScrollingStrip {
     pub manual_pan: bool = false
     /// When true, a single column on a workspace is always centered horizontally.
     pub always_center_single: bool = false
-    /// Reusable per-frame scratch buffers for zero-allocation `compute`.
-    col_x_scratch: List[f64] = []
+    /// Reusable per-frame scratch buffer for zero-allocation `compute`.
     col_w_scratch: List[f64] = []
 }
 
@@ -586,6 +585,13 @@ fn ScrollingStrip.strip_width(self, viewport_w: f64, gap: f64) -> f64 {
 
 /// Compute global target rects for every tiled window in the strip, updating `camera_x`.
 pub fn ScrollingStrip.compute(mut self, area: core.Rect, gap: f64, center: traits.CenterMode, mut out: List[traits.TileTarget]) {
+    let active_win = self.focused().unwrap_or(0)
+    self.compute_for(area, gap, center, 0, 0, true, active_win, mut out)
+}
+
+/// Compute global target rects in a single pass with pre-stamped `monitor_idx`,
+/// `workspace_idx`, and focus identity (avoids a post-pass over `out` in `Workspace`).
+pub fn ScrollingStrip.compute_for(mut self, area: core.Rect, gap: f64, center: traits.CenterMode, monitor_idx: int, workspace_idx: int, is_active_monitor: bool, active_win: u64, mut out: List[traits.TileTarget]) {
     guard not self.columns.is_empty() else {
         self.camera_x = 0.0
         self.pinned_center = false
@@ -595,15 +601,26 @@ pub fn ScrollingStrip.compute(mut self, area: core.Rect, gap: f64, center: trait
     let active = self.active_col.clamp(0, n - 1)
     self.active_col = active
 
-    // First pass: find column X positions and total strip width (reusing scratch buffers).
-    var col_x = mem.replace(mut self.col_x_scratch, [])
+    // First pass: find column widths, active column bounds, and total strip width
+    // using a single reusable scratch buffer (`col_w`).
     var col_w = mem.replace(mut self.col_w_scratch, [])
-    col_x.clear()
     col_w.clear()
+    col_w.reserve(n)
+    let vw_minus_gap = area.w - gap
+    let max_col_w = column.width_for_frac_pre(vw_minus_gap, gap, 1.0)
     var cur_x = gap
-    for c in self.columns {
-        let cw = c.effective_width(area.w, gap)
-        col_x.push(cur_x)
+    var ax = gap
+    var aw = max_col_w
+    for ci, c in self.columns {
+        let cw = if c.maximized {
+            max_col_w
+        } else {
+            column.width_for_frac_pre(vw_minus_gap, gap, c.width_frac)
+        }
+        if ci == active {
+            ax = cur_x
+            aw = cw
+        }
         col_w.push(cw)
         cur_x += cw + gap
     }
@@ -611,8 +628,6 @@ pub fn ScrollingStrip.compute(mut self, area: core.Rect, gap: f64, center: trait
 
     // Update viewport camera unless actively being dragged.
     if not self.manual_pan {
-        let ax = col_x[active]
-        let aw = col_w[active]
         let left_bound = ax - gap
         let right_bound = ax + aw + gap
         let centered = ax + aw * 0.5 - area.w * 0.5
@@ -650,56 +665,79 @@ pub fn ScrollingStrip.compute(mut self, area: core.Rect, gap: f64, center: trait
         self.camera_x = self.camera_x.clamp(-area.w * 0.25, max_cam + area.w * 0.25)
     }
 
-    // Second pass: emit per-window targets inside each column.
-    let active_win = self.focused().unwrap_or(0)
-    for ci in 0..n {
-        let rows = self.columns[ci].windows.len()
+    // Second pass: emit per-window targets inside each column (hoisting loop invariants
+    // and taking a fast path for single-window columns).
+    out.reserve(n)
+    let single_wy = area.y + gap
+    let single_wh = max(area.h - gap * 2.0, 32.0)
+    let tab_wy = single_wy + 8.0
+    let tab_wh = max(area.h - gap * 2.0 - 8.0, 32.0)
+    let area_bottom_gap = area.y + area.h - gap
+    let base_x = area.x - self.camera_x
+    var col_x = gap
+    for ci, c in self.columns {
+        let ww = col_w[ci]
+        let wx = base_x + col_x
+        col_x += ww + gap
+        let rows = c.windows.len()
         guard rows > 0 else {
             continue
         }
-        let wx = area.x + col_x[ci] - self.camera_x
-        let ww = col_w[ci]
-        let is_max = self.columns[ci].maximized
-        if self.columns[ci].tabbed {
-            let tab_bar_h = 8.0
-            let ri = self.columns[ci].active_row.clamp(0, rows - 1)
-            let slot = self.columns[ci].windows[ri]
-            let wy = area.y + gap + tab_bar_h
-            let wh = max(area.h - gap * 2.0 - tab_bar_h, 32.0)
+        let is_max = c.maximized
+        if c.tabbed {
+            let ri = c.active_row.clamp(0, rows - 1)
+            let slot_id = c.windows[ri].id
             out.push(traits.TileTarget {
-                id: slot.id,
-                rect: core.Rect.new(wx, wy, ww, wh),
-                focused: slot.id == active_win,
+                id: slot_id,
+                rect: core.Rect { x: wx, y: tab_wy, w: ww, h: tab_wh },
+                focused: is_active_monitor and slot_id == active_win,
                 floating: false,
                 fullscreen: false,
                 maximized: is_max,
                 tabbed: true,
                 tab_count: rows,
                 tab_index: ri,
+                monitor_idx,
+                workspace_idx,
+            })
+            continue
+        }
+        if rows == 1 {
+            let slot_id = c.windows[0].id
+            out.push(traits.TileTarget {
+                id: slot_id,
+                rect: core.Rect { x: wx, y: single_wy, w: ww, h: single_wh },
+                focused: is_active_monitor and slot_id == active_win,
+                floating: false,
+                fullscreen: false,
+                maximized: is_max,
+                monitor_idx,
+                workspace_idx,
             })
             continue
         }
         let avail_h = max(area.h - gap * f64(rows + 1), f64(rows) * 32.0)
-        let tot_w = self.columns[ci].total_weight()
-        var y = area.y + gap
+        let inv_tot_w = 1.0 / c.total_weight()
+        var y = single_wy
         for ri in 0..rows {
-            let slot = self.columns[ci].windows[ri]
+            let slot = c.windows[ri]
             let wh = if ri == rows - 1 {
-                max(area.y + area.h - gap - y, 32.0)
+                max(area_bottom_gap - y, 32.0)
             } else {
-                (avail_h * (max(slot.weight, 0.1) / tot_w)).round()
+                (avail_h * (max(slot.weight, 0.1) * inv_tot_w)).round()
             }
             out.push(traits.TileTarget {
                 id: slot.id,
-                rect: core.Rect.new(wx, y, ww, wh),
-                focused: slot.id == active_win,
+                rect: core.Rect { x: wx, y, w: ww, h: wh },
+                focused: is_active_monitor and slot.id == active_win,
                 floating: false,
                 fullscreen: false,
                 maximized: is_max,
+                monitor_idx,
+                workspace_idx,
             })
             y += wh + gap
         }
     }
-    self.col_x_scratch = col_x
     self.col_w_scratch = col_w
 }

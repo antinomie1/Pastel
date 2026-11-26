@@ -27,6 +27,28 @@ fn ikey(img: lum.Image) -> u64 {
     return (u64(1) << 63) | (u64(img.index) << 32) | u64(img.gen)
 }
 
+/// O(1) compiled input binding dispatch tables with 16-bit modifier bitmasks so
+/// unbound typing/gaming keys, clicks, and scrolls reject in a single bit test.
+pub struct BindIndex {
+    pub key_map: map.Map[u64, int]
+    pub locked_key_map: map.Map[u64, int]
+    pub button_map: map.Map[u64, int]
+    pub wheel_map: map.Map[u64, int]
+    pub key_mod_mask: u16 = 0
+    pub locked_mod_mask: u16 = 0
+    pub button_mod_mask: u16 = 0
+    pub wheel_mod_mask: u16 = 0
+}
+
+pub fn BindIndex.new() -> BindIndex {
+    return BindIndex {
+        key_map: map.Map.new(),
+        locked_key_map: map.Map.new(),
+        button_map: map.Map.new(),
+        wheel_map: map.Map.new(),
+    }
+}
+
 pub struct Pastel[O: lum.plug.Output, R: lum.plug.Renderer] {
     pub d: lum.display.Display[O, R]
     pub cfg: cfg.Config
@@ -43,6 +65,7 @@ pub struct Pastel[O: lum.plug.Output, R: lum.plug.Renderer] {
     pub auto_float_done: map.Map[u64, bool]
     pub pending_fixed_check: List[(u64, int)] = []
     pub configured_sizes: map.Map[u64, (i32, i32, bool, bool, bool, bool)]
+    pub pending_fullscreen: map.Map[u64, (bool, Option[lum.Output])]
     pub out_by_id: map.Map[u64, lum.Output]
     pub id_by_out: map.Map[lum.Output, u64]
     pub vrr_state: map.Map[u64, bool]
@@ -85,6 +108,25 @@ pub struct Pastel[O: lum.plug.Output, R: lum.plug.Renderer] {
     pub swipe_ws: int = 0
     pub last_focus_id: u64 = 0
     pub needs_layout: bool = true
+    pub overlay_dirty: bool = true
+    pub default_visual: (f32, bool, f32, f32, bool) = (1.0, true, 0.0, 2.0, false)
+    pub has_rules: bool = false
+    pub has_title_rules: bool = false
+    pub has_vrr_ondemand: bool = false
+    pub cached_outputs: List[(f64, f64, f64, f64, f64, u64)] = []
+    pub cached_out_handles: List[lum.Output] = []
+    pub mon_to_out: List[int] = []
+    pub mon_vrr_ondemand: List[bool] = []
+    pub bind_index: BindIndex
+    pub focus_cfgs_scratch: List[(lum.Window, u64, i32, i32, lum.States, (i32, i32, bool, bool, bool, bool))] = []
+    pub geom_cfgs_scratch: List[(lum.Window, u64, i32, i32, lum.States, (i32, i32, bool, bool, bool, bool))] = []
+    pub win_draw_scratch: List[(Option[lum.Window], f32, bool, f32, f32, bool)] = []
+    pub out_effects_scratch: List[List[ren.WindowEffect]] = []
+    pub out_closing_scratch: List[List[ren.ClosingEffect]] = []
+    pub out_tabs_scratch: List[List[ren.TabBar]] = []
+    pub out_frames_scratch: List[List[ren.OverviewFrame]] = []
+    pub ov_idx_scratch: map.Map[u64, int]
+    pub ov_seen_scratch: List[bool] = []
 }
 
 pub fn Pastel[O, R].new(take d: lum.display.Display[O, R], take config: cfg.Config, cfg_path: str, nested: bool, sheet: ren.EffectSheet) -> Pastel[O, R] {
@@ -110,21 +152,56 @@ pub fn Pastel[O, R].new(take d: lum.display.Display[O, R], take config: cfg.Conf
         initial_sizes: map.Map.new(),
         auto_float_done: map.Map.new(),
         configured_sizes: map.Map.new(),
+        pending_fullscreen: map.Map.new(),
         out_by_id: map.Map.new(),
         id_by_out: map.Map.new(),
         vrr_state: map.Map.new(),
+        bind_index: BindIndex.new(),
+        ov_idx_scratch: map.Map.new(),
     }
+    p.sync_config_caches()
     outputs.apply_keymap(mut p, false)
     for so in p.d.outputs() {
         outputs.apply_output_config(mut p, so)
     }
     outputs.sync_outputs(mut p)
-    p.rebuild_overlay()
     if p.cfg.overlay.at_startup {
         p.set_overlay_visible(true, time.now_ns())
     }
     p.sync_layout(time.now_ns())
     return p
+}
+
+/// Recompute derived config caches (default window visuals, rule flags, VRR flag, O(1) bind index).
+pub fn Pastel[O, R].sync_config_caches(mut self) {
+    let def = self.cfg.resolve_window("", "")
+    self.default_visual = (def.opacity, def.blur, def.corner_radius, def.border_width, def.block_out_from_screencast)
+    self.has_rules = not self.cfg.rules.is_empty()
+    var title_rules = false
+    for r in self.cfg.rules {
+        if not r.title.is_empty() {
+            title_rules = true
+            break
+        }
+    }
+    self.has_title_rules = title_rules
+    var vrr_od = false
+    for o in self.cfg.outputs {
+        if o.vrr == Some(cfg.VrrMode.OnDemand) {
+            vrr_od = true
+            break
+        }
+    }
+    self.has_vrr_ondemand = vrr_od
+    input.rebuild_bind_index(mut self)
+}
+
+/// True when at least one IPC client is subscribed to compositor events.
+pub fn Pastel[O, R].has_ipc_subscribers(self) -> bool {
+    return match self.ipc_srv {
+        Some(srv) => srv.has_subscribers()
+        None => false
+    }
 }
 
 /// Start listening on the Unix JSON-lines IPC socket and register its fd with `Display.watch`.
@@ -187,6 +264,7 @@ pub fn Pastel[O, R].rebuild_overlay(mut self) {
     let eff_mod = if self.nested { self.cfg.input.nested_mod } else { self.cfg.input.mod_key }
     let scale = max(outputs.active_output_scale(self), 1.0)
     self.overlay_scale = scale
+    self.overlay_dirty = false
     guard let Some(img_data) = ren.overlay.render_hotkey_overlay(self.cfg, eff_mod, scale) else {
         io.eprint("pastel: hotkey overlay: no font found for '{self.cfg.overlay.font}'")
         return
@@ -198,7 +276,25 @@ pub fn Pastel[O, R].rebuild_overlay(mut self) {
     }
 }
 
+/// Rebuild the hotkey overlay immediately if currently shown, or drop its GPU texture
+/// and mark dirty for lazy rasterization next time it is opened.
+pub fn Pastel[O, R].invalidate_overlay(mut self) {
+    if self.overlay_visible {
+        self.rebuild_overlay()
+    } else {
+        if let Some(old) = self.overlay_img.take() {
+            self.d.drop_image(old)
+        }
+        self.overlay_w = 0.0
+        self.overlay_h = 0.0
+        self.overlay_dirty = true
+    }
+}
+
 pub fn Pastel[O, R].set_overlay_visible(mut self, on: bool, now_ns: int) {
+    if on and (self.overlay_dirty or self.overlay_img.is_none()) {
+        self.rebuild_overlay()
+    }
     self.overlay_visible = on
     let ac = self.cfg.animation
     self.anims.set_overlay(on, ac, now_ns)
@@ -216,10 +312,15 @@ pub fn Pastel[O, R].set_overview_open(mut self, on: bool, now_ns: int) {
     let ac = self.cfg.animation
     self.anims.set_overview(on, ac, now_ns)
     self.needs_layout = true
-    self.broadcast_event("overview-changed", json.obj().with("open", json.Value.Bool(on)))
+    if self.has_ipc_subscribers() {
+        self.broadcast_event("overview-changed", json.obj().with("open", json.Value.Bool(on)))
+    }
 }
 
 pub fn Pastel[O, R].broadcast_event(mut self, kind: str, take detail: json.Value) {
+    guard self.has_ipc_subscribers() else {
+        return
+    }
     guard let Some(got) = self.ipc_srv.take() else {
         return
     }
@@ -235,6 +336,9 @@ pub fn Pastel[O, R].broadcast_event(mut self, kind: str, take detail: json.Value
 /// Notify IPC subscribers that a window's state (maximized, fullscreen, floating, tabbed,
 /// title/app_id, workspace, or monitor) changed so status bars refresh immediately.
 pub fn Pastel[O, R].broadcast_window_changed(mut self, id: u64) {
+    guard self.has_ipc_subscribers() else {
+        return
+    }
     self.broadcast_event("window-changed", json.obj().with("id", json.Value.Int(int(id))))
 }
 
@@ -248,7 +352,9 @@ pub fn Pastel[O, R].sync_focus(mut self) {
     }
     if want != self.last_focus_id {
         self.last_focus_id = want
-        self.broadcast_event("focus-changed", json.obj().with("window_id", json.Value.Int(int(want))))
+        if self.has_ipc_subscribers() {
+            self.broadcast_event("focus-changed", json.obj().with("window_id", json.Value.Int(int(want))))
+        }
     }
 }
 
@@ -261,7 +367,11 @@ pub fn Pastel[O, R].state_json(self) -> str {
         let full = self.desktop.monitors[mi].full_rect
         var scale = 1.0
         var hdr_on = false
-        if let Some(so) = self.out_by_id.get(self.desktop.monitors[mi].id) {
+        let oi = if mi < self.mon_to_out.len() { self.mon_to_out[mi] } else { -1 }
+        if oi >= 0 and oi < self.cached_outputs.len() {
+            scale = self.cached_outputs[oi].4
+            hdr_on = self.d.hdr(self.cached_out_handles[oi])
+        } else if let Some(so) = self.out_by_id.get(self.desktop.monitors[mi].id) {
             let (_, _, ow, oh) = self.d.output_rect(so)
             let desc = self.d.output_desc(so)
             scale = outputs.output_scale(ow, oh, desc.mode)
@@ -270,38 +380,60 @@ pub fn Pastel[O, R].state_json(self) -> str {
         let mobj = json.obj().with("name", json.Value.Str(self.desktop.monitors[mi].name.clone())).with("x", json.Value.Num(full.x)).with("y", json.Value.Num(full.y)).with("width", json.Value.Num(full.w)).with("height", json.Value.Num(full.h)).with("scale", json.Value.Num(scale)).with("hdr", json.Value.Bool(hdr_on)).with("active_workspace", json.Value.Int(active_ws)).with("workspaces", json.Value.Int(ws_count)).with("focused", json.Value.Bool(mi == self.desktop.active_monitor))
         mons = mons.append(mobj)
     }
-    var wins = json.arr()
-    for id in self.win_by_id.keys() {
-        if let Some(w) = self.win_by_id.get(id) {
-            let loc = self.desktop.locate(id)
-            var mon_name = ""
-            var is_fs = false
-            var is_max = false
-            var is_tab = false
-            if let Some(l) = loc {
-                if l.monitor_idx < self.desktop.monitors.len() {
-                    mon_name = self.desktop.monitors[l.monitor_idx].name.clone()
-                    if l.workspace_idx < self.desktop.monitors[l.monitor_idx].workspaces.len() {
-                        is_fs = self.desktop.monitors[l.monitor_idx].workspaces[l.workspace_idx].fullscreen == Some(id)
-                        if not l.floating {
-                            for ci in 0..self.desktop.monitors[l.monitor_idx].workspaces[l.workspace_idx].strip.columns.len() {
-                                if self.desktop.monitors[l.monitor_idx].workspaces[l.workspace_idx].strip.columns[ci].find(id) >= 0 {
-                                    is_max = self.desktop.monitors[l.monitor_idx].workspaces[l.workspace_idx].strip.columns[ci].maximized
-                                    is_tab = self.desktop.monitors[l.monitor_idx].workspaces[l.workspace_idx].strip.columns[ci].tabbed
-                                    break
-                                }
-                            }
-                        }
+    // Pre-index only maximized or tabbed columns in a single O(N) pass so window assembly stays O(N).
+    var col_flags: map.Map[u64, (bool, bool)] = map.Map.new()
+    for mi in 0..self.desktop.monitors.len() {
+        for wi in 0..self.desktop.monitors[mi].workspaces.len() {
+            for ci in 0..self.desktop.monitors[mi].workspaces[wi].strip.columns.len() {
+                let c_max = self.desktop.monitors[mi].workspaces[wi].strip.columns[ci].maximized
+                let c_tab = self.desktop.monitors[mi].workspaces[wi].strip.columns[ci].tabbed
+                if c_max or c_tab {
+                    for slot in self.desktop.monitors[mi].workspaces[wi].strip.columns[ci].windows {
+                        discard col_flags.insert(slot.id, (c_max, c_tab))
                     }
                 }
             }
-            let blocked = self.win_rules.get(id).map(fn(r) => r.block_out_from_screencast).unwrap_or(false)
-            let (cw, ch) = self.d.size(w)
-            let wobj = json.obj().with("id", json.Value.Int(int(id))).with("app_id", json.Value.Str(self.d.app_id(w))).with("title", json.Value.Str(self.d.title(w))).with("monitor", json.Value.Str(mon_name)).with("focused", json.Value.Bool(self.desktop.focused_window() == Some(id))).with("floating", json.Value.Bool(loc.map(fn(l) => l.floating).unwrap_or(false))).with("fullscreen", json.Value.Bool(is_fs)).with("maximized", json.Value.Bool(is_max)).with("tabbed", json.Value.Bool(is_tab)).with("block_out_from_screencast", json.Value.Bool(blocked)).with("width", json.Value.Int(int(cw))).with("height", json.Value.Int(int(ch))).with("workspace", json.Value.Int(loc.map(fn(l) => l.workspace_idx + 1).unwrap_or(0)))
-            wins = wins.append(wobj)
         }
     }
-    let root = json.obj().with("ok", json.Value.Bool(true)).with("focused_window", json.Value.Int(int(self.desktop.focused_window().unwrap_or(0)))).with("overlay_visible", json.Value.Bool(self.overlay_visible)).with("overview_open", json.Value.Bool(self.overview_open)).with("monitors_powered", json.Value.Bool(self.monitors_powered)).with("monitors", mons).with("windows", wins)
+    let focused_opt = self.desktop.focused_window()
+    let has_col_flags = not col_flags.is_empty()
+    var wins = json.arr()
+    for e in self.win_by_id.entries() {
+        let id = e.key
+        let w = e.val
+        let loc = self.desktop.locate(id)
+        var mon_name = ""
+        var is_fs = false
+        var is_max = false
+        var is_tab = false
+        var is_float = false
+        var ws_num = 0
+        if let Some(l) = loc {
+            is_float = l.floating
+            ws_num = l.workspace_idx + 1
+            if l.monitor_idx < self.desktop.monitors.len() {
+                mon_name = self.desktop.monitors[l.monitor_idx].name.clone()
+                if l.workspace_idx < self.desktop.monitors[l.monitor_idx].workspaces.len() {
+                    is_fs = self.desktop.monitors[l.monitor_idx].workspaces[l.workspace_idx].fullscreen == Some(id)
+                }
+            }
+            if not is_float and has_col_flags {
+                if let Some((cm, ct)) = col_flags.get(id) {
+                    is_max = cm
+                    is_tab = ct
+                }
+            }
+        }
+        let blocked = if self.has_rules {
+            self.win_rules.with(id, fn(r) => r.block_out_from_screencast).unwrap_or(self.default_visual.4)
+        } else {
+            self.default_visual.4
+        }
+        let (cw, ch) = self.d.size(w)
+        let wobj = json.obj().with("id", json.Value.Int(int(id))).with("app_id", json.Value.Str(self.d.app_id(w))).with("title", json.Value.Str(self.d.title(w))).with("monitor", json.Value.Str(mon_name)).with("focused", json.Value.Bool(focused_opt == Some(id))).with("floating", json.Value.Bool(is_float)).with("fullscreen", json.Value.Bool(is_fs)).with("maximized", json.Value.Bool(is_max)).with("tabbed", json.Value.Bool(is_tab)).with("block_out_from_screencast", json.Value.Bool(blocked)).with("width", json.Value.Int(int(cw))).with("height", json.Value.Int(int(ch))).with("workspace", json.Value.Int(ws_num))
+        wins = wins.append(wobj)
+    }
+    let root = json.obj().with("ok", json.Value.Bool(true)).with("focused_window", json.Value.Int(int(focused_opt.unwrap_or(0)))).with("overlay_visible", json.Value.Bool(self.overlay_visible)).with("overview_open", json.Value.Bool(self.overview_open)).with("monitors_powered", json.Value.Bool(self.monitors_powered)).with("monitors", mons).with("windows", wins)
     return json.encode(root) + "\n"
 }
 
@@ -313,28 +445,39 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
     // step backwards relative to a prior `Frame(_, vblank_ns)` prediction.
     let anim_ns = max(now_ns, self.last_anim_ns)
     self.last_anim_ns = anim_ns
-    outputs.sync_vrr_on_demand(mut self)
+    if self.has_vrr_ondemand {
+        outputs.sync_vrr_on_demand(mut self)
+    }
     var targets = mem.replace(mut self.targets_scratch, [])
     self.desktop.compute_all(mut targets)
     let ac = self.cfg.animation
     let wc = self.cfg.window
-    let fallback_rule = self.cfg.resolve_window("", "")
+    let def_vis = self.default_visual
+    let has_rules = self.has_rules
 
     // 1. Update animation targets and send configures only for windows whose size/state changed.
     // Open a brief layout transaction only for geometry/state transitions while idle (or when a
     // newly mapped tiled window receives its first layout size after an initial `(0, 0)` configure)
     // so focus-only changes and ongoing animations never stall behind a configure wait.
-    var focus_only_cfgs: List[(lum.Window, u64, i32, i32, lum.States, (i32, i32, bool, bool, bool, bool))] = []
-    var geom_cfgs: List[(lum.Window, u64, i32, i32, lum.States, (i32, i32, bool, bool, bool, bool))] = []
+    var focus_only_cfgs = mem.replace(mut self.focus_cfgs_scratch, [])
+    var geom_cfgs = mem.replace(mut self.geom_cfgs_scratch, [])
+    var win_draws = mem.replace(mut self.win_draw_scratch, [])
+    focus_only_cfgs.clear()
+    geom_cfgs.clear()
+    win_draws.clear()
+    win_draws.reserve(targets.len())
     var any_initial_tile = false
     for i in 0..targets.len() {
         let t = targets[i]
-        let rule = match self.win_rules.get(t.id) {
-            Some(r) => r
-            None => fallback_rule.clone()
+        let vis = if has_rules {
+            self.win_rules.with(t.id, fn(r) => (r.opacity, r.blur, r.corner_radius, r.border_width, r.block_out_from_screencast)).unwrap_or(def_vis)
+        } else {
+            def_vis
         }
-        self.anims.update_window(t.id, t.rect, rule.opacity, t.focused, ac, wc, anim_ns)
-        if let Some(w) = self.win_by_id.get(t.id) {
+        let w_opt = self.win_by_id.get(t.id)
+        win_draws.push((w_opt, vis.0, vis.1, vis.2, vis.3, vis.4))
+        self.anims.update_window(t.id, t.rect, vis.0, t.focused, ac, wc, anim_ns)
+        if let Some(w) = w_opt {
             let cw = i32(max(t.rect.w.round(), 1.0))
             let ch = i32(max(t.rect.h.round(), 1.0))
             let want = (cw, ch, t.focused, t.fullscreen, t.floating, t.maximized)
@@ -383,36 +526,52 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
         discard self.d.configure(w, cw, ch, st)
         discard self.configured_sizes.insert(tid, want)
     }
+    self.focus_cfgs_scratch = focus_only_cfgs
+    self.geom_cfgs_scratch = geom_cfgs
 
     // 2. Tick animations to `anim_ns` and build placement + per-output visual effect lists.
     self.anims.begin_frame()
     let ov_t = self.anims.tick_overview(anim_ns)
     var ov_targets = mem.replace(mut self.overview_targets_scratch, [])
     var ov_bands = mem.replace(mut self.overview_bands, [])
+    var ov_idx = mem.replace(mut self.ov_idx_scratch, map.Map.new())
+    var ov_seen = mem.replace(mut self.ov_seen_scratch, [])
     ov_targets.clear()
     ov_bands.clear()
     if ov_t > 0.001 {
         self.desktop.compute_overview(mut ov_targets, mut ov_bands)
+        ov_idx.clear()
+        ov_seen.clear()
+        ov_seen.reserve(ov_targets.len())
+        for oi_idx in 0..ov_targets.len() {
+            discard ov_idx.insert(ov_targets[oi_idx].id, oi_idx)
+            ov_seen.push(false)
+        }
     }
     self.overview_bands = ov_bands
 
     var place_wins = mem.replace(mut self.place_scratch, [])
     place_wins.clear()
-    var out_effects: List[List[ren.WindowEffect]] = []
-    var out_closing: List[List[ren.ClosingEffect]] = []
-    var out_tabs: List[List[ren.TabBar]] = []
-    var out_frames: List[List[ren.OverviewFrame]] = []
-    let outs = self.d.outputs()
-    var out_rects: List[(f64, f64, f64, f64, f64, u64)] = []
-    for so in outs {
-        let (ox, oy, ow, oh) = self.d.output_rect(so)
-        let desc = self.d.output_desc(so)
-        let sc = outputs.output_scale(ow, oh, desc.mode)
-        out_rects.push((ox, oy, ow, oh, sc, outputs.output_id(so)))
+    var out_effects = mem.replace(mut self.out_effects_scratch, [])
+    var out_closing = mem.replace(mut self.out_closing_scratch, [])
+    var out_tabs = mem.replace(mut self.out_tabs_scratch, [])
+    var out_frames = mem.replace(mut self.out_frames_scratch, [])
+    let n_outs = self.cached_outputs.len()
+    while out_effects.len() < n_outs {
         out_effects.push([])
         out_closing.push([])
         out_tabs.push([])
         out_frames.push([])
+    }
+    out_effects.truncate(n_outs)
+    out_closing.truncate(n_outs)
+    out_tabs.truncate(n_outs)
+    out_frames.truncate(n_outs)
+    for oi in 0..n_outs {
+        out_effects[oi].clear()
+        out_closing[oi].clear()
+        out_tabs[oi].clear()
+        out_frames[oi].clear()
     }
 
     // Overview workspace backdrop frames (drawn below thumbnails on each output).
@@ -423,27 +582,25 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
         let band_bd_act = core.Color.rgba(wc.active_color.r, wc.active_color.g, wc.active_color.b, wc.active_color.a * f_alpha).as_vec4()
         let band_bd_inact = core.Color.rgba(wc.inactive_color.r, wc.inactive_color.g, wc.inactive_color.b, wc.inactive_color.a * 0.65 * f_alpha).as_vec4()
         for band in self.overview_bands {
-            guard band.monitor_idx >= 0 and band.monitor_idx < self.desktop.monitors.len() else {
+            guard band.monitor_idx >= 0 and band.monitor_idx < self.mon_to_out.len() else {
                 continue
             }
-            let owner_oid = self.desktop.monitors[band.monitor_idx].id
-            for oi in 0..out_rects.len() {
-                let (ox, oy, _, _, scale, oid) = out_rects[oi]
-                if oid != owner_oid {
-                    continue
-                }
-                let bw = if band.active { max(wc.border_width, 2.0) } else { max(wc.border_width * 0.5, 1.0) }
-                out_frames[oi].push(ren.OverviewFrame {
-                    x: f32(((band.rect.x - ox) * scale).round()),
-                    y: f32(((band.rect.y - oy) * scale).round()),
-                    w: f32((band.rect.w * scale).round()),
-                    h: f32((band.rect.h * scale).round()),
-                    border_width: bw * f32(scale),
-                    border_color: if band.active { band_bd_act } else { band_bd_inact },
-                    fill_color: if band.active { band_fill_act } else { band_fill_inact },
-                    radius: wc.corner_radius * f32(scale),
-                })
+            let oi = self.mon_to_out[band.monitor_idx]
+            guard oi >= 0 and oi < n_outs else {
+                continue
             }
+            let (ox, oy, _, _, scale, _) = self.cached_outputs[oi]
+            let bw = if band.active { max(wc.border_width, 2.0) } else { max(wc.border_width * 0.5, 1.0) }
+            out_frames[oi].push(ren.OverviewFrame {
+                x: f32(((band.rect.x - ox) * scale).round()),
+                y: f32(((band.rect.y - oy) * scale).round()),
+                w: f32((band.rect.w * scale).round()),
+                h: f32((band.rect.h * scale).round()),
+                border_width: bw * f32(scale),
+                border_color: if band.active { band_bd_act } else { band_bd_inact },
+                fill_color: if band.active { band_fill_act } else { band_fill_inact },
+                radius: wc.corner_radius * f32(scale),
+            })
         }
     }
 
@@ -454,19 +611,21 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
         ws_off_y.push(self.anims.tick_output_y(self.desktop.monitors[mi].id, anim_ns))
     }
 
+    let shadow_col_v4 = wc.shadow_color.as_vec4()
+    let act_col_v4 = wc.active_color.as_vec4()
+    let inact_col_v4 = wc.inactive_color.as_vec4()
+    let tab_inact_v4 = core.Color.rgba(wc.inactive_color.r, wc.inactive_color.g, wc.inactive_color.b, 0.45).as_vec4()
+
     for i in 0..targets.len() {
         let t = targets[i]
-        guard let Some(w) = self.win_by_id.get(t.id) else {
+        let (w_opt, rule_op, rule_blur, rule_cr, rule_bw, rule_block) = win_draws[i]
+        guard let Some(w) = w_opt else {
             continue
-        }
-        let rule = match self.win_rules.get(t.id) {
-            Some(r) => r
-            None => fallback_rule.clone()
         }
         let ticked = self.anims.tick_window(t.id, anim_ns)
         var r = t.rect
         var open_sc: f32 = 1.0
-        var op = rule.opacity
+        var op = rule_op
         var bc = if t.focused { wc.active_color } else { wc.inactive_color }
         if let Some((ar, asc, aop, abc)) = ticked {
             r = ar
@@ -479,9 +638,10 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
             bc = bc.lerp(core.Color.rgb(1.0, 1.0, 1.0), bell_a * 0.75)
         }
         let loc_mi = t.monitor_idx
+        let owner_oi = if loc_mi >= 0 and loc_mi < self.mon_to_out.len() { self.mon_to_out[loc_mi] } else { -1 }
         // Slide by whole physical pixels from a pixel-aligned target: windows
         // moving together keep exact gaps and borders instead of shimmering.
-        let k = monitor_scale(self, out_rects, loc_mi)
+        let k = if owner_oi >= 0 and owner_oi < n_outs and self.cached_outputs[owner_oi].4 > 0.0 { self.cached_outputs[owner_oi].4 } else { 1.0 }
         r.x = snap_px(t.rect.x, k) + snap_px(r.x - t.rect.x, k)
         r.y = snap_px(t.rect.y, k) + snap_px(r.y - t.rect.y, k)
         let wy = if loc_mi >= 0 and loc_mi < ws_off_y.len() and not t.fullscreen { ws_off_y[loc_mi] } else { 0.0 }
@@ -490,13 +650,12 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
         var sy = r.y + wy + r.h * (1.0 - f64(open_sc)) * 0.5
         var ov_sc = 1.0
         if ov_t > 0.001 {
-            for ot in ov_targets {
-                if ot.id == t.id {
-                    sx = sx + (ot.rect.x - sx) * ov_t
-                    sy = sy + (ot.rect.y - sy) * ov_t
-                    ov_sc = 1.0 + (ot.overview_scale - 1.0) * ov_t
-                    break
-                }
+            if let Some(oidx) = ov_idx.get(t.id) {
+                let ot = ov_targets[oidx]
+                sx = sx + (ot.rect.x - sx) * ov_t
+                sy = sy + (ot.rect.y - sy) * ov_t
+                ov_sc = 1.0 + (ot.overview_scale - 1.0) * ov_t
+                ov_seen[oidx] = true
             }
         }
         let total_sc = f32(f64(open_sc) * ov_sc)
@@ -519,23 +678,22 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
         }
 
         let in_ov = ov_t > 0.05
-        let radius = if t.fullscreen and not in_ov { f32(0.0) } else { rule.corner_radius * f32(ov_sc) }
+        let radius = if t.fullscreen and not in_ov { f32(0.0) } else { rule_cr * f32(ov_sc) }
         let shadow = if t.fullscreen and not in_ov { f32(0.0) } else { wc.shadow_size * f32(ov_sc) }
-        let bw = if t.fullscreen and not in_ov { f32(0.0) } else { rule.border_width }
-        let want_blur = not t.fullscreen and not in_ov and wc.blur and rule.blur
-        let owner_oid = if has_owner { self.desktop.monitors[loc_mi].id } else { u64(0) }
-        let scoped_out = if (not t.floating or in_ov) and owner_oid != 0 { self.out_by_id.get(owner_oid) } else { None }
-        place_wins.push((w, scoped_out, sx, sy, op, radius, shadow, total_sc, rule.block_out_from_screencast))
+        let bw = if t.fullscreen and not in_ov { f32(0.0) } else { rule_bw }
+        let want_blur = not t.fullscreen and not in_ov and wc.blur and rule_blur
+        let scoped = (not t.floating or in_ov) and owner_oi >= 0 and owner_oi < n_outs
+        let scoped_out = if scoped { Some(self.cached_out_handles[owner_oi]) } else { None }
+        place_wins.push((w, scoped_out, sx, sy, op, radius, shadow, total_sc, rule_block))
 
         let wkey = self.d.window_key(w)
-        for oi in 0..out_rects.len() {
-            let (ox, oy, ow, oh, scale, oid) = out_rects[oi]
-            // Tiled & fullscreen decorations stay scoped to their owning monitor; floating windows can span monitors.
-            if (not t.floating or in_ov) and owner_oid != 0 and oid != owner_oid {
-                continue
-            }
+        let bc_v4 = bc.as_vec4()
+        let blur_xr = wc.blur_xray and not t.floating
+        let show_tab = t.tabbed and not in_ov and not t.fullscreen and not t.floating
+        if scoped {
+            let (ox, oy, ow, oh, scale, _) = self.cached_outputs[owner_oi]
             if sx < ox + ow and sy < oy + oh and sx + vis_w > ox and sy + vis_h > oy {
-                out_effects[oi].push(ren.WindowEffect {
+                out_effects[owner_oi].push(ren.WindowEffect {
                     key: wkey,
                     x: f32(((sx - ox) * scale).round()),
                     y: f32(((sy - oy) * scale).round()),
@@ -543,28 +701,47 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
                     h: f32((vis_h * scale).round()),
                     radius: radius * f32(scale),
                     border_width: bw * f32(scale),
-                    border_color: bc.as_vec4(),
+                    border_color: bc_v4,
                     shadow_size: shadow * f32(scale),
-                    shadow_color: wc.shadow_color.as_vec4(),
+                    shadow_color: shadow_col_v4,
                     blur: want_blur,
-                    blur_xray: wc.blur_xray and not t.floating,
+                    blur_xray: blur_xr,
                     blur_opacity: op,
                     is_overlay: t.floating,
                 })
-                // Tabbed column pill bar along the top edge (hidden during Overview).
-                if t.tabbed and not in_ov and not t.fullscreen and not t.floating {
-                    let tab_act = if t.focused { wc.active_color.as_vec4() } else { wc.inactive_color.as_vec4() }
-                    let tab_inact = core.Color.rgba(wc.inactive_color.r, wc.inactive_color.g, wc.inactive_color.b, 0.45).as_vec4()
-                    out_tabs[oi].push(ren.TabBar {
+                if show_tab {
+                    out_tabs[owner_oi].push(ren.TabBar {
                         x: f32(((sx - ox) * scale).round()),
                         y: f32(((sy - 6.0 - oy) * scale).round()),
                         w: f32((vis_w * scale).round()),
                         h: f32((4.0 * scale).round()),
                         count: t.tab_count,
                         active_idx: t.tab_index,
-                        active_color: tab_act,
-                        inactive_color: tab_inact,
-                        radius: min(rule.corner_radius, 2.0) * f32(scale),
+                        active_color: if t.focused { act_col_v4 } else { inact_col_v4 },
+                        inactive_color: tab_inact_v4,
+                        radius: min(rule_cr, 2.0) * f32(scale),
+                    })
+                }
+            }
+        } else {
+            for oi in 0..n_outs {
+                let (ox, oy, ow, oh, scale, _) = self.cached_outputs[oi]
+                if sx < ox + ow and sy < oy + oh and sx + vis_w > ox and sy + vis_h > oy {
+                    out_effects[oi].push(ren.WindowEffect {
+                        key: wkey,
+                        x: f32(((sx - ox) * scale).round()),
+                        y: f32(((sy - oy) * scale).round()),
+                        w: f32((vis_w * scale).round()),
+                        h: f32((vis_h * scale).round()),
+                        radius: radius * f32(scale),
+                        border_width: bw * f32(scale),
+                        border_color: bc_v4,
+                        shadow_size: shadow * f32(scale),
+                        shadow_color: shadow_col_v4,
+                        blur: want_blur,
+                        blur_xray: blur_xr,
+                        blur_opacity: op,
+                        is_overlay: t.floating,
                     })
                 }
             }
@@ -573,54 +750,45 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
 
     // 2a. Non-active workspace thumbnails shown during Overview (zero extra VRAM, uses Style.scale).
     if ov_t > 0.001 {
-        for ot in ov_targets {
-            var already = false
-            for t in targets {
-                if t.id == ot.id {
-                    already = true
-                    break
-                }
-            }
-            if already {
+        for oi_idx in 0..ov_targets.len() {
+            if ov_seen[oi_idx] {
                 continue
             }
+            let ot = ov_targets[oi_idx]
             guard let Some(w) = self.win_by_id.get(ot.id) else {
                 continue
             }
-            let rule = match self.win_rules.get(ot.id) {
-                Some(r) => r
-                None => fallback_rule.clone()
+            let vis = if has_rules {
+                self.win_rules.with(ot.id, fn(r) => (r.opacity, r.blur, r.corner_radius, r.border_width, r.block_out_from_screencast)).unwrap_or(def_vis)
+            } else {
+                def_vis
             }
             let (cw_actual, ch_actual) = self.d.size(w)
             let ov_sc = ot.overview_scale
             let vis_w = if cw_actual > 0 { f64(cw_actual) * ov_sc } else { ot.rect.w }
             let vis_h = if ch_actual > 0 { f64(ch_actual) * ov_sc } else { ot.rect.h }
-            let op = rule.opacity * f32(ov_t)
-            let radius = rule.corner_radius * f32(ov_sc)
+            let op = vis.0 * f32(ov_t)
+            let radius = vis.2 * f32(ov_sc)
             let shadow = wc.shadow_size * f32(ov_sc)
             let loc_mi = ot.monitor_idx
-            let has_owner = loc_mi >= 0 and loc_mi < self.desktop.monitors.len()
-            let owner_oid = if has_owner { self.desktop.monitors[loc_mi].id } else { u64(0) }
-            let scoped_out = if owner_oid != 0 { self.out_by_id.get(owner_oid) } else { None }
-            place_wins.push((w, scoped_out, ot.rect.x, ot.rect.y, op, radius, shadow, f32(ov_sc), rule.block_out_from_screencast))
+            let owner_oi = if loc_mi >= 0 and loc_mi < self.mon_to_out.len() { self.mon_to_out[loc_mi] } else { -1 }
+            let scoped_out = if owner_oi >= 0 and owner_oi < n_outs { Some(self.cached_out_handles[owner_oi]) } else { None }
+            place_wins.push((w, scoped_out, ot.rect.x, ot.rect.y, op, radius, shadow, f32(ov_sc), vis.4))
             let wkey = self.d.window_key(w)
-            for oi in 0..out_rects.len() {
-                let (ox, oy, ow, oh, scale, oid) = out_rects[oi]
-                if owner_oid != 0 and oid != owner_oid {
-                    continue
-                }
+            if owner_oi >= 0 and owner_oi < n_outs {
+                let (ox, oy, ow, oh, scale, _) = self.cached_outputs[owner_oi]
                 if ot.rect.x < ox + ow and ot.rect.y < oy + oh and ot.rect.x + vis_w > ox and ot.rect.y + vis_h > oy {
-                    out_effects[oi].push(ren.WindowEffect {
+                    out_effects[owner_oi].push(ren.WindowEffect {
                         key: wkey,
                         x: f32(((ot.rect.x - ox) * scale).round()),
                         y: f32(((ot.rect.y - oy) * scale).round()),
                         w: f32((vis_w * scale).round()),
                         h: f32((vis_h * scale).round()),
                         radius: radius * f32(scale),
-                        border_width: rule.border_width * f32(scale),
-                        border_color: wc.inactive_color.as_vec4(),
+                        border_width: vis.3 * f32(scale),
+                        border_color: inact_col_v4,
                         shadow_size: shadow * f32(scale),
-                        shadow_color: wc.shadow_color.as_vec4(),
+                        shadow_color: shadow_col_v4,
                         blur: false,
                         blur_xray: false,
                         blur_opacity: op,
@@ -634,32 +802,50 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
     // 2b. Closing-window fade+scale ghost animations (`[animation].window-close`).
     var closing_frames = mem.replace(mut self.closing_scratch, [])
     self.anims.tick_closing(anim_ns, mut closing_frames)
-    let close_fill = core.Color.rgba(self.cfg.background.r, self.cfg.background.g, self.cfg.background.b, 0.35).as_vec4()
-    for cf in closing_frames {
-        let sx = cf.rect.x + cf.rect.w * (1.0 - f64(cf.scale)) * 0.5
-        let sy = cf.rect.y + cf.rect.h * (1.0 - f64(cf.scale)) * 0.5
-        let sw = cf.rect.w * f64(cf.scale)
-        let sh = cf.rect.h * f64(cf.scale)
-        let owner_oid = if cf.monitor_idx >= 0 and cf.monitor_idx < self.desktop.monitors.len() { self.desktop.monitors[cf.monitor_idx].id } else { u64(0) }
-        for oi in 0..out_rects.len() {
-            let (ox, oy, ow, oh, scale, oid) = out_rects[oi]
-            if owner_oid != 0 and oid != owner_oid {
-                continue
-            }
-            if sx < ox + ow and sy < oy + oh and sx + sw > ox and sy + sh > oy {
-                out_closing[oi].push(ren.ClosingEffect {
-                    x: f32(((sx - ox) * scale).round()),
-                    y: f32(((sy - oy) * scale).round()),
-                    w: f32((sw * scale).round()),
-                    h: f32((sh * scale).round()),
-                    radius: cf.radius * f32(scale),
-                    border_width: cf.border_width * f32(scale),
-                    border_color: cf.border_color.as_vec4(),
-                    shadow_size: cf.shadow_size * f32(scale),
-                    shadow_color: cf.shadow_color.as_vec4(),
-                    fill_color: close_fill,
-                    opacity: cf.opacity,
-                })
+    if not closing_frames.is_empty() {
+        let close_fill = core.Color.rgba(self.cfg.background.r, self.cfg.background.g, self.cfg.background.b, 0.35).as_vec4()
+        for cf in closing_frames {
+            let sx = cf.rect.x + cf.rect.w * (1.0 - f64(cf.scale)) * 0.5
+            let sy = cf.rect.y + cf.rect.h * (1.0 - f64(cf.scale)) * 0.5
+            let sw = cf.rect.w * f64(cf.scale)
+            let sh = cf.rect.h * f64(cf.scale)
+            let owner_oi = if cf.monitor_idx >= 0 and cf.monitor_idx < self.mon_to_out.len() { self.mon_to_out[cf.monitor_idx] } else { -1 }
+            if owner_oi >= 0 and owner_oi < n_outs {
+                let (ox, oy, ow, oh, scale, _) = self.cached_outputs[owner_oi]
+                if sx < ox + ow and sy < oy + oh and sx + sw > ox and sy + sh > oy {
+                    out_closing[owner_oi].push(ren.ClosingEffect {
+                        x: f32(((sx - ox) * scale).round()),
+                        y: f32(((sy - oy) * scale).round()),
+                        w: f32((sw * scale).round()),
+                        h: f32((sh * scale).round()),
+                        radius: cf.radius * f32(scale),
+                        border_width: cf.border_width * f32(scale),
+                        border_color: cf.border_color.as_vec4(),
+                        shadow_size: cf.shadow_size * f32(scale),
+                        shadow_color: cf.shadow_color.as_vec4(),
+                        fill_color: close_fill,
+                        opacity: cf.opacity,
+                    })
+                }
+            } else {
+                for oi in 0..n_outs {
+                    let (ox, oy, ow, oh, scale, _) = self.cached_outputs[oi]
+                    if sx < ox + ow and sy < oy + oh and sx + sw > ox and sy + sh > oy {
+                        out_closing[oi].push(ren.ClosingEffect {
+                            x: f32(((sx - ox) * scale).round()),
+                            y: f32(((sy - oy) * scale).round()),
+                            w: f32((sw * scale).round()),
+                            h: f32((sh * scale).round()),
+                            radius: cf.radius * f32(scale),
+                            border_width: cf.border_width * f32(scale),
+                            border_color: cf.border_color.as_vec4(),
+                            shadow_size: cf.shadow_size * f32(scale),
+                            shadow_color: cf.shadow_color.as_vec4(),
+                            fill_color: close_fill,
+                            opacity: cf.opacity,
+                        })
+                    }
+                }
             }
         }
     }
@@ -688,8 +874,8 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
                 ov_y = max(u.y + (u.h - ov_h) * 0.5 + ov_slide, u.y + 8.0)
                 show_ov = true
                 let ok = ikey(ov_img)
-                for oi in 0..out_rects.len() {
-                    let (ox, oy, ow, oh, scale, _) = out_rects[oi]
+                for oi in 0..n_outs {
+                    let (ox, oy, ow, oh, scale, _) = self.cached_outputs[oi]
                     if ov_x < ox + ow and ov_y < oy + oh and ov_x + ov_w > ox and ov_y + ov_h > oy {
                         out_effects[oi].push(ren.WindowEffect {
                             key: ok,
@@ -699,9 +885,9 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
                             h: f32((ov_h * scale).round()),
                             radius: wc.corner_radius * f32(scale),
                             border_width: wc.border_width * f32(scale),
-                            border_color: wc.active_color.as_vec4(),
+                            border_color: act_col_v4,
                             shadow_size: wc.shadow_size * f32(scale),
-                            shadow_color: wc.shadow_color.as_vec4(),
+                            shadow_color: shadow_col_v4,
                             blur: wc.blur,
                             blur_xray: false,
                             blur_opacity: ov_eff_alpha,
@@ -710,6 +896,14 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
                     }
                 }
             }
+        }
+    } else if not self.overlay_visible and not self.anims.overlay_alpha.active {
+        // Release GPU overlay texture once its hide animation completes to minimize VRAM/RSS.
+        if let Some(old) = self.overlay_img.take() {
+            self.d.drop_image(old)
+            self.overlay_w = 0.0
+            self.overlay_h = 0.0
+            self.overlay_dirty = true
         }
     }
 
@@ -720,7 +914,7 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
         passes: wc.blur_passes,
         offset: wc.blur_offset,
     }
-    for oi in 0..out_rects.len() {
+    for oi in 0..n_outs {
         self.sheet.set_output_all(oi, self.cfg.background, blur_cfg, mem.replace(mut out_effects[oi], []), mem.replace(mut out_closing[oi], []), mem.replace(mut out_tabs[oi], []), mem.replace(mut out_frames[oi], []))
     }
 
@@ -752,27 +946,20 @@ pub fn Pastel[O, R].sync_layout(mut self, now_ns: int) {
     }
     self.targets_scratch = targets
     self.overview_targets_scratch = ov_targets
+    self.win_draw_scratch = win_draws
     self.place_scratch = place_wins
     self.ws_off_scratch = ws_off_y
+    self.out_effects_scratch = out_effects
+    self.out_closing_scratch = out_closing
+    self.out_tabs_scratch = out_tabs
+    self.out_frames_scratch = out_frames
+    self.ov_idx_scratch = ov_idx
+    self.ov_seen_scratch = ov_seen
 }
 
 /// `v` on the physical pixel grid of scale `k`.
 fn snap_px(v: f64, k: f64) -> f64 {
     return (v * k).round() / k
-}
-
-/// Scale of the output showing monitor `mi` (1.0 when unknown).
-fn monitor_scale[O: lum.plug.Output, R: lum.plug.Renderer](p: Pastel[O, R], out_rects: Slice[(f64, f64, f64, f64, f64, u64)], mi: int) -> f64 {
-    guard mi >= 0 and mi < p.desktop.monitors.len() else {
-        return 1.0
-    }
-    let id = p.desktop.monitors[mi].id
-    for (_, _, _, _, sc, oid) in out_rects {
-        if oid == id and sc > 0.0 {
-            return sc
-        }
-    }
-    return 1.0
 }
 
 fn Pastel[O, R].send_ipc(mut self, fd: int, payload: str) -> bool {
@@ -895,7 +1082,9 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
                     self.set_overview_open(false, now)
                 }
             }
-            self.broadcast_event("locked", json.obj().with("locked", json.Value.Bool(on)))
+            if self.has_ipc_subscribers() {
+                self.broadcast_event("locked", json.obj().with("locked", json.Value.Bool(on)))
+            }
             self.needs_layout = true
         }
         Bell(w_opt) => {
@@ -904,7 +1093,9 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
                 self.anims.trigger_bell(wid, time.now_ns())
                 self.needs_layout = true
             }
-            self.broadcast_event("bell", json.obj().with("window_id", json.Value.Int(int(wid))))
+            if self.has_ipc_subscribers() {
+                self.broadcast_event("bell", json.obj().with("window_id", json.Value.Int(int(wid))))
+            }
         }
         Timer(tok) => {
             if tok == tok_cursor_hide {
@@ -924,12 +1115,17 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
             }
         }
         Frame(_, vblank_ns) => {
-            if self.held_since > 0 {
-                // No frame was drawn while the transaction waited for clients.
-                self.anims.delay(time.now_ns() - self.held_since)
-                self.held_since = 0
+            if self.held_since > 0 or not self.pending_fixed_check.is_empty() {
+                let now = time.now_ns()
+                if self.held_since > 0 {
+                    // No frame was drawn while the transaction waited for clients.
+                    self.anims.delay(now - self.held_since)
+                    self.held_since = 0
+                }
+                if not self.pending_fixed_check.is_empty() {
+                    windows.check_late_auto_float(mut self, now)
+                }
             }
-            windows.check_late_auto_float(mut self, time.now_ns())
             if self.anims.is_active() or self.needs_layout {
                 self.sync_layout(vblank_ns)
             }
@@ -938,7 +1134,25 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
         WindowMapped(w) => windows.on_window_mapped(mut self, w)
         WindowUnmapped(w) => windows.on_window_unmapped(mut self, w)
         WindowClosed(w) => windows.on_window_unmapped(mut self, w)
-        WindowTitle(w) => windows.on_window_meta(mut self, w)
+        WindowTitle(w) => {
+            let id = windows.window_id(w)
+            if not self.has_title_rules and self.meta_rule_done.get(id).unwrap_or(false) {
+                var can_skip = self.auto_float_done.get(id).unwrap_or(false)
+                if not can_skip {
+                    let (mnw, mnh, mxw, mxh) = self.d.size_hints(w)
+                    can_skip = self.d.parent(w).is_none() and not self.d.modal(w) and not windows.is_fixed_size(mnw, mnh, mxw, mxh)
+                }
+                if can_skip {
+                    if self.desktop.locate(id).is_some() {
+                        self.broadcast_window_changed(id)
+                    }
+                } else {
+                    windows.on_window_meta(mut self, w)
+                }
+            } else {
+                windows.on_window_meta(mut self, w)
+            }
+        }
         WindowAppId(w) => windows.on_window_meta(mut self, w)
         WindowParent(w) => windows.on_window_parent(mut self, w)
         WindowResized(w, _, _) => windows.on_window_resized(mut self, w)
@@ -968,7 +1182,7 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
             if ok and not only_test {
                 outputs.sync_outputs(mut self)
                 if (outputs.active_output_scale(self) - self.overlay_scale).abs() > 0.05 {
-                    self.rebuild_overlay()
+                    self.invalidate_overlay()
                 }
                 self.needs_layout = true
             }
@@ -1016,7 +1230,7 @@ pub fn Pastel[O, R].handle_event(mut self, e: lum.Event) {
             }
         }
         GpuReset => {
-            self.rebuild_overlay()
+            self.invalidate_overlay()
             self.needs_layout = true
         }
         Ready(token) => {

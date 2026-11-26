@@ -28,7 +28,20 @@ struct ClientFx {
     reg: wl.Registry = wl.Registry { id: 0 }
     globals: List[(u32, u16)] = []
     configures: List[(u32, i32, i32)] = []
+    configure_states: List[(u32, i32, i32, bool)] = []
     exported_handles: List[str] = []
+}
+
+fn states_has_fullscreen(bytes: Slice[u8]) -> bool {
+    var i = 0
+    while i + 4 <= bytes.len() {
+        let v = u32(bytes[i]) | (u32(bytes[i + 1]) << 8) | (u32(bytes[i + 2]) << 16) | (u32(bytes[i + 3]) << 24)
+        if v == u32(2) {
+            return true
+        }
+        i += 4
+    }
+    return false
 }
 
 fn pump[O: lum.plug.Output, R: lum.plug.Renderer](mut p: pastel.compositor.Pastel[O, R], mut fx: ClientFx, ms: int) {
@@ -47,7 +60,10 @@ fn pump[O: lum.plug.Output, R: lum.plug.Renderer](mut p: pastel.compositor.Paste
                 Ok(Some(ev)) => {
                     match ev {
                         WlRegistry(_, Global(n, i, _)) => fx.globals.push((n, proto.ifaces.by_name(i)))
-                        XdgToplevel(tl, Configure(w, h, _)) => fx.configures.push((tl.id, w, h))
+                        XdgToplevel(tl, Configure(w, h, st)) => {
+                            fx.configures.push((tl.id, w, h))
+                            fx.configure_states.push((tl.id, w, h, states_has_fullscreen(st)))
+                        }
                         XdgSurface(xs, Configure(serial)) => xs.ack_configure(mut fx.c, serial)
                         ZxdgExported(_, Handle(h)) => fx.exported_handles.push(h.clone())
                         _ => {}
@@ -648,4 +664,156 @@ test "fixed-size dialogs, async xdg-foreign parents, late xdg-dialog modals, and
     pump(mut p, mut fx, 40)
     let ov_id = p.desktop.focused_window().unwrap()
     assert(not p.desktop.locate(ov_id).unwrap().floating)
+}
+
+test "pre-map fullscreen, fixed-size fullscreen guard, mandatory configure replies, and inactive-workspace fullscreen" {
+    let dir = fs.create_temp_dir("pastel-e2e-fs").expect("temp dir")
+    discard env.set("XDG_RUNTIME_DIR", dir)
+
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(comp_ren) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped: no Vulkan device")
+        return
+    }
+    let mode = lum.Mode { width: 1920, height: 1080, refresh_mhz: 60000 }
+    let opts = lum.Options { backend: lum.Kind.Headless, headless: [mode], title: "Pastel-FS-Test" }
+    let be = lum.backend.Backend.open(lum.backend.Options { kind: lum.Kind.Headless, headless: [mode] }).expect("headless")
+    let disp = lum.display.Display.with(opts, be, comp_ren).expect("display")
+
+    let config = cfg.from_toml("").expect("default config")
+    var p = pastel.compositor.Pastel.new(disp, config, "", false, sheet)
+    defer p.shutdown()
+
+    let conn = wire.connect(p.d.socket()).expect("connect wayland")
+    var fx = ClientFx { c: conn }
+    let comp = wl.Compositor { id: bind_global(mut p, mut fx, wl.compositor_iface, 6) }
+    let shm = wl.Shm { id: bind_global(mut p, mut fx, wl.shm_iface, 1) }
+    let wm = xdg.WmBase { id: bind_global(mut p, mut fx, xdg.wm_base_iface, 2) }
+
+    // 1. Pre-map set_fullscreen BEFORE initial commit (GLFW native Wayland & xwayland-satellite startup):
+    //    first configure MUST already be (1920, 1080, fullscreen=true), and fixed min==max hints must NOT
+    //    demote the window out of fullscreen into floating.
+    let s1 = comp.create_surface(mut fx.c)
+    let xs1 = wm.get_xdg_surface(mut fx.c, s1)
+    let tl1 = xs1.get_toplevel(mut fx.c)
+    tl1.set_app_id(mut fx.c, "com.mojang.minecraft")
+    tl1.set_title(mut fx.c, "Minecraft* 1.21.4")
+    tl1.set_fullscreen(mut fx.c, None)
+    s1.commit(mut fx.c)
+    pump(mut p, mut fx, 40)
+    assert(not fx.configure_states.is_empty())
+    let first_cfg = fx.configure_states[fx.configure_states.len() - 1]
+    assert_eq(first_cfg, (tl1.id, i32(1920), i32(1080), true))
+
+    tl1.set_min_size(mut fx.c, 1920, 1080)
+    tl1.set_max_size(mut fx.c, 1920, 1080)
+    let fd1 = os.memfd("mc-fs", 1920 * 1080 * 4).expect("memfd")
+    let pool1 = shm.create_pool(mut fx.c, fd1, 1920 * 1080 * 4)
+    os.close(fd1)
+    let buf1 = pool1.create_buffer(mut fx.c, 0, 1920, 1080, 1920 * 4, wl.ShmFormat.Xrgb8888)
+    s1.attach(mut fx.c, Some(buf1), 0, 0)
+    s1.commit(mut fx.c)
+    pump(mut p, mut fx, 50)
+    let mc1_id = p.desktop.focused_window().unwrap()
+    assert_eq(p.desktop.monitors[0].workspaces[0].fullscreen, Some(mc1_id))
+    assert(not p.desktop.locate(mc1_id).unwrap().floating)
+
+    // Redundant set_fullscreen while already fullscreen MUST still elicit an xdg-shell configure reply.
+    let before_redundant = fx.configure_states.len()
+    tl1.set_fullscreen(mut fx.c, None)
+    pump(mut p, mut fx, 40)
+    assert(fx.configure_states.len() > before_redundant)
+    assert_eq(fx.configure_states[fx.configure_states.len() - 1], (tl1.id, i32(1920), i32(1080), true))
+
+    // Unset fullscreen cleanly exits fullscreen and sends non-fullscreen configure.
+    let before_unset = fx.configure_states.len()
+    tl1.unset_fullscreen(mut fx.c)
+    pump(mut p, mut fx, 40)
+    assert_eq(p.desktop.monitors[0].workspaces[0].fullscreen, None)
+    assert(fx.configure_states.len() > before_unset)
+    assert_eq(fx.configure_states[fx.configure_states.len() - 1].3, false)
+
+    tl1.destroy(mut fx.c)
+    xs1.destroy(mut fx.c)
+    s1.destroy(mut fx.c)
+    pump(mut p, mut fx, 40)
+
+    // 2. Pre-map set_fullscreen AFTER WindowNew (between initial commit and first buffer):
+    let s2 = comp.create_surface(mut fx.c)
+    let xs2 = wm.get_xdg_surface(mut fx.c, s2)
+    let tl2 = xs2.get_toplevel(mut fx.c)
+    tl2.set_app_id(mut fx.c, "minecraft-launcher")
+    s2.commit(mut fx.c)
+    pump(mut p, mut fx, 30)
+    assert_eq(fx.configure_states[fx.configure_states.len() - 1], (tl2.id, i32(0), i32(0), false))
+    tl2.set_fullscreen(mut fx.c, None)
+    pump(mut p, mut fx, 30)
+    assert_eq(fx.configure_states[fx.configure_states.len() - 1], (tl2.id, i32(1920), i32(1080), true))
+    let fd2 = os.memfd("mc-fs2", 1920 * 1080 * 4).expect("memfd")
+    let pool2 = shm.create_pool(mut fx.c, fd2, 1920 * 1080 * 4)
+    os.close(fd2)
+    let buf2 = pool2.create_buffer(mut fx.c, 0, 1920, 1080, 1920 * 4, wl.ShmFormat.Xrgb8888)
+    s2.attach(mut fx.c, Some(buf2), 0, 0)
+    s2.commit(mut fx.c)
+    pump(mut p, mut fx, 40)
+    let mc2_id = p.desktop.focused_window().unwrap()
+    assert_eq(p.desktop.monitors[0].workspaces[0].fullscreen, Some(mc2_id))
+    tl2.destroy(mut fx.c)
+    xs2.destroy(mut fx.c)
+    s2.destroy(mut fx.c)
+    pump(mut p, mut fx, 40)
+
+    // 3. Windowed -> runtime set_fullscreen + late fixed min==max hints + title change must STAY fullscreen
+    //    (auto-float heuristics must never yank an active fullscreen window to floating).
+    let s3 = comp.create_surface(mut fx.c)
+    let xs3 = wm.get_xdg_surface(mut fx.c, s3)
+    let tl3 = xs3.get_toplevel(mut fx.c)
+    tl3.set_app_id(mut fx.c, "com.mojang.minecraft")
+    tl3.set_title(mut fx.c, "Minecraft")
+    s3.commit(mut fx.c)
+    pump(mut p, mut fx, 30)
+    let fd3 = os.memfd("mc-win", 854 * 480 * 4).expect("memfd")
+    let pool3 = shm.create_pool(mut fx.c, fd3, 854 * 480 * 4)
+    os.close(fd3)
+    let buf3 = pool3.create_buffer(mut fx.c, 0, 854, 480, 854 * 4, wl.ShmFormat.Xrgb8888)
+    s3.attach(mut fx.c, Some(buf3), 0, 0)
+    s3.commit(mut fx.c)
+    pump(mut p, mut fx, 40)
+    let mc3_id = p.desktop.focused_window().unwrap()
+    assert(not p.desktop.locate(mc3_id).unwrap().floating)
+
+    tl3.set_fullscreen(mut fx.c, None)
+    pump(mut p, mut fx, 30)
+    assert_eq(p.desktop.monitors[0].workspaces[0].fullscreen, Some(mc3_id))
+    // Commit fixed 1920x1080 min==max constraints, resize buffer, and update title while fullscreen.
+    tl3.set_min_size(mut fx.c, 1920, 1080)
+    tl3.set_max_size(mut fx.c, 1920, 1080)
+    tl3.set_title(mut fx.c, "Minecraft* 1.21.4 - Singleplayer")
+    let fd3b = os.memfd("mc-win-fs", 1920 * 1080 * 4).expect("memfd")
+    let pool3b = shm.create_pool(mut fx.c, fd3b, 1920 * 1080 * 4)
+    os.close(fd3b)
+    let buf3b = pool3b.create_buffer(mut fx.c, 0, 1920, 1080, 1920 * 4, wl.ShmFormat.Xrgb8888)
+    s3.attach(mut fx.c, Some(buf3b), 0, 0)
+    s3.commit(mut fx.c)
+    pump(mut p, mut fx, 60)
+    assert_eq(p.desktop.monitors[0].workspaces[0].fullscreen, Some(mc3_id))
+    assert(not p.desktop.locate(mc3_id).unwrap().floating)
+
+    // 4. Inactive-workspace set_fullscreen/unset_fullscreen still emits a configure reply immediately.
+    tl3.unset_fullscreen(mut fx.c)
+    pump(mut p, mut fx, 40)
+    assert_eq(p.desktop.monitors[0].workspaces[0].fullscreen, None)
+    pastel.input.dispatch_action(mut p, cfg.Action.FocusWorkspace(2)).expect("ws 2")
+    assert_eq(p.desktop.monitors[0].active_ws, 1)
+    let before_inact = fx.configure_states.len()
+    tl3.set_fullscreen(mut fx.c, None)
+    pump(mut p, mut fx, 40)
+    assert_eq(p.desktop.monitors[0].workspaces[0].fullscreen, Some(mc3_id))
+    assert(fx.configure_states.len() > before_inact)
+    assert_eq(fx.configure_states[fx.configure_states.len() - 1], (tl3.id, i32(1920), i32(1080), true))
+
+    tl3.destroy(mut fx.c)
+    xs3.destroy(mut fx.c)
+    s3.destroy(mut fx.c)
+    pump(mut p, mut fx, 40)
 }

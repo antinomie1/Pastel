@@ -194,14 +194,8 @@ pub fn Workspace.compute_layers(mut self, monitor_idx: int, ws_idx: int, is_acti
         })
         return
     }
-    let active_win = self.focused().unwrap_or(0)
-    let start = tiled_out.len()
-    self.strip.compute(usable_rect, gap, center, mut tiled_out)
-    for i in start..tiled_out.len() {
-        tiled_out[i].monitor_idx = monitor_idx
-        tiled_out[i].workspace_idx = ws_idx
-        tiled_out[i].focused = is_active_monitor and tiled_out[i].id == active_win
-    }
+    let active_win = if is_active_monitor { self.focused().unwrap_or(0) } else { u64(0) }
+    self.strip.compute_for(usable_rect, gap, center, monitor_idx, ws_idx, is_active_monitor, active_win, mut tiled_out)
     for f in self.floating {
         float_out.push(traits.TileTarget {
             id: f.id,
@@ -217,21 +211,26 @@ pub fn Workspace.compute_layers(mut self, monitor_idx: int, ws_idx: int, is_acti
 }
 
 fn transform_overview_targets(mut list: List[traits.TileTarget], start: int, full_rect: core.Rect, usable_rect: core.Rect, band_rect: core.Rect, scale: f64) {
-    var i = start
-    while i < list.len() {
-        let r = list[i].rect
+    let left_edge = usable_rect.x + 1.0
+    let right_edge = usable_rect.right() - 1.0
+    var w = start
+    for r_idx in start..list.len() {
+        let r = list[r_idx].rect
         let nx = band_rect.x + (r.x - full_rect.x) * scale
         let ny = band_rect.y + (r.y - full_rect.y) * scale
         let nw = max(r.w * scale, 4.0)
         let nh = max(r.h * scale, 4.0)
-        if nx + nw <= usable_rect.x + 1.0 or nx >= usable_rect.right() - 1.0 {
-            discard list.remove(i)
+        if nx + nw <= left_edge or nx >= right_edge {
             continue
         }
-        list[i].rect = core.Rect.new(nx, ny, nw, nh)
-        list[i].overview_scale = scale
-        i += 1
+        if w != r_idx {
+            list[w] = list[r_idx]
+        }
+        list[w].rect = core.Rect { x: nx, y: ny, w: nw, h: nh }
+        list[w].overview_scale = scale
+        w += 1
     }
+    list.truncate(w)
 }
 
 /// Compute scaled thumbnail targets for this workspace inside `band_rect` for Overview mode.

@@ -70,9 +70,11 @@ pub fn Desktop.reconfigure(mut self, fixed_workspaces: int, gap: f64, default_wi
     self.default_width = default_width.clamp(0.1, 1.0)
     self.center_mode = center_mode
     for mi in 0..self.monitors.len() {
-        self.normalize_workspaces(mi)
+        let shifted = self.normalize_workspaces(mi)
+        if shifted >= 0 {
+            self.reindex_monitor_from(mi, shifted)
+        }
     }
-    self.rebuild_index()
 }
 
 /// Toggle whether a workspace containing a single column always centers it horizontally.
@@ -105,9 +107,11 @@ fn floating_rect_for(u: core.Rect, natural_w: f64, natural_h: f64) -> core.Rect 
     return core.Rect.new(u.x + (u.w - w) * 0.5, u.y + (u.h - h) * 0.5, w, h)
 }
 
-fn Desktop.normalize_workspaces(mut self, mi: int) {
+/// Normalize workspaces on monitor `mi`, returning the lowest workspace index whose
+/// windows shifted/migrated, or `-1` if no existing workspace index changed.
+fn Desktop.normalize_workspaces(mut self, mi: int) -> int {
     guard mi >= 0 and mi < self.monitors.len() else {
-        return
+        return -1
     }
     if self.fixed_workspaces > 0 {
         while self.monitors[mi].workspaces.len() < self.fixed_workspaces {
@@ -117,18 +121,21 @@ fn Desktop.normalize_workspaces(mut self, mi: int) {
         // If fixed_workspaces decreased on reload, migrate excess windows into the last kept workspace.
         let keep = self.fixed_workspaces
         let dst_wi = keep - 1
+        var migrated = false
         while self.monitors[mi].workspaces.len() > keep {
             let extra = self.monitors[mi].workspaces.pop().unwrap()
             for c in extra.strip.columns {
                 self.monitors[mi].workspaces[dst_wi].insert_column(c.clone())
+                migrated = true
             }
             for f in extra.floating {
                 self.monitors[mi].workspaces[dst_wi].insert_floating(f.id, f.rect)
+                migrated = true
             }
         }
         self.monitors[mi].active_ws = self.monitors[mi].active_ws.clamp(0, self.monitors[mi].workspaces.len() - 1)
         self.monitors[mi].prev_ws = self.monitors[mi].prev_ws.clamp(0, self.monitors[mi].workspaces.len() - 1)
-        return
+        return if migrated { dst_wi } else { -1 }
     }
     // Dynamic niri-style mode: keep active workspace and non-empty workspaces, plus 1 trailing empty spare.
     if self.monitors[mi].workspaces.is_empty() {
@@ -136,11 +143,15 @@ fn Desktop.normalize_workspaces(mut self, mi: int) {
         self.monitors[mi].workspaces.push(ws)
         self.monitors[mi].active_ws = 0
         self.monitors[mi].prev_ws = 0
-        return
+        return -1
     }
+    var first_shifted = -1
     var i = 0
     while i < self.monitors[mi].workspaces.len() - 1 {
         if i != self.monitors[mi].active_ws and self.monitors[mi].workspaces[i].is_empty() {
+            if first_shifted < 0 {
+                first_shifted = i
+            }
             discard self.monitors[mi].workspaces.remove(i)
             if i < self.monitors[mi].active_ws {
                 self.monitors[mi].active_ws -= 1
@@ -159,6 +170,27 @@ fn Desktop.normalize_workspaces(mut self, mi: int) {
     }
     self.monitors[mi].active_ws = self.monitors[mi].active_ws.clamp(0, self.monitors[mi].workspaces.len() - 1)
     self.monitors[mi].prev_ws = self.monitors[mi].prev_ws.clamp(0, self.monitors[mi].workspaces.len() - 1)
+    return first_shifted
+}
+
+/// Update reverse-index entries for monitor `mi` starting at workspace `from_ws` without
+/// clearing or walking unaffected monitors/workspaces.
+fn Desktop.reindex_monitor_from(mut self, mi: int, from_ws: int) {
+    guard mi >= 0 and mi < self.monitors.len() and from_ws >= 0 else {
+        return
+    }
+    for wi in from_ws..self.monitors[mi].workspaces.len() {
+        for ci in 0..self.monitors[mi].workspaces[wi].strip.columns.len() {
+            for ri in 0..self.monitors[mi].workspaces[wi].strip.columns[ci].windows.len() {
+                let id = self.monitors[mi].workspaces[wi].strip.columns[ci].windows[ri].id
+                discard self.index.insert(id, WindowLoc { monitor_idx: mi, workspace_idx: wi, floating: false })
+            }
+        }
+        for fi in 0..self.monitors[mi].workspaces[wi].floating.len() {
+            let id = self.monitors[mi].workspaces[wi].floating[fi].id
+            discard self.index.insert(id, WindowLoc { monitor_idx: mi, workspace_idx: wi, floating: true })
+        }
+    }
 }
 
 fn Desktop.rebuild_index(mut self) {
@@ -261,7 +293,7 @@ pub fn Desktop.remove_monitor(mut self, id: u64) {
                 self.monitors[dst_m].workspaces[dst_w].insert_floating(f.id, clamped)
             }
         }
-        self.normalize_workspaces(dst_m)
+        discard self.normalize_workspaces(dst_m)
     } else {
         self.active_monitor = 0
         for ws in gone.workspaces {
@@ -355,8 +387,10 @@ pub fn Desktop.add_window_full(mut self, id: u64, floating: bool, width_hint: f6
         }
     }
     discard self.index.insert(id, WindowLoc { monitor_idx: mi, workspace_idx: wi, floating })
-    self.normalize_workspaces(mi)
-    self.rebuild_index()
+    let shifted = self.normalize_workspaces(mi)
+    if shifted >= 0 {
+        self.reindex_monitor_from(mi, shifted)
+    }
 }
 
 /// Move the focused floating window by `(dx, dy)` logical pixels.
@@ -438,8 +472,11 @@ pub fn Desktop.apply_late_rule_sized(mut self, id: u64, floating: Option[bool], 
                     discard self.monitors[mi].workspaces[from_ws].remove(id)
                     self.monitors[mi].workspaces[to_ws].insert_tiled(id, wf)
                 }
-                self.normalize_workspaces(mi)
-                self.rebuild_index()
+                discard self.index.insert(id, WindowLoc { monitor_idx: mi, workspace_idx: to_ws, floating: loc.floating })
+                let shifted = self.normalize_workspaces(mi)
+                if shifted >= 0 {
+                    self.reindex_monitor_from(mi, shifted)
+                }
                 changed = true
             }
         }
@@ -471,8 +508,10 @@ pub fn Desktop.remove_window(mut self, id: u64) -> bool {
         return false
     }
     let ok = self.monitors[loc.monitor_idx].workspaces[loc.workspace_idx].remove(id)
-    self.normalize_workspaces(loc.monitor_idx)
-    self.rebuild_index()
+    let shifted = self.normalize_workspaces(loc.monitor_idx)
+    if shifted >= 0 {
+        self.reindex_monitor_from(loc.monitor_idx, shifted)
+    }
     return ok
 }
 
@@ -490,12 +529,17 @@ pub fn Desktop.focus_window(mut self, id: u64) -> bool {
     let ok = self.monitors[loc.monitor_idx].workspaces[loc.workspace_idx].focus_window(id)
     if self.fixed_workspaces == 0 and (prev_mi != loc.monitor_idx or prev_ws != loc.workspace_idx) {
         if prev_mi >= 0 and prev_mi < self.monitors.len() {
-            self.normalize_workspaces(prev_mi)
+            let sh1 = self.normalize_workspaces(prev_mi)
+            if sh1 >= 0 {
+                self.reindex_monitor_from(prev_mi, sh1)
+            }
         }
         if loc.monitor_idx != prev_mi {
-            self.normalize_workspaces(loc.monitor_idx)
+            let sh2 = self.normalize_workspaces(loc.monitor_idx)
+            if sh2 >= 0 {
+                self.reindex_monitor_from(loc.monitor_idx, sh2)
+            }
         }
-        self.rebuild_index()
     }
     return ok
 }
@@ -519,9 +563,15 @@ pub fn Desktop.relocate_floating_to_monitor(mut self, id: u64, target_mi: int) -
     let dst_w = self.monitors[target_mi].active_ws
     self.monitors[target_mi].workspaces[dst_w].insert_floating(id, rect)
     self.active_monitor = target_mi
-    self.normalize_workspaces(src_m)
-    self.normalize_workspaces(target_mi)
-    self.rebuild_index()
+    discard self.index.insert(id, WindowLoc { monitor_idx: target_mi, workspace_idx: dst_w, floating: true })
+    let sh1 = self.normalize_workspaces(src_m)
+    if sh1 >= 0 {
+        self.reindex_monitor_from(src_m, sh1)
+    }
+    let sh2 = self.normalize_workspaces(target_mi)
+    if sh2 >= 0 {
+        self.reindex_monitor_from(target_mi, sh2)
+    }
     return true
 }
 
@@ -539,8 +589,11 @@ pub fn Desktop.set_floating_sized(mut self, id: u64, floating: bool, natural_w: 
     if not floating {
         discard self.monitors[mi].workspaces[wi].remove(id)
         self.monitors[mi].workspaces[wi].insert_tiled(id, self.default_width)
-        self.normalize_workspaces(mi)
-        self.rebuild_index()
+        discard self.index.insert(id, WindowLoc { monitor_idx: mi, workspace_idx: wi, floating: false })
+        let sh = self.normalize_workspaces(mi)
+        if sh >= 0 {
+            self.reindex_monitor_from(mi, sh)
+        }
         return true
     }
     var dst_mi = mi
@@ -569,11 +622,17 @@ pub fn Desktop.set_floating_sized(mut self, id: u64, floating: bool, natural_w: 
     } else {
         self.monitors[dst_mi].workspaces[dst_wi].insert_floating_unfocused(id, r)
     }
-    self.normalize_workspaces(mi)
-    if dst_mi != mi {
-        self.normalize_workspaces(dst_mi)
+    discard self.index.insert(id, WindowLoc { monitor_idx: dst_mi, workspace_idx: dst_wi, floating: true })
+    let sh1 = self.normalize_workspaces(mi)
+    if sh1 >= 0 {
+        self.reindex_monitor_from(mi, sh1)
     }
-    self.rebuild_index()
+    if dst_mi != mi {
+        let sh2 = self.normalize_workspaces(dst_mi)
+        if sh2 >= 0 {
+            self.reindex_monitor_from(dst_mi, sh2)
+        }
+    }
     return true
 }
 
@@ -594,7 +653,7 @@ pub fn Desktop.toggle_floating(mut self, id: u64) -> bool {
         let r = core.Rect.new(u.x + (u.w - w) * 0.5, u.y + (u.h - h) * 0.5, w, h)
         self.monitors[mi].workspaces[wi].insert_floating(id, r)
     }
-    self.rebuild_index()
+    discard self.index.insert(id, WindowLoc { monitor_idx: mi, workspace_idx: wi, floating: not loc.floating })
     return true
 }
 
@@ -662,9 +721,15 @@ pub fn Desktop.move_window_to_monitor(mut self, id: u64, target_monitor_id: u64)
         self.monitors[dst_m].workspaces[dst_w].insert_tiled(id, saved_w)
     }
     self.active_monitor = dst_m
-    self.normalize_workspaces(src_m)
-    self.normalize_workspaces(dst_m)
-    self.rebuild_index()
+    discard self.index.insert(id, WindowLoc { monitor_idx: dst_m, workspace_idx: dst_w, floating: loc.floating })
+    let sh1 = self.normalize_workspaces(src_m)
+    if sh1 >= 0 {
+        self.reindex_monitor_from(src_m, sh1)
+    }
+    let sh2 = self.normalize_workspaces(dst_m)
+    if sh2 >= 0 {
+        self.reindex_monitor_from(dst_m, sh2)
+    }
     return true
 }
 
@@ -691,8 +756,10 @@ pub fn Desktop.focus_workspace(mut self, ws1: int) -> bool {
     }
     self.monitors[mi].prev_ws = self.monitors[mi].active_ws
     self.monitors[mi].active_ws = clamped
-    self.normalize_workspaces(mi)
-    self.rebuild_index()
+    let sh = self.normalize_workspaces(mi)
+    if sh >= 0 {
+        self.reindex_monitor_from(mi, sh)
+    }
     return true
 }
 
@@ -764,8 +831,11 @@ fn Desktop.move_focused_to_workspace_opt(mut self, ws1: int, follow: bool) -> bo
         self.monitors[mi].prev_ws = from_ws
         self.monitors[mi].active_ws = to_ws
     }
-    self.normalize_workspaces(mi)
-    self.rebuild_index()
+    discard self.index.insert(id, WindowLoc { monitor_idx: mi, workspace_idx: to_ws, floating: loc.floating })
+    let sh = self.normalize_workspaces(mi)
+    if sh >= 0 {
+        self.reindex_monitor_from(mi, sh)
+    }
     return true
 }
 
@@ -816,11 +886,16 @@ pub fn Desktop.move_column_to_workspace(mut self, ws1: int) -> bool {
     if self.monitors[mi].workspaces[from_ws].strip.is_empty() and not self.monitors[mi].workspaces[from_ws].floating.is_empty() {
         self.monitors[mi].workspaces[from_ws].focus_floating = true
     }
+    for slot in col.windows {
+        discard self.index.insert(slot.id, WindowLoc { monitor_idx: mi, workspace_idx: to_ws, floating: false })
+    }
     self.monitors[mi].workspaces[to_ws].insert_column(col)
     self.monitors[mi].prev_ws = from_ws
     self.monitors[mi].active_ws = to_ws
-    self.normalize_workspaces(mi)
-    self.rebuild_index()
+    let sh = self.normalize_workspaces(mi)
+    if sh >= 0 {
+        self.reindex_monitor_from(mi, sh)
+    }
     return true
 }
 
@@ -896,9 +971,15 @@ pub fn Desktop.move_focused_to_monitor_2d(mut self, dx: int, dy: int) -> bool {
     } else {
         self.monitors[dst_m].workspaces[dst_w].insert_tiled(id, saved_w)
     }
-    self.normalize_workspaces(src_m)
-    self.normalize_workspaces(dst_m)
-    self.rebuild_index()
+    discard self.index.insert(id, WindowLoc { monitor_idx: dst_m, workspace_idx: dst_w, floating: loc.floating })
+    let sh1 = self.normalize_workspaces(src_m)
+    if sh1 >= 0 {
+        self.reindex_monitor_from(src_m, sh1)
+    }
+    let sh2 = self.normalize_workspaces(dst_m)
+    if sh2 >= 0 {
+        self.reindex_monitor_from(dst_m, sh2)
+    }
     return true
 }
 
@@ -931,10 +1012,18 @@ pub fn Desktop.move_column_to_monitor_2d(mut self, dx: int, dy: int) -> bool {
     if self.monitors[src_m].workspaces[src_w].strip.is_empty() and not self.monitors[src_m].workspaces[src_w].floating.is_empty() {
         self.monitors[src_m].workspaces[src_w].focus_floating = true
     }
+    for slot in col.windows {
+        discard self.index.insert(slot.id, WindowLoc { monitor_idx: dst_m, workspace_idx: dst_w, floating: false })
+    }
     self.monitors[dst_m].workspaces[dst_w].insert_column(col)
-    self.normalize_workspaces(src_m)
-    self.normalize_workspaces(dst_m)
-    self.rebuild_index()
+    let sh1 = self.normalize_workspaces(src_m)
+    if sh1 >= 0 {
+        self.reindex_monitor_from(src_m, sh1)
+    }
+    let sh2 = self.normalize_workspaces(dst_m)
+    if sh2 >= 0 {
+        self.reindex_monitor_from(dst_m, sh2)
+    }
     return true
 }
 

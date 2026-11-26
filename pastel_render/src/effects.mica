@@ -91,6 +91,78 @@ pub struct OutputEffects {
     pub generation: u64 = 0
 }
 
+pub fn same_blur(a: BlurSettings, b: BlurSettings) -> bool {
+    return a.enabled == b.enabled and a.xray == b.xray and a.passes == b.passes and a.offset == b.offset
+}
+
+pub fn same_effect(a: WindowEffect, b: WindowEffect) -> bool {
+    return a.key == b.key and a.x == b.x and a.y == b.y and a.w == b.w and a.h == b.h and a.radius == b.radius and a.border_width == b.border_width and a.border_color == b.border_color and a.shadow_size == b.shadow_size and a.shadow_color == b.shadow_color and a.blur == b.blur and a.blur_xray == b.blur_xray and a.blur_opacity == b.blur_opacity and a.is_overlay == b.is_overlay
+}
+
+pub fn same_closing(a: ClosingEffect, b: ClosingEffect) -> bool {
+    return a.x == b.x and a.y == b.y and a.w == b.w and a.h == b.h and a.radius == b.radius and a.border_width == b.border_width and a.border_color == b.border_color and a.shadow_size == b.shadow_size and a.shadow_color == b.shadow_color and a.fill_color == b.fill_color and a.opacity == b.opacity
+}
+
+pub fn same_tab(a: TabBar, b: TabBar) -> bool {
+    return a.x == b.x and a.y == b.y and a.w == b.w and a.h == b.h and a.count == b.count and a.active_idx == b.active_idx and a.active_color == b.active_color and a.inactive_color == b.inactive_color and a.radius == b.radius
+}
+
+pub fn same_frame(a: OverviewFrame, b: OverviewFrame) -> bool {
+    return a.x == b.x and a.y == b.y and a.w == b.w and a.h == b.h and a.border_width == b.border_width and a.border_color == b.border_color and a.fill_color == b.fill_color and a.radius == b.radius
+}
+
+fn same_output_effects(cur: OutputEffects, bgv: vec4, blur: BlurSettings, items: Slice[WindowEffect], closing: Slice[ClosingEffect], tabs: Slice[TabBar], frames: Slice[OverviewFrame]) -> bool {
+    guard cur.background == bgv and same_blur(cur.blur, blur) else {
+        return false
+    }
+    guard cur.items.len() == items.len() and cur.closing.len() == closing.len() and cur.tabs.len() == tabs.len() and cur.frames.len() == frames.len() else {
+        return false
+    }
+    for i in 0..items.len() {
+        if not same_effect(cur.items[i], items[i]) {
+            return false
+        }
+    }
+    for i in 0..closing.len() {
+        if not same_closing(cur.closing[i], closing[i]) {
+            return false
+        }
+    }
+    for i in 0..tabs.len() {
+        if not same_tab(cur.tabs[i], tabs[i]) {
+            return false
+        }
+    }
+    for i in 0..frames.len() {
+        if not same_frame(cur.frames[i], frames[i]) {
+            return false
+        }
+    }
+    return true
+}
+
+fn copy_output_effects(src: OutputEffects, mut dst: OutputEffects) {
+    dst.background = src.background
+    dst.blur = src.blur
+    dst.generation = src.generation
+    dst.items.clear()
+    for it in src.items {
+        dst.items.push(it)
+    }
+    dst.closing.clear()
+    for cf in src.closing {
+        dst.closing.push(cf)
+    }
+    dst.tabs.clear()
+    for tb in src.tabs {
+        dst.tabs.push(tb)
+    }
+    dst.frames.clear()
+    for fr in src.frames {
+        dst.frames.push(fr)
+    }
+}
+
 pub struct SheetData {
     pub outputs: List[OutputEffects] = []
     pub generation: u64 = 0
@@ -109,7 +181,7 @@ pub fn EffectSheet.clone(self) -> EffectSheet {
     return EffectSheet { inner: self.inner.clone() }
 }
 
-/// Update output `o`'s window effects atomically, bumping the sheet generation.
+/// Update output `o`'s window effects atomically, bumping the sheet generation when changed.
 pub fn EffectSheet.set_output(self, o: int, bg: core.Color, blur: BlurSettings, take items: List[WindowEffect]) {
     let empty_closing: List[ClosingEffect] = []
     let empty_tabs: List[TabBar] = []
@@ -118,6 +190,7 @@ pub fn EffectSheet.set_output(self, o: int, bg: core.Color, blur: BlurSettings, 
 }
 
 /// Update output `o`'s full effect state (windows, closing ghosts, tab bars, overview frames) atomically.
+/// Skips generation bumps and list allocations when the output's effect state is unchanged.
 pub fn EffectSheet.set_output_all(self, o: int, bg: core.Color, blur: BlurSettings, take items: List[WindowEffect], take closing: List[ClosingEffect], take tabs: List[TabBar], take frames: List[OverviewFrame]) {
     let bgv = bg.premul()
     let copy = items
@@ -128,17 +201,57 @@ pub fn EffectSheet.set_output_all(self, o: int, bg: core.Color, blur: BlurSettin
         while s.outputs.len() <= o {
             s.outputs.push(OutputEffects {})
         }
+        if s.outputs[o].generation > 0 and same_output_effects(s.outputs[o], bgv, blur, copy, ccopy, tcopy, fcopy) {
+            return
+        }
         s.generation += 1
-        s.outputs[o] = OutputEffects {
-            background: bgv,
-            blur,
-            items: copy.clone(),
-            closing: ccopy.clone(),
-            tabs: tcopy.clone(),
-            frames: fcopy.clone(),
-            generation: s.generation,
+        s.outputs[o].background = bgv
+        s.outputs[o].blur = blur
+        s.outputs[o].generation = s.generation
+        s.outputs[o].items.clear()
+        for it in copy {
+            s.outputs[o].items.push(it)
+        }
+        s.outputs[o].closing.clear()
+        for cf in ccopy {
+            s.outputs[o].closing.push(cf)
+        }
+        s.outputs[o].tabs.clear()
+        for tb in tcopy {
+            s.outputs[o].tabs.push(tb)
+        }
+        s.outputs[o].frames.clear()
+        for fr in fcopy {
+            s.outputs[o].frames.push(fr)
         }
     })
+}
+
+/// Copy output `o`'s current effects into `dst` (reusing its list capacities) ONLY if its
+/// generation differs from `known_gen`. Returns `true` when `dst` was updated.
+pub fn EffectSheet.snapshot_into(self, o: int, known_gen: u64, mut dst: OutputEffects) -> bool {
+    var updated = false
+    self.inner.read(fn(s: SheetData) {
+        if o < 0 or o >= s.outputs.len() {
+            if known_gen != 0 {
+                dst.background = zeroed()
+                dst.blur = BlurSettings {}
+                dst.items.clear()
+                dst.closing.clear()
+                dst.tabs.clear()
+                dst.frames.clear()
+                dst.generation = 0
+                updated = true
+            }
+            return
+        }
+        if s.outputs[o].generation == known_gen {
+            return
+        }
+        copy_output_effects(s.outputs[o], mut dst)
+        updated = true
+    })
+    return updated
 }
 
 /// Snapshot output `o`'s current effect list.

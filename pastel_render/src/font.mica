@@ -3,6 +3,7 @@
 
 import std.fs
 import std.str as sstr
+import std.sync
 import std.utf8
 import pastel_core as core
 
@@ -37,6 +38,7 @@ let ft_load_render: i32 = 4
 
 // Verified Linux LP64 (x86_64/aarch64) FreeType2 struct offsets
 // (FT_FaceRec / FT_SizeRec / FT_GlyphSlotRec / FT_Bitmap).
+let off_face_flags: int = 16
 let off_face_glyph: int = 152
 let off_face_size: int = 160
 let off_size_ascender: int = 48
@@ -50,8 +52,17 @@ let off_slot_bmp_pixel_mode: int = 178
 let off_slot_bmp_left: int = 192
 let off_slot_bmp_top: int = 196
 
+let ft_face_flag_kerning: i64 = 0x40
 let ft_pixel_mode_mono: u8 = 1
 let ft_pixel_mode_gray: u8 = 2
+
+let font_path_cache_cap: int = 16
+
+struct FontPathCache {
+    entries: List[(str, str)] = []
+}
+
+static font_path_cache = sync.mutex(FontPathCache {})
 
 unsafe fn read_cstr(p: Ptr[u8]) -> str {
     var bytes: List[u8] = []
@@ -67,13 +78,51 @@ unsafe fn read_cstr(p: Ptr[u8]) -> str {
     return sstr.from_bytes(bytes)
 }
 
+fn cache_lookup_font(query: str) -> Option[str] {
+    var hit: Option[str] = None
+    font_path_cache.read(fn(c: FontPathCache) {
+        for e in c.entries {
+            if e.0 == query {
+                hit = Some(e.1.clone())
+                return
+            }
+        }
+    })
+    if let Some(p) = take hit {
+        if fs.exists(p) {
+            return Some(p)
+        }
+    }
+    return None
+}
+
+fn cache_store_font(query: str, path: str) {
+    font_path_cache.write(fn(mut c: FontPathCache) {
+        for i in 0..c.entries.len() {
+            if c.entries[i].0 == query {
+                c.entries[i] = (query.clone(), path.clone())
+                return
+            }
+        }
+        if c.entries.len() >= font_path_cache_cap {
+            discard c.entries.remove(0)
+        }
+        c.entries.push((query.clone(), path.clone()))
+    })
+}
+
 /// Resolve a Fontconfig pattern (e.g. `"sans-serif"`) to a font file path.
+/// Caches resolved pattern -> path mappings (bounded) so config reloads and DPI changes
+/// avoid re-parsing the system Fontconfig database.
 pub fn resolve_font_path(pattern: str) -> Option[str] {
     if not pattern.is_empty() and fs.exists(pattern) {
         return Some(pattern.clone())
     }
+    let query = if pattern.trim().is_empty() { "sans-serif" } else { pattern.trim() }
+    if let Some(cached) = cache_lookup_font(query) {
+        return Some(cached)
+    }
     if let Ok(fc) = FcFn.open("libfontconfig.so.1") {
-        let query = if pattern.trim().is_empty() { "sans-serif" } else { pattern.trim() }
         let cfg = fc.init_load_config_and_fonts()
         if not cfg.is_null() {
             defer fc.config_destroy(cfg)
@@ -91,6 +140,7 @@ pub fn resolve_font_path(pattern: str) -> Option[str] {
                         unsafe {
                             let found = read_cstr(file_ptr)
                             if not found.is_empty() and fs.exists(found) {
+                                cache_store_font(query, found)
                                 return Some(found)
                             }
                         }
@@ -108,19 +158,39 @@ pub fn resolve_font_path(pattern: str) -> Option[str] {
     ]
     for p in fallbacks {
         if fs.exists(p) {
+            cache_store_font(query, p)
             return Some(p.clone())
         }
     }
     return None
 }
 
+struct CachedGlyph {
+    loaded: bool = false
+    gid: u32 = 0
+    adv: i32 = 0
+    rows: i32 = 0
+    width: i32 = 0
+    left: i32 = 0
+    top: i32 = 0
+    off: int = 0
+}
+
+let ascii_lo: u64 = 32
+let ascii_hi: u64 = 128
+let ascii_count: int = 96
+
 /// An open FreeType2 font face sized for smooth anti-aliased rendering.
+/// Holds a transient per-face ASCII glyph cache freed on `close()` (zero retained memory).
 pub unsafe struct Font {
     ft: FtFn
     lib: Ptr[u8]
     face: Ptr[u8]
     ascent_px: i32
     height_px: i32
+    has_kerning: bool = false
+    glyphs: List[CachedGlyph] = []
+    glyph_buf: List[u8] = []
 }
 
 /// Open a system font matching `pattern` at `size_pt` points (96 DPI).
@@ -151,6 +221,7 @@ pub fn Font.open(pattern: str, size_pt: f32) -> Option[Font] {
             discard ft.done(lib)
             return None
         }
+        let flags = face.offset(off_face_flags).cast[i64]().read()
         let size_ptr = face.offset(off_face_size).cast[Ptr[u8]]().read()
         let asc = i32(size_ptr.offset(off_size_ascender).cast[i64]().read() >> 6)
         let h = i32(size_ptr.offset(off_size_height).cast[i64]().read() >> 6)
@@ -160,8 +231,16 @@ pub fn Font.open(pattern: str, size_pt: f32) -> Option[Font] {
             face,
             ascent_px: max(asc, 1),
             height_px: max(h, max(asc, 1)),
+            has_kerning: (flags & ft_face_flag_kerning) != 0,
         })
     }
+}
+
+fn Font.clear_cache(mut self) {
+    for i in 0..self.glyphs.len() {
+        self.glyphs[i].loaded = false
+    }
+    self.glyph_buf.clear()
 }
 
 /// Resize an already-open font face without re-querying Fontconfig or re-opening FreeType2.
@@ -179,6 +258,7 @@ pub fn Font.set_size(mut self, size_pt: f32) -> bool {
         let h = i32(size_ptr.offset(off_size_height).cast[i64]().read() >> 6)
         self.ascent_px = max(asc, 1)
         self.height_px = max(h, max(asc, 1))
+        self.clear_cache()
         return true
     }
 }
@@ -192,6 +272,8 @@ pub fn Font.height(self) -> i32 {
 }
 
 pub fn Font.close(mut self) {
+    self.glyphs = []
+    self.glyph_buf = []
     if not self.face.is_null() {
         discard self.ft.done_face(self.face)
         self.face = Ptr.null()
@@ -202,19 +284,169 @@ pub fn Font.close(mut self) {
     }
 }
 
+fn Font.ensure_ascii_glyph(mut self, cp: u64) -> int {
+    if self.glyphs.is_empty() {
+        self.glyphs.reserve(ascii_count)
+        for _ in 0..ascii_count {
+            self.glyphs.push(CachedGlyph {})
+        }
+    }
+    let slot_idx = int(cp - ascii_lo)
+    if self.glyphs[slot_idx].loaded {
+        return slot_idx
+    }
+    var g = CachedGlyph { loaded: true }
+    unsafe {
+        let gid = self.ft.get_char_index(self.face, cp)
+        g.gid = gid
+        if self.ft.load_char(self.face, cp, ft_load_render) == 0 {
+            let slot = self.face.offset(off_face_glyph).cast[Ptr[u8]]().read()
+            g.adv = i32(slot.offset(off_slot_advance_x).cast[i64]().read() >> 6)
+            let rows = i32(slot.offset(off_slot_bmp_rows).cast[u32]().read())
+            let width = i32(slot.offset(off_slot_bmp_width).cast[u32]().read())
+            let pitch = slot.offset(off_slot_bmp_pitch).cast[i32]().read()
+            let buf = slot.offset(off_slot_bmp_buf).cast[Ptr[u8]]().read()
+            let pmode = slot.offset(off_slot_bmp_pixel_mode).read()
+            let left = slot.offset(off_slot_bmp_left).cast[i32]().read()
+            let top = slot.offset(off_slot_bmp_top).cast[i32]().read()
+            let is_supported = pmode == ft_pixel_mode_gray or pmode == ft_pixel_mode_mono
+            if rows > 0 and width > 0 and pitch != 0 and not buf.is_null() and is_supported {
+                let abs_pitch = if pitch < 0 { int(-pitch) } else { int(pitch) }
+                let off = self.glyph_buf.len()
+                self.glyph_buf.reserve(int(rows) * int(width))
+                for r in 0..rows {
+                    let src_row = if pitch < 0 { int(rows - 1 - r) } else { int(r) }
+                    let row_off = src_row * abs_pitch
+                    if pmode == ft_pixel_mode_gray {
+                        for c in 0..width {
+                            self.glyph_buf.push(buf.offset(row_off + int(c)).read())
+                        }
+                    } else {
+                        for c in 0..width {
+                            let byte = buf.offset(row_off + int(c / 8)).read()
+                            let bit = (byte >> u8(7 - (c % 8))) & u8(1)
+                            self.glyph_buf.push(if bit != 0 { u8(255) } else { u8(0) })
+                        }
+                    }
+                }
+                g.rows = rows
+                g.width = width
+                g.left = left
+                g.top = top
+                g.off = off
+            }
+        }
+    }
+    self.glyphs[slot_idx] = g
+    return slot_idx
+}
+
+fn blend_cached_bitmap(mut px: List[u8], w: i32, h: i32, gx0: i32, gy0: i32, rows: i32, width: i32, bmp: Slice[u8], bmp_off: int, sr: u32, sg: u32, sb: u32, sa_base: u32, max_x: i32) {
+    let r0 = max(i32(0), -gy0)
+    let r1 = min(rows, h - gy0)
+    let c0 = max(i32(0), -gx0)
+    let c1 = min(width, min(w, max_x) - gx0)
+    guard r0 < r1 and c0 < c1 else {
+        return
+    }
+    let w_int = int(w)
+    let bw = int(width)
+    for r in r0..r1 {
+        let src_base = bmp_off + int(r) * bw
+        let dst_row = int(gy0 + r) * w_int
+        for c in c0..c1 {
+            let cov = u32(bmp[src_base + int(c)])
+            if cov == 0 {
+                continue
+            }
+            let a = (cov * sa_base + 127) / 255
+            if a == 0 {
+                continue
+            }
+            let idx = (dst_row + int(gx0 + c)) * 4
+            if a == 255 {
+                px[idx] = u8(sr)
+                px[idx + 1] = u8(sg)
+                px[idx + 2] = u8(sb)
+                px[idx + 3] = u8(255)
+            } else {
+                let inv = 255 - a
+                px[idx] = u8((sr * a + u32(px[idx]) * inv + 127) / 255)
+                px[idx + 1] = u8((sg * a + u32(px[idx + 1]) * inv + 127) / 255)
+                px[idx + 2] = u8((sb * a + u32(px[idx + 2]) * inv + 127) / 255)
+                px[idx + 3] = u8((255 * a + u32(px[idx + 3]) * inv + 127) / 255)
+            }
+        }
+    }
+}
+
+unsafe fn blend_ft_bitmap(mut px: List[u8], w: i32, h: i32, gx0: i32, gy0: i32, rows: i32, width: i32, pitch: i32, buf: Ptr[u8], pmode: u8, sr: u32, sg: u32, sb: u32, sa_base: u32, max_x: i32) {
+    let r0 = max(i32(0), -gy0)
+    let r1 = min(rows, h - gy0)
+    let c0 = max(i32(0), -gx0)
+    let c1 = min(width, min(w, max_x) - gx0)
+    guard r0 < r1 and c0 < c1 else {
+        return
+    }
+    let abs_pitch = if pitch < 0 { int(-pitch) } else { int(pitch) }
+    let w_int = int(w)
+    for r in r0..r1 {
+        let src_row = if pitch < 0 { int(rows - 1 - r) } else { int(r) }
+        let row_off = src_row * abs_pitch
+        let dst_row = int(gy0 + r) * w_int
+        for c in c0..c1 {
+            let cov: u32 = if pmode == ft_pixel_mode_gray {
+                u32(buf.offset(row_off + int(c)).read())
+            } else {
+                let byte = buf.offset(row_off + int(c / 8)).read()
+                let bit = (byte >> u8(7 - (c % 8))) & u8(1)
+                if bit != 0 {
+                    u32(255)
+                } else {
+                    u32(0)
+                }
+            }
+            if cov == 0 {
+                continue
+            }
+            let a = (cov * sa_base + 127) / 255
+            if a == 0 {
+                continue
+            }
+            let idx = (dst_row + int(gx0 + c)) * 4
+            if a == 255 {
+                px[idx] = u8(sr)
+                px[idx + 1] = u8(sg)
+                px[idx + 2] = u8(sb)
+                px[idx + 3] = u8(255)
+            } else {
+                let inv = 255 - a
+                px[idx] = u8((sr * a + u32(px[idx]) * inv + 127) / 255)
+                px[idx + 1] = u8((sg * a + u32(px[idx + 1]) * inv + 127) / 255)
+                px[idx + 2] = u8((sb * a + u32(px[idx + 2]) * inv + 127) / 255)
+                px[idx + 3] = u8((255 * a + u32(px[idx + 3]) * inv + 127) / 255)
+            }
+        }
+    }
+}
+
 /// Measure horizontal advance width of `text` in pixels (including kerning).
 pub fn Font.measure(self, text: str) -> i32 {
     var pen_x: i32 = 0
     var prev_gid: u32 = 0
     var i = 0
+    let do_kern = self.has_kerning
     unsafe {
         while i < text.len() {
             let cp = u64(utf8.next(text, mut i))
-            let gid = self.ft.get_char_index(self.face, cp)
-            if prev_gid != 0 and gid != 0 {
-                var kern = FtVector {}
-                if self.ft.get_kerning(self.face, prev_gid, gid, 0, mut kern) == 0 {
-                    pen_x += i32(kern.x >> 6)
+            var gid: u32 = 0
+            if do_kern {
+                gid = self.ft.get_char_index(self.face, cp)
+                if prev_gid != 0 and gid != 0 {
+                    var kern = FtVector {}
+                    if self.ft.get_kerning(self.face, prev_gid, gid, 0, mut kern) == 0 {
+                        pen_x += i32(kern.x >> 6)
+                    }
                 }
             }
             if self.ft.load_char(self.face, cp, 0) == 0 {
@@ -228,23 +460,73 @@ pub fn Font.measure(self, text: str) -> i32 {
     return pen_x
 }
 
+/// Measure `text` while populating the transient per-face ASCII glyph cache for subsequent draws.
+pub fn Font.measure_cached(mut self, text: str) -> i32 {
+    var pen_x: i32 = 0
+    var prev_gid: u32 = 0
+    var i = 0
+    let do_kern = self.has_kerning
+    while i < text.len() {
+        let cp = u64(utf8.next(text, mut i))
+        if cp >= ascii_lo and cp < ascii_hi {
+            let si = self.ensure_ascii_glyph(cp)
+            let g = self.glyphs[si]
+            if do_kern and prev_gid != 0 and g.gid != 0 {
+                var kern = FtVector {}
+                if self.ft.get_kerning(self.face, prev_gid, g.gid, 0, mut kern) == 0 {
+                    pen_x += i32(kern.x >> 6)
+                }
+            }
+            pen_x += g.adv
+            prev_gid = g.gid
+        } else {
+            unsafe {
+                var gid: u32 = 0
+                if do_kern {
+                    gid = self.ft.get_char_index(self.face, cp)
+                    if prev_gid != 0 and gid != 0 {
+                        var kern = FtVector {}
+                        if self.ft.get_kerning(self.face, prev_gid, gid, 0, mut kern) == 0 {
+                            pen_x += i32(kern.x >> 6)
+                        }
+                    }
+                }
+                if self.ft.load_char(self.face, cp, 0) == 0 {
+                    let slot = self.face.offset(off_face_glyph).cast[Ptr[u8]]().read()
+                    let adv = i32(slot.offset(off_slot_advance_x).cast[i64]().read() >> 6)
+                    pen_x += adv
+                }
+                prev_gid = gid
+            }
+        }
+    }
+    return pen_x
+}
+
 /// Draw anti-aliased UTF-8 `text` onto a premultiplied RGBA8 canvas at `(x, baseline_y)`.
 pub fn Font.draw(self, mut px: List[u8], w: i32, h: i32, x: i32, baseline_y: i32, text: str, ink: core.Color, max_x: i32) {
     var pen_x = x
     var prev_gid: u32 = 0
     var i = 0
-    let sr = ink.r.clamp(0.0, 1.0)
-    let sg = ink.g.clamp(0.0, 1.0)
-    let sb = ink.b.clamp(0.0, 1.0)
-    let sa_base = ink.a.clamp(0.0, 1.0)
+    let do_kern = self.has_kerning
+    let sr = u32((ink.r.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
+    let sg = u32((ink.g.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
+    let sb = u32((ink.b.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
+    let sa_base = u32((ink.a.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
+    guard sa_base > 0 else {
+        return
+    }
     unsafe {
         while i < text.len() {
             let cp = u64(utf8.next(text, mut i))
-            let gid = self.ft.get_char_index(self.face, cp)
-            if prev_gid != 0 and gid != 0 {
-                var kern = FtVector {}
-                if self.ft.get_kerning(self.face, prev_gid, gid, 0, mut kern) == 0 {
-                    pen_x += i32(kern.x >> 6)
+            var gid: u32 = 0
+            if do_kern {
+                gid = self.ft.get_char_index(self.face, cp)
+                if prev_gid != 0 and gid != 0 {
+                    var kern = FtVector {}
+                    if self.ft.get_kerning(self.face, prev_gid, gid, 0, mut kern) == 0 {
+                        pen_x += i32(kern.x >> 6)
+                    }
                 }
             }
             if pen_x >= max_x {
@@ -262,52 +544,80 @@ pub fn Font.draw(self, mut px: List[u8], w: i32, h: i32, x: i32, baseline_y: i32
                 let top = slot.offset(off_slot_bmp_top).cast[i32]().read()
                 let is_supported = pmode == ft_pixel_mode_gray or pmode == ft_pixel_mode_mono
                 if rows > 0 and width > 0 and pitch != 0 and not buf.is_null() and is_supported {
-                    let abs_pitch = if pitch < 0 { int(-pitch) } else { int(pitch) }
-                    let gx0 = pen_x + left
-                    let gy0 = baseline_y - top
-                    for r in 0..rows {
-                        let dy = gy0 + r
-                        if dy < 0 or dy >= h {
-                            continue
-                        }
-                        let src_row = if pitch < 0 { int(rows - 1 - r) } else { int(r) }
-                        let row_off = src_row * abs_pitch
-                        for c in 0..width {
-                            let dx = gx0 + c
-                            if dx < 0 or dx >= w or dx >= max_x {
-                                continue
-                            }
-                            let cov = if pmode == ft_pixel_mode_gray {
-                                buf.offset(row_off + int(c)).read()
-                            } else {
-                                let byte = buf.offset(row_off + int(c / 8)).read()
-                                let bit = (byte >> u8(7 - (c % 8))) & u8(1)
-                                if bit != 0 {
-                                    u8(255)
-                                } else {
-                                    u8(0)
-                                }
-                            }
-                            if cov == 0 {
-                                continue
-                            }
-                            let a = (f32(cov) / 255.0) * sa_base
-                            let inv = 1.0 - a
-                            let idx = (int(dy) * int(w) + int(dx)) * 4
-                            let dr = f32(px[idx])
-                            let dg = f32(px[idx + 1])
-                            let db = f32(px[idx + 2])
-                            let da = f32(px[idx + 3])
-                            px[idx] = u8((sr * a * 255.0 + dr * inv + 0.5).clamp(0.0, 255.0))
-                            px[idx + 1] = u8((sg * a * 255.0 + dg * inv + 0.5).clamp(0.0, 255.0))
-                            px[idx + 2] = u8((sb * a * 255.0 + db * inv + 0.5).clamp(0.0, 255.0))
-                            px[idx + 3] = u8((a * 255.0 + da * inv + 0.5).clamp(0.0, 255.0))
-                        }
-                    }
+                    blend_ft_bitmap(mut px, w, h, pen_x + left, baseline_y - top, rows, width, pitch, buf, pmode, sr, sg, sb, sa_base, max_x)
                 }
                 pen_x += adv
             }
             prev_gid = gid
+        }
+    }
+}
+
+/// Draw anti-aliased UTF-8 `text` reusing the transient per-face ASCII glyph cache.
+pub fn Font.draw_cached(mut self, mut px: List[u8], w: i32, h: i32, x: i32, baseline_y: i32, text: str, ink: core.Color, max_x: i32) {
+    var pen_x = x
+    var prev_gid: u32 = 0
+    var i = 0
+    let do_kern = self.has_kerning
+    let sr = u32((ink.r.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
+    let sg = u32((ink.g.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
+    let sb = u32((ink.b.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
+    let sa_base = u32((ink.a.clamp(0.0, 1.0) * 255.0 + 0.5).clamp(0.0, 255.0))
+    guard sa_base > 0 else {
+        return
+    }
+    while i < text.len() {
+        let cp = u64(utf8.next(text, mut i))
+        if cp >= ascii_lo and cp < ascii_hi {
+            let si = self.ensure_ascii_glyph(cp)
+            let g = self.glyphs[si]
+            if do_kern and prev_gid != 0 and g.gid != 0 {
+                var kern = FtVector {}
+                if self.ft.get_kerning(self.face, prev_gid, g.gid, 0, mut kern) == 0 {
+                    pen_x += i32(kern.x >> 6)
+                }
+            }
+            if pen_x >= max_x {
+                break
+            }
+            if g.rows > 0 and g.width > 0 {
+                blend_cached_bitmap(mut px, w, h, pen_x + g.left, baseline_y - g.top, g.rows, g.width, self.glyph_buf, g.off, sr, sg, sb, sa_base, max_x)
+            }
+            pen_x += g.adv
+            prev_gid = g.gid
+        } else {
+            unsafe {
+                var gid: u32 = 0
+                if do_kern {
+                    gid = self.ft.get_char_index(self.face, cp)
+                    if prev_gid != 0 and gid != 0 {
+                        var kern = FtVector {}
+                        if self.ft.get_kerning(self.face, prev_gid, gid, 0, mut kern) == 0 {
+                            pen_x += i32(kern.x >> 6)
+                        }
+                    }
+                }
+                if pen_x >= max_x {
+                    break
+                }
+                if self.ft.load_char(self.face, cp, ft_load_render) == 0 {
+                    let slot = self.face.offset(off_face_glyph).cast[Ptr[u8]]().read()
+                    let adv = i32(slot.offset(off_slot_advance_x).cast[i64]().read() >> 6)
+                    let rows = i32(slot.offset(off_slot_bmp_rows).cast[u32]().read())
+                    let width = i32(slot.offset(off_slot_bmp_width).cast[u32]().read())
+                    let pitch = slot.offset(off_slot_bmp_pitch).cast[i32]().read()
+                    let buf = slot.offset(off_slot_bmp_buf).cast[Ptr[u8]]().read()
+                    let pmode = slot.offset(off_slot_bmp_pixel_mode).read()
+                    let left = slot.offset(off_slot_bmp_left).cast[i32]().read()
+                    let top = slot.offset(off_slot_bmp_top).cast[i32]().read()
+                    let is_supported = pmode == ft_pixel_mode_gray or pmode == ft_pixel_mode_mono
+                    if rows > 0 and width > 0 and pitch != 0 and not buf.is_null() and is_supported {
+                        blend_ft_bitmap(mut px, w, h, pen_x + left, baseline_y - top, rows, width, pitch, buf, pmode, sr, sg, sb, sa_base, max_x)
+                    }
+                    pen_x += adv
+                }
+                prev_gid = gid
+            }
         }
     }
 }

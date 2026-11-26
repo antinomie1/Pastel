@@ -31,6 +31,82 @@ fn should_auto_float[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pas
     return is_fixed_size(min_w, min_h, max_w, max_h)
 }
 
+fn is_window_fullscreen[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R], id: u64) -> bool {
+    guard let Some(loc) = p.desktop.locate(id) else {
+        return false
+    }
+    guard loc.monitor_idx >= 0 and loc.monitor_idx < p.desktop.monitors.len() else {
+        return false
+    }
+    guard loc.workspace_idx >= 0 and loc.workspace_idx < p.desktop.monitors[loc.monitor_idx].workspaces.len() else {
+        return false
+    }
+    return p.desktop.monitors[loc.monitor_idx].workspaces[loc.workspace_idx].fullscreen == Some(id)
+}
+
+fn fullscreen_target_monitor[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R], rule_mon: str, target_out: Option[lum.Output]) -> int {
+    guard not p.desktop.monitors.is_empty() else {
+        return -1
+    }
+    let named = p.desktop.find_monitor_by_name(rule_mon)
+    if named >= 0 {
+        return named
+    }
+    if let Some(so) = target_out {
+        let by_out = p.desktop.find_monitor(outputs.output_id(so))
+        if by_out >= 0 {
+            return by_out
+        }
+    }
+    return p.desktop.active_monitor.clamp(0, p.desktop.monitors.len() - 1)
+}
+
+fn premap_wants_fullscreen[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R], id: u64, rule: cfg.ResolvedWindow) -> (bool, Option[lum.Output]) {
+    let pending = p.pending_fullscreen.get(id)
+    let want = match rule.fullscreen {
+        Some(v) => v
+        None => match pending {
+            Some((on, _)) => on
+            None => false
+        }
+    }
+    let target_out = match pending {
+        Some((true, o)) => o
+        _ => None
+    }
+    return (want, target_out)
+}
+
+fn configure_premap[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], w: lum.Window, id: u64, rule: cfg.ResolvedWindow) {
+    let (want_fs, target_out) = premap_wants_fullscreen(p, id, rule.clone())
+    if want_fs {
+        let mi = fullscreen_target_monitor(p, rule.monitor, target_out)
+        if mi >= 0 {
+            let full = p.desktop.monitors[mi].full_rect
+            let cw = i32(max(full.w.round(), 1.0))
+            let ch = i32(max(full.h.round(), 1.0))
+            discard p.d.configure(w, cw, ch, lum.States { activated: rule.open_focused, fullscreen: true })
+            discard p.configured_sizes.insert(id, (cw, ch, rule.open_focused, true, false, false))
+            return
+        }
+        discard p.d.configure(w, 0, 0, lum.States { activated: rule.open_focused, fullscreen: true })
+        discard p.configured_sizes.remove(id)
+        return
+    }
+    let is_dialog = should_auto_float(p, w)
+    // A window torn off by a drag (xdg-toplevel-drag) floats under the pointer.
+    let float = rule.floating.unwrap_or(is_dialog) or p.d.dragged(w)
+    if float or p.desktop.monitors.is_empty() {
+        let fw = i32(rule.default_floating_w.unwrap_or(0.0).round())
+        let fh = i32(rule.default_floating_h.unwrap_or(0.0).round())
+        discard p.d.configure(w, fw, fh, lum.States { activated: rule.open_focused })
+        discard p.configured_sizes.remove(id)
+    } else {
+        discard p.d.configure(w, 0, 0, lum.States { activated: rule.open_focused, tiled_left: true, tiled_right: true, tiled_top: true, tiled_bottom: true })
+        discard p.configured_sizes.insert(id, (0, 0, rule.open_focused, false, false, false))
+    }
+}
+
 fn clamp_hint(val: f64, lo: i32, hi: i32) -> f64 {
     var out = val
     if lo > 0 and out > 0.0 and out < f64(lo) {
@@ -95,17 +171,7 @@ pub fn on_window_new[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor
     // Prefer server-side decorations (Pastel's GPU SDF hollow border) unless client insists on CSD.
     p.d.decorate(w, true)
     let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
-    let is_dialog = should_auto_float(p, w)
-    // A window torn off by a drag (xdg-toplevel-drag) floats under the pointer.
-    let float = rule.floating.unwrap_or(is_dialog) or p.d.dragged(w)
-    if float or p.desktop.monitors.is_empty() {
-        let fw = i32(rule.default_floating_w.unwrap_or(0.0).round())
-        let fh = i32(rule.default_floating_h.unwrap_or(0.0).round())
-        discard p.d.configure(w, fw, fh, lum.States { activated: rule.open_focused })
-    } else {
-        discard p.d.configure(w, 0, 0, lum.States { activated: rule.open_focused, tiled_left: true, tiled_right: true, tiled_top: true, tiled_bottom: true })
-        discard p.configured_sizes.insert(id, (0, 0, rule.open_focused, false, false, false))
-    }
+    configure_premap(mut p, w, id, rule)
 }
 
 /// Window committed its first buffer: add to layout, apply initial rules, animate open, focus, and emit IPC event.
@@ -126,7 +192,17 @@ pub fn on_window_mapped[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composi
         discard p.initial_sizes.insert(id, (nw, nh))
     }
     let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
-    let is_dialog = should_auto_float(p, w)
+    let pending_fs = p.pending_fullscreen.remove(id)
+    let want_fs = match rule.fullscreen {
+        Some(v) => v
+        None => match pending_fs {
+            Some((on, _)) => on
+            None => false
+        }
+    }
+    // Fullscreen games (GLFW/LWJGL, XWayland) frequently lock min_size == max_size to output dimensions;
+    // do not misclassify them as fixed-size dialogs.
+    let is_dialog = if want_fs { p.d.parent(w).is_some() or p.d.modal(w) } else { should_auto_float(p, w) }
     let float = rule.floating.unwrap_or(is_dialog) or p.d.dragged(w)
     let now = time.now_ns()
     if float or rule.floating.is_some() {
@@ -138,6 +214,14 @@ pub fn on_window_mapped[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composi
     let (eff_nw, eff_nh) = preferred_floating_size(p, w, id, rule.clone())
     var target_monitor = rule.monitor.clone()
     var target_ws = rule.workspace
+    if target_monitor.is_empty() {
+        if let Some((true, Some(so))) = pending_fs {
+            let mi = p.desktop.find_monitor(outputs.output_id(so))
+            if mi >= 0 and mi < p.desktop.monitors.len() {
+                target_monitor = p.desktop.monitors[mi].name.clone()
+            }
+        }
+    }
     if float and target_monitor.is_empty() and target_ws.is_none() {
         if let Some(pw) = p.d.parent(w) {
             if let Some(ploc) = p.desktop.locate(window_id(pw)) {
@@ -152,8 +236,8 @@ pub fn on_window_mapped[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composi
     if let Some(want_max) = rule.maximized {
         discard p.desktop.set_maximized(id, want_max)
     }
-    if let Some(want_fs) = rule.fullscreen {
-        discard p.desktop.set_fullscreen(id, want_fs)
+    if want_fs {
+        discard p.desktop.set_fullscreen(id, true)
     }
 
     // Precompute target rect so the open animation starts in place with subtle scale + fade.
@@ -211,7 +295,8 @@ pub fn on_window_parent[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composi
     let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
     let want_float = rule.floating.unwrap_or(should_auto_float(p, w)) or p.d.dragged(w)
     guard let Some(loc) = p.desktop.locate(id) else {
-        if want_float {
+        let (want_fs, _) = premap_wants_fullscreen(p, id, rule.clone())
+        if want_float and not want_fs {
             let fw = i32(rule.default_floating_w.unwrap_or(0.0).round())
             let fh = i32(rule.default_floating_h.unwrap_or(0.0).round())
             discard p.d.configure(w, fw, fh, lum.States { activated: rule.open_focused })
@@ -219,7 +304,7 @@ pub fn on_window_parent[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composi
         }
         return
     }
-    guard not loc.floating and want_float and not p.auto_float_done.get(id).unwrap_or(false) else {
+    guard not loc.floating and not is_window_fullscreen(p, id) and want_float and not p.auto_float_done.get(id).unwrap_or(false) else {
         return
     }
     promote_to_floating(mut p, w, id, rule)
@@ -229,7 +314,7 @@ pub fn on_window_parent[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composi
 /// dialogs whose fixed min/max size constraints arrived after initial map.
 pub fn on_window_resized[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], w: lum.Window) {
     let id = window_id(w)
-    if not p.auto_float_done.get(id).unwrap_or(false) {
+    if not p.auto_float_done.get(id).unwrap_or(false) and not is_window_fullscreen(p, id) {
         if let Some(loc) = p.desktop.locate(id) {
             if not loc.floating {
                 let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
@@ -266,6 +351,14 @@ pub fn check_late_auto_float[O: lum.plug.Output, R: lum.plug.Renderer](mut p: co
         }
         if loc.floating {
             discard p.pending_fixed_check.remove(i)
+            continue
+        }
+        if is_window_fullscreen(p, id) {
+            if now_ns - mapped_ns > late_fixed_window_ns {
+                discard p.pending_fixed_check.remove(i)
+            } else {
+                i += 1
+            }
             continue
         }
         let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
@@ -313,6 +406,7 @@ pub fn on_window_unmapped[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compo
     discard p.win_by_id.remove(id)
     discard p.id_by_win.remove(w)
     discard p.configured_sizes.remove(id)
+    discard p.pending_fullscreen.remove(id)
     if was_focused {
         if let Some(l) = loc {
             if l.floating {
@@ -355,7 +449,7 @@ pub fn on_window_meta[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composito
             }
         }
     }
-    if mapped and not p.auto_float_done.get(id).unwrap_or(false) {
+    if mapped and not p.auto_float_done.get(id).unwrap_or(false) and not is_window_fullscreen(p, id) {
         if let Some(loc) = p.desktop.locate(id) {
             if not loc.floating {
                 let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
@@ -381,19 +475,64 @@ pub fn on_request_maximize[O: lum.plug.Output, R: lum.plug.Renderer](mut p: comp
     }
 }
 
-/// Respect client `xdg_toplevel.set_fullscreen` / `unset_fullscreen`, including optional target output.
+/// Respect client `xdg_toplevel.set_fullscreen` / `unset_fullscreen`, including pre-map requests,
+/// optional target output, and mandatory xdg-shell configure replies.
 pub fn on_request_fullscreen[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], w: lum.Window, target_out: Option[lum.Output], on: bool) {
     let id = window_id(w)
+    guard let Some(loc) = p.desktop.locate(id) else {
+        discard p.pending_fullscreen.insert(id, (on, target_out))
+        if p.win_by_id.get(id).is_some() {
+            let rule = p.win_rules.get(id).unwrap_or(p.cfg.resolve_window("", ""))
+            configure_premap(mut p, w, id, rule)
+        }
+        return
+    }
+    let was_fs = is_window_fullscreen(p, id)
     var moved = false
     if on {
         if let Some(so) = target_out {
             moved = p.desktop.move_window_to_monitor(id, outputs.output_id(so))
         }
     }
-    if p.desktop.set_fullscreen(id, on) or moved {
+    discard p.desktop.set_fullscreen(id, on)
+    let now_fs = is_window_fullscreen(p, id)
+    let changed = was_fs != now_fs or moved
+    if changed {
         p.sync_focus()
         p.broadcast_window_changed(id)
+    }
+    let new_loc = p.desktop.locate(id).unwrap_or(loc)
+    let on_active_ws = new_loc.monitor_idx < p.desktop.monitors.len() and p.desktop.monitors[new_loc.monitor_idx].active_ws == new_loc.workspace_idx
+    if on_active_ws {
+        if not changed {
+            discard p.configured_sizes.remove(id)
+        }
         p.needs_layout = true
+    } else {
+        let (sw, sh) = p.d.size(w)
+        let (cw, ch, focused, floating, maximized) = match p.configured_sizes.get(id) {
+            Some((pw, ph, pfocus, _, pfl, pmax)) => (pw, ph, pfocus, pfl, pmax)
+            None => (sw, sh, false, new_loc.floating, false)
+        }
+        var out_w = cw
+        var out_h = ch
+        if now_fs and new_loc.monitor_idx < p.desktop.monitors.len() {
+            let full = p.desktop.monitors[new_loc.monitor_idx].full_rect
+            out_w = i32(max(full.w.round(), 1.0))
+            out_h = i32(max(full.h.round(), 1.0))
+        }
+        let tiled = not floating and not now_fs
+        let st = lum.States {
+            activated: focused,
+            fullscreen: now_fs,
+            maximized: if now_fs { false } else { maximized },
+            tiled_left: tiled,
+            tiled_right: tiled,
+            tiled_top: tiled,
+            tiled_bottom: tiled,
+        }
+        discard p.d.configure(w, out_w, out_h, st)
+        discard p.configured_sizes.insert(id, (out_w, out_h, focused, now_fs, floating, if now_fs { false } else { maximized }))
     }
 }
 

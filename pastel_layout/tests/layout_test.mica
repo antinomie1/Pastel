@@ -359,3 +359,47 @@ test "set_floating_sized preserves natural dialog dimensions and restores parent
     assert(d.remove_window(30))
     assert_eq(d.focused_window(), Some(u64(10)))
 }
+
+test "incremental Desktop.index stays exact across bulk add, float toggle, workspace compaction, and removal" {
+    var d = lay.Desktop.new(0, 12.0, 0.5, lay.CenterMode.OnOverflow)
+    d.add_monitor(1, "DP-1", core.Rect.new(0.0, 0.0, 1920.0, 1080.0), core.Rect.new(0.0, 0.0, 1920.0, 1080.0))
+    d.add_monitor(2, "DP-2", core.Rect.new(1920.0, 0.0, 1920.0, 1080.0), core.Rect.new(1920.0, 0.0, 1920.0, 1080.0))
+    // Add 40 windows across dynamic workspaces 1 and 2.
+    for i in 1..=20 {
+        d.add_window(u64(i), false, 0.5, 800.0, 600.0, Some(1))
+    }
+    for i in 21..=40 {
+        d.add_window(u64(i), false, 0.5, 800.0, 600.0, Some(2))
+    }
+    assert_eq(d.index.len(), 40)
+    assert_eq(d.locate(1).unwrap().workspace_idx, 0)
+    assert_eq(d.locate(25).unwrap().workspace_idx, 1)
+
+    // Toggle floating updates index in O(1) without losing monitor/workspace.
+    assert(d.toggle_floating(5))
+    assert(d.locate(5).unwrap().floating)
+    assert_eq(d.locate(5).unwrap().workspace_idx, 0)
+    assert(d.toggle_floating(5))
+    assert(not d.locate(5).unwrap().floating)
+
+    // Switch to workspace 2 and remove every window on workspace 1: workspace 1 compacts,
+    // shifting workspace 2 down to index 0 and reindexing all surviving windows accurately.
+    assert(d.focus_workspace(2))
+    for i in 1..=20 {
+        assert(d.remove_window(u64(i)))
+        assert(d.locate(u64(i)).is_none())
+    }
+    assert_eq(d.index.len(), 20)
+    for i in 21..=40 {
+        let loc = d.locate(u64(i)).unwrap()
+        assert_eq(loc.monitor_idx, 0)
+        assert_eq(loc.workspace_idx, 0)
+    }
+
+    // Move a stacked column to monitor 2 and verify both windows updated in index.
+    assert(d.focus_window(22))
+    assert(d.monitors[0].workspaces[0].strip.consume_or_expel_left())
+    assert(d.move_column_to_monitor_2d(1, 0))
+    assert_eq(d.locate(21).unwrap().monitor_idx, 1)
+    assert_eq(d.locate(22).unwrap().monitor_idx, 1)
+}

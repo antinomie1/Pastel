@@ -113,22 +113,31 @@ pub fn apply_output_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: comp
 /// Evaluate `vrr = "on-demand"` across monitors: activate VRR only when a fullscreen window on
 /// that monitor opts in via `[[window-rule]].variable-refresh-rate` or reports video/game content type.
 pub fn sync_vrr_on_demand[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) {
+    guard p.has_vrr_ondemand else {
+        return
+    }
     for mi in 0..p.desktop.monitors.len() {
+        guard mi < p.mon_vrr_ondemand.len() and p.mon_vrr_ondemand[mi] else {
+            continue
+        }
         let mid = p.desktop.monitors[mi].id
-        guard let Some(oc) = p.cfg.output_for(p.desktop.monitors[mi].name) else {
-            continue
+        let so_opt = if mi < p.mon_to_out.len() and p.mon_to_out[mi] >= 0 and p.mon_to_out[mi] < p.cached_out_handles.len() {
+            Some(p.cached_out_handles[p.mon_to_out[mi]])
+        } else {
+            p.out_by_id.get(mid)
         }
-        guard oc.vrr == Some(cfg.VrrMode.OnDemand) else {
-            continue
-        }
-        guard let Some(so) = p.out_by_id.get(mid) else {
+        guard let Some(so) = so_opt else {
             continue
         }
         var want = false
         let wi = p.desktop.monitors[mi].active_ws
         if wi >= 0 and wi < p.desktop.monitors[mi].workspaces.len() {
             if let Some(fs_id) = p.desktop.monitors[mi].workspaces[wi].fullscreen {
-                let rule_vrr = p.win_rules.get(fs_id).and_then(fn(r) => r.variable_refresh_rate)
+                let rule_vrr: Option[bool] = if p.has_rules {
+                    p.win_rules.with(fs_id, fn(r) => r.variable_refresh_rate).unwrap_or(None)
+                } else {
+                    None
+                }
                 match rule_vrr {
                     Some(v) => want = v
                     None => {
@@ -169,9 +178,11 @@ pub fn power_monitors[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composito
     p.needs_layout = true
 }
 
-/// Synchronize all live luminaria outputs into `p.desktop`.
+/// Synchronize all live luminaria outputs into `p.desktop` and refresh hot-path output caches.
 pub fn sync_outputs[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) {
     let live = p.d.outputs()
+    p.cached_outputs.clear()
+    p.cached_out_handles.clear()
     var live_ids: List[u64] = []
     for so in live {
         let oid = output_id(so)
@@ -181,9 +192,12 @@ pub fn sync_outputs[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.
         let desc = p.d.output_desc(so)
         let (fx, fy, fw, fh) = p.d.output_rect(so)
         let (ux, uy, uw, uh) = p.d.usable(so)
+        let sc = output_scale(fw, fh, desc.mode)
+        p.cached_outputs.push((fx, fy, fw, fh, sc, oid))
+        p.cached_out_handles.push(so)
         p.desktop.add_monitor(oid, desc.name, core.Rect.new(fx, fy, fw, fh), core.Rect.new(ux, uy, uw, uh))
     }
-    // Remove disappeared monitors, migrating any open windows safely and pruning animation state.
+    // Remove disappeared monitors, migrating any open windows safely and pruning animation/VRR state.
     var gone: List[u64] = []
     for m in p.desktop.monitors {
         if not live_ids.contains(m.id) {
@@ -193,20 +207,43 @@ pub fn sync_outputs[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.
     for oid in gone {
         p.desktop.remove_monitor(oid)
         p.anims.remove_output(oid)
+        discard p.vrr_state.remove(oid)
         if let Some(so) = p.out_by_id.remove(oid) {
             discard p.id_by_out.remove(so)
         }
     }
+    // Rebuild O(1) monitor -> output index and per-monitor on-demand VRR flags.
+    p.mon_to_out.clear()
+    p.mon_vrr_ondemand.clear()
+    for mi in 0..p.desktop.monitors.len() {
+        let mid = p.desktop.monitors[mi].id
+        var found_oi = -1
+        for oi in 0..p.cached_outputs.len() {
+            if p.cached_outputs[oi].5 == mid {
+                found_oi = oi
+                break
+            }
+        }
+        p.mon_to_out.push(found_oi)
+        var od = false
+        if p.has_vrr_ondemand {
+            if let Some(oc) = p.cfg.output_for(p.desktop.monitors[mi].name) {
+                od = oc.vrr == Some(cfg.VrrMode.OnDemand)
+            }
+        }
+        p.mon_vrr_ondemand.push(od)
+    }
 }
 
 pub fn active_output_scale[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R]) -> f64 {
-    if not p.desktop.monitors.is_empty() and p.desktop.active_monitor < p.desktop.monitors.len() {
-        let oid = p.desktop.monitors[p.desktop.active_monitor].id
-        if let Some(so) = p.out_by_id.get(oid) {
-            let (_, _, ow, oh) = p.d.output_rect(so)
-            let desc = p.d.output_desc(so)
-            return output_scale(ow, oh, desc.mode)
+    if not p.desktop.monitors.is_empty() and p.desktop.active_monitor < p.mon_to_out.len() {
+        let oi = p.mon_to_out[p.desktop.active_monitor]
+        if oi >= 0 and oi < p.cached_outputs.len() {
+            return p.cached_outputs[oi].4
         }
+    }
+    if not p.cached_outputs.is_empty() {
+        return p.cached_outputs[0].4
     }
     let outs = p.d.outputs()
     if not outs.is_empty() {
@@ -221,10 +258,12 @@ pub fn on_output_added[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
     apply_output_config(mut p, so)
     sync_outputs(mut p)
     if (active_output_scale(p) - p.overlay_scale).abs() > 0.05 {
-        p.rebuild_overlay()
+        p.invalidate_overlay()
     }
     p.sync_focus()
-    p.broadcast_event("outputs-changed", json.obj())
+    if p.has_ipc_subscribers() {
+        p.broadcast_event("outputs-changed", json.obj())
+    }
     p.needs_layout = true
 }
 
@@ -232,7 +271,7 @@ pub fn on_output_changed[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compos
     discard so
     sync_outputs(mut p)
     if (active_output_scale(p) - p.overlay_scale).abs() > 0.05 {
-        p.rebuild_overlay()
+        p.invalidate_overlay()
     }
     p.needs_layout = true
 }
@@ -241,10 +280,12 @@ pub fn on_output_removed[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compos
     discard so
     sync_outputs(mut p)
     if (active_output_scale(p) - p.overlay_scale).abs() > 0.05 {
-        p.rebuild_overlay()
+        p.invalidate_overlay()
     }
     p.sync_focus()
-    p.broadcast_event("outputs-changed", json.obj())
+    if p.has_ipc_subscribers() {
+        p.broadcast_event("outputs-changed", json.obj())
+    }
     p.needs_layout = true
 }
 

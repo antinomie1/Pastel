@@ -463,3 +463,157 @@ test "CSD window border hugs Placement.geometry instead of outer shadow buffer a
     r.drop_target(tkey)
     r.close()
 }
+
+test "EffectSheet deduplicates identical updates and cached hotkey overlay matches cold render" {
+    let sheet = ren.EffectSheet.new()
+    let bg = core.Color.rgb(0.1, 0.12, 0.16)
+    let blur = ren.BlurSettings { enabled: true, xray: true, passes: 2, offset: 2.0 }
+    let ef = ren.WindowEffect {
+        key: 99,
+        x: 10.0,
+        y: 20.0,
+        w: 300.0,
+        h: 200.0,
+        border_width: 2.0,
+        border_color: vec4(1.0, 1.0, 1.0, 1.0),
+    }
+    sheet.set_output(0, bg, blur, [ef])
+    let g1 = sheet.snapshot(0).generation
+    assert(g1 > 0)
+    // Identical push must NOT bump generation.
+    sheet.set_output(0, bg, blur, [ef])
+    assert_eq(sheet.snapshot(0).generation, g1)
+    var dst = ren.OutputEffects {}
+    assert(sheet.snapshot_into(0, 0, mut dst))
+    assert_eq(dst.generation, g1)
+    assert(not sheet.snapshot_into(0, g1, mut dst))
+    // Mutating any field bumps generation and updates `dst` in place.
+    let ef2 = ren.WindowEffect { x: 14.0, ..ef }
+    sheet.set_output(0, bg, blur, [ef2])
+    let g2 = sheet.snapshot(0).generation
+    assert(g2 > g1)
+    assert(sheet.snapshot_into(0, g1, mut dst))
+    assert_eq(dst.generation, g2)
+    assert_eq(dst.items[0].x, 14.0)
+
+    // Repeat hotkey overlay rasterization hits the font path cache and produces identical pixels.
+    let c = cfg.Config.default()
+    let img1 = ren.overlay.render_hotkey_overlay(c, cfg.ModKey.Super, 1.0).expect("overlay 1")
+    let img2 = ren.overlay.render_hotkey_overlay(c, cfg.ModKey.Super, 1.0).expect("overlay 2")
+    assert_eq(img1.width, img2.width)
+    assert_eq(img1.height, img2.height)
+    assert_eq(img1.pixels.len(), img2.pixels.len())
+    assert_eq(img1.pixels[0], img2.pixels[0])
+    assert_eq(img1.pixels[img1.pixels.len() / 2], img2.pixels[img2.pixels.len() / 2])
+}
+
+test "PastelRenderer single-pass live blur blends patterned backdrop, coexists with X-Ray, compacts VRAM, and defers idle uploads" {
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(rr) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped: no Vulkan device")
+        return
+    }
+    var r = rr
+    r.add_output(0, 128, 128, vec4(0.0, 0.0, 0.0, 1.0))
+    let ts = r.targets(types.Want { width: 128, height: 128, format: types.buffer.xrgb8888, count: 1, export: false }).expect("target")
+    let tkey = ts[0].key
+
+    // Split wallpaper: left half bright red (R=240), right half bright blue (B=240).
+    var split_px: List[u8] = []
+    for _ in 0..128 {
+        for x in 0..128 {
+            if x < 64 {
+                split_px.push(240)
+                split_px.push(0)
+                split_px.push(0)
+                split_px.push(255)
+            } else {
+                split_px.push(0)
+                split_px.push(0)
+                split_px.push(240)
+                split_px.push(255)
+            }
+        }
+    }
+    let wp_key: u64 = 100
+    assert(r.image(wp_key, 128, 128, types.buffer.xbgr8888, split_px, 128 * 4))
+
+    // Translucent neutral tint window (alpha ~40/255) straddling the x=64 seam.
+    var glass_px: List[u8] = []
+    for _ in 0..64 * 64 {
+        glass_px.push(10)
+        glass_px.push(10)
+        glass_px.push(10)
+        glass_px.push(40)
+    }
+    let win_key: u64 = 101
+    let ov_key: u64 = (u64(1) << 63) | u64(7)
+    assert(r.image(win_key, 64, 64, types.buffer.abgr8888, glass_px, 64 * 4))
+    assert(r.image(ov_key, 64, 64, types.buffer.abgr8888, glass_px, 64 * 4))
+
+    // 1. Live blur over split red/blue wallpaper must mix red & blue across the seam at x=64.
+    sheet.set_output(0, core.Color.rgb(0.0, 0.0, 0.0), ren.BlurSettings { enabled: true, xray: false, passes: 2, offset: 2.0 }, [
+        ren.WindowEffect { key: win_key, x: 32.0, y: 32.0, w: 64.0, h: 64.0, border_width: 2.0, border_color: vec4(1.0, 1.0, 1.0, 1.0), blur: true, blur_xray: false, blur_opacity: 1.0 },
+    ])
+    r.layout(0, [
+        types.Placement { key: wp_key, tex: wp_key, x: 0.0, y: 0.0, w: 128.0, h: 128.0, opacity: 1.0 },
+        types.Placement { key: win_key, tex: win_key, x: 32.0, y: 32.0, w: 64.0, h: 64.0, opacity: 1.0 },
+    ])
+    assert(r.render(0, tkey, 0).expect("live blur split").is_some())
+    let fb1 = r.read(tkey).expect("read live split")
+    // Right at seam (x=64, y=64): both R (index +2 in BGRA) and B (index +0 in BGRA) must be blended > 50!
+    let seam = (64 * 128 + 64) * 4
+    assert(fb1[seam] > 50 and fb1[seam + 2] > 50)
+
+    // 2. X-Ray tiled window + simultaneous live-blur overlay on top (promotes level0 -> xray_tex cleanly).
+    sheet.set_output(0, core.Color.rgb(0.0, 0.0, 0.0), ren.BlurSettings { enabled: true, xray: true, passes: 2, offset: 2.0 }, [
+        ren.WindowEffect { key: win_key, x: 16.0, y: 16.0, w: 64.0, h: 64.0, border_width: 2.0, border_color: vec4(1.0, 1.0, 1.0, 1.0), blur: true, blur_xray: true, blur_opacity: 1.0, is_overlay: false },
+        ren.WindowEffect { key: ov_key, x: 48.0, y: 48.0, w: 64.0, h: 64.0, border_width: 2.0, border_color: vec4(0.0, 1.0, 0.0, 1.0), blur: true, blur_xray: false, blur_opacity: 1.0, is_overlay: true },
+    ])
+    r.layout(0, [
+        types.Placement { key: wp_key, tex: wp_key, x: 0.0, y: 0.0, w: 128.0, h: 128.0, opacity: 1.0 },
+        types.Placement { key: win_key, tex: win_key, x: 16.0, y: 16.0, w: 64.0, h: 64.0, opacity: 1.0 },
+        types.Placement { key: ov_key, tex: ov_key, x: 48.0, y: 48.0, w: 64.0, h: 64.0, opacity: 1.0 },
+    ])
+    assert(r.render(0, tkey, 0).expect("xray + live overlay").is_some())
+    let fb2 = r.read(tkey).expect("read xray + live")
+    let p_ov = (64 * 128 + 64) * 4
+    assert(fb2[p_ov] > 40 and fb2[p_ov + 2] > 40)
+
+    // 3. Hide live overlay (compacts xray_tex back into level0), verify X-Ray stays intact on partial redraw.
+    sheet.set_output(0, core.Color.rgb(0.0, 0.0, 0.0), ren.BlurSettings { enabled: true, xray: true, passes: 2, offset: 2.0 }, [
+        ren.WindowEffect { key: win_key, x: 16.0, y: 16.0, w: 64.0, h: 64.0, border_width: 2.0, border_color: vec4(1.0, 1.0, 1.0, 1.0), blur: true, blur_xray: true, blur_opacity: 1.0, is_overlay: false },
+    ])
+    r.layout(0, [
+        types.Placement { key: wp_key, tex: wp_key, x: 0.0, y: 0.0, w: 128.0, h: 128.0, opacity: 1.0 },
+        types.Placement { key: win_key, tex: win_key, x: 16.0, y: 16.0, w: 64.0, h: 64.0, opacity: 1.0 },
+    ])
+    assert(r.render(0, tkey, 1).expect("xray after overlay hide").is_some())
+    let fb3 = r.read(tkey).expect("read compacted xray")
+    // At (x=64, y=48) inside win_key: blurred red+blue wallpaper still dominates.
+    let p_win = (48 * 128 + 64) * 4
+    assert(fb3[p_win] > 50 and fb3[p_win + 2] > 50)
+
+    // 4. Deferred SHM upload when render() is idle is preserved and visible once placed on screen.
+    var green_px: List[u8] = []
+    for _ in 0..32 * 32 {
+        green_px.push(0)
+        green_px.push(230)
+        green_px.push(0)
+        green_px.push(255)
+    }
+    let green_key: u64 = 102
+    assert(r.image(green_key, 32, 32, types.buffer.xbgr8888, green_px, 32 * 4))
+    // Output 0 is idle right now: render returns None without discarding pending upload.
+    assert(r.render(0, tkey, 1).expect("idle with pending upload").is_none())
+    let empty_ef: List[ren.WindowEffect] = []
+    sheet.set_output(0, core.Color.rgb(0.0, 0.0, 0.0), ren.BlurSettings { enabled: false }, empty_ef)
+    r.layout(0, [types.Placement { key: green_key, tex: green_key, x: 0.0, y: 0.0, w: 32.0, h: 32.0, opacity: 1.0 }])
+    assert(r.render(0, tkey, 1).expect("render deferred upload").is_some())
+    let fb4 = r.read(tkey).expect("read deferred green")
+    let p_g = (16 * 128 + 16) * 4
+    assert(fb4[p_g + 1] > 200 and fb4[p_g] < 10 and fb4[p_g + 2] < 10)
+
+    r.drop_target(tkey)
+    r.close()
+}

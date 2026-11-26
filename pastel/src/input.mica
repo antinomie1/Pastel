@@ -1,5 +1,6 @@
 // Keyboard bindings, pointer/scroll/wheel bindings, 3/4-finger touchpad gestures, lock guard, and action dispatch.
 
+import std.collections.map
 import std.io
 import std.json
 import std.time
@@ -14,6 +15,91 @@ import windows
 let btn_left: u32 = 272
 let btn_right: u32 = 273
 let scroll_step_threshold: f64 = 15.0
+
+fn mods_bits(shift: bool, ctrl: bool, alt: bool, logo: bool) -> u32 {
+    var m: u32 = 0
+    if shift {
+        m |= u32(1)
+    }
+    if ctrl {
+        m |= u32(2)
+    }
+    if alt {
+        m |= u32(4)
+    }
+    if logo {
+        m |= u32(8)
+    }
+    return m
+}
+
+/// Build the O(1) input binding dispatch tables & modifier bitmasks from `p.cfg.binds`.
+pub fn rebuild_bind_index[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) {
+    var idx = compositor.BindIndex.new()
+    let eff = effective_mod(p)
+    for i, b in p.cfg.binds {
+        var want_ctrl = b.combo.mods.ctrl
+        var want_alt = b.combo.mods.alt
+        var want_logo = b.combo.mods.logo
+        if b.combo.mods.uses_mod {
+            match eff {
+                Super => want_logo = true
+                Alt => want_alt = true
+                Ctrl => want_ctrl = true
+            }
+        }
+        let mb = mods_bits(b.combo.mods.shift, want_ctrl, want_alt, want_logo)
+        let bit = u16(1) << u16(mb)
+        match b.combo.trigger {
+            Key(sym) => {
+                let k = (u64(mb) << u64(32)) | u64(sym)
+                if not idx.key_map.contains(k) {
+                    discard idx.key_map.insert(k, i)
+                }
+                idx.key_mod_mask |= bit
+                if b.allow_when_locked {
+                    if not idx.locked_key_map.contains(k) {
+                        discard idx.locked_key_map.insert(k, i)
+                    }
+                    idx.locked_mod_mask |= bit
+                }
+            }
+            Button(btn) => {
+                let k = (u64(mb) << u64(32)) | u64(btn)
+                if not idx.button_map.contains(k) {
+                    discard idx.button_map.insert(k, i)
+                }
+                idx.button_mod_mask |= bit
+            }
+            Wheel(dir) => {
+                let k = (u64(mb) << u64(32)) | u64(u32(dir))
+                if not idx.wheel_map.contains(k) {
+                    discard idx.wheel_map.insert(k, i)
+                }
+                idx.wheel_mod_mask |= bit
+            }
+        }
+    }
+    p.bind_index = idx
+}
+
+fn lookup_key_bind(m: map.Map[u64, int], mb: u32, sym: u32, base_sym: u32, shift: bool) -> Option[int] {
+    let hi = u64(mb) << u64(32)
+    let s1 = cfg.keys.normalize_sym(sym, shift)
+    let hit1 = m.get(hi | u64(s1))
+    if base_sym != 0 {
+        let s2 = cfg.keys.normalize_sym(base_sym, false)
+        if s2 != s1 {
+            if let Some(i2) = m.get(hi | u64(s2)) {
+                return match hit1 {
+                    Some(i1) => Some(min(i1, i2))
+                    None => Some(i2)
+                }
+            }
+        }
+    }
+    return hit1
+}
 
 fn wake_monitors_if_off[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) {
     if not p.monitors_powered {
@@ -91,7 +177,7 @@ fn clear_fullscreen[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.
 
 /// Broadcast `workspace-changed` for the currently active monitor (e.g. after monitor focus change).
 fn notify_active_monitor[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R]) {
-    guard not p.desktop.monitors.is_empty() else {
+    guard p.has_ipc_subscribers() and not p.desktop.monitors.is_empty() else {
         return
     }
     let mi = p.desktop.active_monitor
@@ -128,7 +214,6 @@ pub fn close_window[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.
 }
 
 pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], act: cfg.Action) -> Result[(), str] {
-    let now = time.now_ns()
     match act {
         Noop => {}
         Quit => {
@@ -138,10 +223,10 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             try reload.reload_config(mut p)
         }
         ToggleHotkeyOverlay => {
-            p.set_overlay_visible(not p.overlay_visible, now)
+            p.set_overlay_visible(not p.overlay_visible, time.now_ns())
         }
         ToggleOverview => {
-            p.set_overview_open(not p.overview_open, now)
+            p.set_overview_open(not p.overview_open, time.now_ns())
         }
         PowerOffMonitors => {
             outputs.power_monitors(mut p, false)
@@ -174,66 +259,102 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                let had_fs = p.desktop.monitors[mi].workspaces[wi].fullscreen.is_some()
+                let was_float = p.desktop.monitors[mi].workspaces[wi].focus_floating
+                let was_pan = p.desktop.monitors[mi].workspaces[wi].strip.manual_pan
+                let prev_col = p.desktop.monitors[mi].workspaces[wi].strip.active_col
                 clear_fullscreen(mut p, mi, wi)
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(-1, 0)
-                p.sync_focus()
-                p.needs_layout = true
+                if had_fs or was_float or was_pan or p.desktop.monitors[mi].workspaces[wi].strip.active_col != prev_col {
+                    p.sync_focus()
+                    p.needs_layout = true
+                }
             }
         }
         FocusColumnRight => {
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                let had_fs = p.desktop.monitors[mi].workspaces[wi].fullscreen.is_some()
+                let was_float = p.desktop.monitors[mi].workspaces[wi].focus_floating
+                let was_pan = p.desktop.monitors[mi].workspaces[wi].strip.manual_pan
+                let prev_col = p.desktop.monitors[mi].workspaces[wi].strip.active_col
                 clear_fullscreen(mut p, mi, wi)
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(1, 0)
-                p.sync_focus()
-                p.needs_layout = true
+                if had_fs or was_float or was_pan or p.desktop.monitors[mi].workspaces[wi].strip.active_col != prev_col {
+                    p.sync_focus()
+                    p.needs_layout = true
+                }
             }
         }
         FocusColumnFirst => {
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                let had_fs = p.desktop.monitors[mi].workspaces[wi].fullscreen.is_some()
+                let was_float = p.desktop.monitors[mi].workspaces[wi].focus_floating
+                let was_pan = p.desktop.monitors[mi].workspaces[wi].strip.manual_pan
+                let prev_col = p.desktop.monitors[mi].workspaces[wi].strip.active_col
                 clear_fullscreen(mut p, mi, wi)
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_first()
-                p.sync_focus()
-                p.needs_layout = true
+                if had_fs or was_float or was_pan or p.desktop.monitors[mi].workspaces[wi].strip.active_col != prev_col {
+                    p.sync_focus()
+                    p.needs_layout = true
+                }
             }
         }
         FocusColumnLast => {
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                let had_fs = p.desktop.monitors[mi].workspaces[wi].fullscreen.is_some()
+                let was_float = p.desktop.monitors[mi].workspaces[wi].focus_floating
+                let was_pan = p.desktop.monitors[mi].workspaces[wi].strip.manual_pan
+                let prev_col = p.desktop.monitors[mi].workspaces[wi].strip.active_col
                 clear_fullscreen(mut p, mi, wi)
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
                 discard p.desktop.monitors[mi].workspaces[wi].strip.focus_last()
-                p.sync_focus()
-                p.needs_layout = true
+                if had_fs or was_float or was_pan or p.desktop.monitors[mi].workspaces[wi].strip.active_col != prev_col {
+                    p.sync_focus()
+                    p.needs_layout = true
+                }
             }
         }
         FocusWindowDown => {
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                let had_fs = p.desktop.monitors[mi].workspaces[wi].fullscreen.is_some()
+                let was_float = p.desktop.monitors[mi].workspaces[wi].focus_floating
+                let was_pan = p.desktop.monitors[mi].workspaces[wi].strip.manual_pan
+                let prev_win = p.desktop.monitors[mi].workspaces[wi].strip.focused()
                 clear_fullscreen(mut p, mi, wi)
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
-                discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(0, 1)
-                p.sync_focus()
-                p.needs_layout = true
+                let next_win = p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(0, 1)
+                if had_fs or was_float or was_pan or next_win != prev_win {
+                    p.sync_focus()
+                    p.needs_layout = true
+                }
             }
         }
         FocusWindowUp => {
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
+                let had_fs = p.desktop.monitors[mi].workspaces[wi].fullscreen.is_some()
+                let was_float = p.desktop.monitors[mi].workspaces[wi].focus_floating
+                let was_pan = p.desktop.monitors[mi].workspaces[wi].strip.manual_pan
+                let prev_win = p.desktop.monitors[mi].workspaces[wi].strip.focused()
                 clear_fullscreen(mut p, mi, wi)
                 p.desktop.monitors[mi].workspaces[wi].focus_floating = false
-                discard p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(0, -1)
-                p.sync_focus()
-                p.needs_layout = true
+                let next_win = p.desktop.monitors[mi].workspaces[wi].strip.focus_dir(0, -1)
+                if had_fs or was_float or was_pan or next_win != prev_win {
+                    p.sync_focus()
+                    p.needs_layout = true
+                }
             }
         }
         MoveColumnLeft => {
@@ -436,9 +557,13 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             if not p.desktop.monitors.is_empty() {
                 let mi = p.desktop.active_monitor
                 let wi = p.desktop.monitors[mi].active_ws
-                discard p.desktop.monitors[mi].workspaces[wi].switch_focus_layer()
-                p.sync_focus()
-                p.needs_layout = true
+                let prev = p.desktop.monitors[mi].workspaces[wi].focused()
+                let had_fs = p.desktop.monitors[mi].workspaces[wi].fullscreen.is_some()
+                let next = p.desktop.monitors[mi].workspaces[wi].switch_focus_layer()
+                if had_fs or next != prev {
+                    p.sync_focus()
+                    p.needs_layout = true
+                }
             }
         }
         MoveFloating(dx, dy) => {
@@ -453,27 +578,27 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         }
         FocusWorkspace(n) => {
             if p.desktop.focus_workspace(n) {
-                notify_ws_change(mut p, now)
+                notify_ws_change(mut p, time.now_ns())
             }
         }
         FocusWorkspaceUp => {
             if p.desktop.focus_workspace_rel(-1) {
-                notify_ws_change(mut p, now)
+                notify_ws_change(mut p, time.now_ns())
             }
         }
         FocusWorkspaceDown => {
             if p.desktop.focus_workspace_rel(1) {
-                notify_ws_change(mut p, now)
+                notify_ws_change(mut p, time.now_ns())
             }
         }
         FocusWorkspacePrevious => {
             if p.desktop.focus_workspace_previous() {
-                notify_ws_change(mut p, now)
+                notify_ws_change(mut p, time.now_ns())
             }
         }
         MoveWindowToWorkspace(n) => {
             if p.desktop.move_focused_to_workspace(n) {
-                notify_ws_change(mut p, now)
+                notify_ws_change(mut p, time.now_ns())
             }
         }
         MoveWindowToWorkspaceSilent(n) => {
@@ -486,27 +611,27 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
         }
         MoveWindowToWorkspaceUp => {
             if p.desktop.move_focused_to_workspace_rel(-1) {
-                notify_ws_change(mut p, now)
+                notify_ws_change(mut p, time.now_ns())
             }
         }
         MoveWindowToWorkspaceDown => {
             if p.desktop.move_focused_to_workspace_rel(1) {
-                notify_ws_change(mut p, now)
+                notify_ws_change(mut p, time.now_ns())
             }
         }
         MoveColumnToWorkspace(n) => {
             if p.desktop.move_column_to_workspace(n) {
-                notify_ws_change(mut p, now)
+                notify_ws_change(mut p, time.now_ns())
             }
         }
         MoveColumnToWorkspaceUp => {
             if p.desktop.move_column_to_workspace_rel(-1) {
-                notify_ws_change(mut p, now)
+                notify_ws_change(mut p, time.now_ns())
             }
         }
         MoveColumnToWorkspaceDown => {
             if p.desktop.move_column_to_workspace_rel(1) {
-                notify_ws_change(mut p, now)
+                notify_ws_change(mut p, time.now_ns())
             }
         }
         FocusMonitorLeft => {
@@ -606,7 +731,7 @@ pub fn dispatch_action[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composit
             }
         }
         SwitchLayout(delta) => {
-            if p.d.switch_layout(delta) {
+            if p.d.switch_layout(delta) and p.has_ipc_subscribers() {
                 p.broadcast_event("layout-changed", json.obj().with("layout", json.Value.Str(p.d.layout_name())))
             }
         }
@@ -630,7 +755,9 @@ pub fn notify_ws_change[O: lum.plug.Output, R: lum.plug.Renderer](mut p: composi
     p.anims.switch_workspace(oid, ws, vh, ac, now)
     p.sync_focus()
     p.needs_layout = true
-    p.broadcast_event("workspace-changed", json.obj().with("monitor", json.Value.Str(p.desktop.monitors[mi].name.clone())).with("workspace", json.Value.Int(ws + 1)))
+    if p.has_ipc_subscribers() {
+        p.broadcast_event("workspace-changed", json.obj().with("monitor", json.Value.Str(p.desktop.monitors[mi].name.clone())).with("workspace", json.Value.Int(ws + 1)))
+    }
 }
 
 fn suppress_key[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel[O, R], code: u32) {
@@ -651,17 +778,15 @@ pub fn on_key[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel
         return false
     }
     wake_monitors_if_off(mut p)
-    let eff = effective_mod(p)
+    let mb = mods_bits(k.mods.shift, k.mods.ctrl, k.mods.alt, k.mods.logo)
+    let mbit = u16(1) << u16(mb)
     // Session lock security: only bindings explicitly marked `allow-when-locked = true` fire while locked.
     if p.d.locked() {
-        var locked_act: Option[cfg.Action] = None
-        for b in p.cfg.binds {
-            if b.allow_when_locked and b.combo.matches_with_base(k.sym, k.base_sym, k.mods.shift, k.mods.ctrl, k.mods.alt, k.mods.logo, eff) {
-                locked_act = Some(b.act.clone())
-                break
-            }
+        guard (p.bind_index.locked_mod_mask & mbit) != u16(0) else {
+            return false
         }
-        if let Some(act) = locked_act {
+        if let Some(bi) = lookup_key_bind(p.bind_index.locked_key_map, mb, k.sym, k.base_sym, k.mods.shift) {
+            let act = p.cfg.binds[bi].act.clone()
             suppress_key(mut p, k.code)
             if let Err(err) = dispatch_action(mut p, act) {
                 io.eprint("pastel: action error: {err}")
@@ -673,12 +798,11 @@ pub fn on_key[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pastel
     guard not p.d.shortcuts_inhibited() else {
         return false
     }
-    // Check configured bindings first.
+    // O(1) compiled binding lookup (1-instruction reject for unbound typing/gaming modifiers).
     var matched: Option[cfg.Action] = None
-    for b in p.cfg.binds {
-        if b.combo.matches_with_base(k.sym, k.base_sym, k.mods.shift, k.mods.ctrl, k.mods.alt, k.mods.logo, eff) {
-            matched = Some(b.act.clone())
-            break
+    if (p.bind_index.key_mod_mask & mbit) != u16(0) {
+        if let Some(bi) = lookup_key_bind(p.bind_index.key_map, mb, k.sym, k.base_sym, k.mods.shift) {
+            matched = Some(p.cfg.binds[bi].act.clone())
         }
     }
     let is_mod_key = k.sym >= u32(0xffe1) and k.sym <= u32(0xffee)
@@ -765,21 +889,17 @@ pub fn on_button[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pas
         p.set_overview_open(false, now)
         return true
     }
-    // Check configured mouse button bindings (`MouseMiddle`, `MouseBack`, `MouseForward`, etc.).
+    // Check configured mouse button bindings (`MouseMiddle`, `MouseBack`, `MouseForward`, etc.) in O(1).
     let mods = p.d.mods()
-    let eff = effective_mod(p)
-    var btn_act: Option[cfg.Action] = None
-    for bind in p.cfg.binds {
-        if bind.combo.matches_button(b.button, mods.shift, mods.ctrl, mods.alt, mods.logo, eff) {
-            btn_act = Some(bind.act.clone())
-            break
+    let mb = mods_bits(mods.shift, mods.ctrl, mods.alt, mods.logo)
+    if (p.bind_index.button_mod_mask & (u16(1) << u16(mb))) != u16(0) {
+        if let Some(bi) = p.bind_index.button_map.get((u64(mb) << u64(32)) | u64(b.button)) {
+            let act = p.cfg.binds[bi].act.clone()
+            if let Err(err) = dispatch_action(mut p, act) {
+                io.eprint("pastel: action error: {err}")
+            }
+            return true
         }
-    }
-    if let Some(act) = btn_act {
-        if let Err(err) = dispatch_action(mut p, act) {
-            io.eprint("pastel: action error: {err}")
-        }
-        return true
     }
     guard let Some(w) = p.d.window_at(b.x, b.y) else {
         // Clicking empty space on another monitor transfers active monitor focus cleanly.
@@ -790,7 +910,18 @@ pub fn on_button[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pas
         return false
     }
     let id = windows.window_id(w)
-    if p.desktop.focus_window(id) {
+    var already_focused = p.desktop.focused_window() == Some(id)
+    if already_focused and not p.desktop.monitors.is_empty() {
+        let mi = p.desktop.active_monitor
+        let wi = p.desktop.monitors[mi].active_ws
+        if wi < p.desktop.monitors[mi].workspaces.len() and p.desktop.monitors[mi].workspaces[wi].strip.manual_pan {
+            already_focused = false
+        }
+    }
+    if already_focused {
+        // Keep keyboard focus synced (dismisses on-demand layer-shell focus) without redundant relayout.
+        p.d.focus(Some(w))
+    } else if p.desktop.focus_window(id) {
         p.sync_focus()
         p.needs_layout = true
     }
@@ -860,11 +991,12 @@ pub fn on_motion[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor.Pas
 }
 
 fn find_wheel_bind[O: lum.plug.Output, R: lum.plug.Renderer](p: compositor.Pastel[O, R], code: u32, mods: lum.Mods) -> Option[cfg.Action] {
-    let eff = effective_mod(p)
-    for b in p.cfg.binds {
-        if b.combo.matches_wheel(code, mods.shift, mods.ctrl, mods.alt, mods.logo, eff) {
-            return Some(b.act.clone())
-        }
+    let mb = mods_bits(mods.shift, mods.ctrl, mods.alt, mods.logo)
+    guard (p.bind_index.wheel_mod_mask & (u16(1) << u16(mb))) != u16(0) else {
+        return None
+    }
+    if let Some(bi) = p.bind_index.wheel_map.get((u64(mb) << u64(32)) | u64(code)) {
+        return Some(p.cfg.binds[bi].act.clone())
     }
     return None
 }

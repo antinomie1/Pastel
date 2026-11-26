@@ -56,6 +56,10 @@ pub fn BlurPipelines.destroy(self, mut dev: gpu.Device) {
 }
 
 /// Lazily allocated offscreen pyramid for one output.
+/// In X-Ray-only mode, `levels[0]` directly holds the cached X-Ray blur (`xray_in_level0 = true`),
+/// avoiding an extra half-resolution VRAM texture and GPU copy. When live blur also runs on the
+/// same output (e.g. a floating window or hotkey overlay), `levels[0]` is promoted to `xray_tex`
+/// in O(1) without copying, and compacted back once live blur disappears.
 pub struct BlurPyramid {
     pub width: u32 = 0
     pub height: u32 = 0
@@ -65,6 +69,11 @@ pub struct BlurPyramid {
     pub xray_tex: Option[gpu.Texture] = None
     pub xray_bg: vec4 = zeroed()
     pub xray_valid: bool = false
+    pub xray_in_level0: bool = false
+}
+
+pub fn BlurPyramid.is_allocated(self) -> bool {
+    return not self.levels.is_empty() or self.xray_tex.is_some()
 }
 
 pub fn BlurPyramid.destroy(mut self, mut dev: gpu.Device) {
@@ -79,10 +88,52 @@ pub fn BlurPyramid.destroy(mut self, mut dev: gpu.Device) {
     self.height = 0
     self.depth = 0
     self.xray_valid = false
+    self.xray_in_level0 = false
 }
 
 pub fn BlurPyramid.invalidate_xray(mut self) {
     self.xray_valid = false
+}
+
+/// True when a valid cached X-Ray blurred texture matches `(w, h, passes, fmt, bg)`.
+pub fn BlurPyramid.has_valid_xray(self, w: u32, h: u32, passes: int, fmt: gpu.Format, bg: vec4) -> bool {
+    guard self.xray_valid and self.xray_bg == bg and self.format == fmt and self.width == w and self.height == h and self.depth == passes.clamp(1, 4) else {
+        return false
+    }
+    if self.xray_in_level0 {
+        return not self.levels.is_empty()
+    }
+    return self.xray_tex.is_some()
+}
+
+/// Return the cached X-Ray texture when valid.
+pub fn BlurPyramid.xray_texture(self) -> Option[gpu.Texture] {
+    guard self.xray_valid else {
+        return None
+    }
+    if self.xray_in_level0 {
+        return if not self.levels.is_empty() { Some(self.levels[0]) } else { None }
+    }
+    return self.xray_tex
+}
+
+/// When live blur is no longer active alongside a valid X-Ray cache, drop the extra half-res
+/// live-blur level-0 texture by moving `xray_tex` back into `levels[0]` with zero GPU work.
+pub fn BlurPyramid.compact_xray(mut self, mut dev: gpu.Device) {
+    guard self.xray_valid and not self.xray_in_level0 and not self.levels.is_empty() else {
+        return
+    }
+    guard let Some(xt) = self.xray_tex.take() else {
+        return
+    }
+    let old_l0 = self.levels[0]
+    if xt.width() == old_l0.width() and xt.height() == old_l0.height() and xt.format() == old_l0.format() {
+        self.levels[0] = xt
+        dev.destroy_texture(old_l0)
+        self.xray_in_level0 = true
+    } else {
+        self.xray_tex = Some(xt)
+    }
 }
 
 /// Ensure the half/quarter/eighth-resolution mip pyramid matches `(w, h, passes, fmt)`.
@@ -106,19 +157,13 @@ pub fn BlurPyramid.ensure(mut self, mut dev: gpu.Device, w: u32, h: u32, passes:
     self.depth = d
     self.format = fmt
     self.xray_valid = false
+    self.xray_in_level0 = false
     return Ok(())
 }
 
-/// Run Dual-Kawase downsample -> upsample on `src` and return the blurred level-0 texture.
-pub fn BlurPyramid.blur_from(mut self, mut dev: gpu.Device, pipes: BlurPipelines, mut e: gpu.Encoder, src: gpu.Texture, w: u32, h: u32, passes: int, offset: f32) -> Result[gpu.Texture, str] {
-    let full = draw2d.Rect { w: f32(w), h: f32(h) }
-    return self.blur_region(mut dev, pipes, mut e, src, w, h, passes, offset, full)
-}
-
-/// Run Dual-Kawase downsample -> upsample on `src` scissored to `region` expanded by the
-/// blur kernel radius, avoiding full-screen blur passes when moving/resizing floating windows.
-pub fn BlurPyramid.blur_region(mut self, mut dev: gpu.Device, pipes: BlurPipelines, mut e: gpu.Encoder, src: gpu.Texture, w: u32, h: u32, passes: int, offset: f32, region: draw2d.Rect) -> Result[gpu.Texture, str] {
-    try self.ensure(mut dev, w, h, passes, src.format())
+/// Execute the Dual-Kawase downsample -> upsample chain from `src` writing the final half-res
+/// level directly into `final_dst` (zero intermediate copy).
+fn BlurPyramid.run_chain(self, pipes: BlurPipelines, mut e: gpu.Encoder, src: gpu.Texture, final_dst: gpu.Texture, w: u32, h: u32, passes: int, offset: f32, region: draw2d.Rect) {
     let n = self.levels.len()
     let off = offset.clamp(0.5, 8.0)
     let fw = max(f32(w), 1.0)
@@ -132,11 +177,12 @@ pub fn BlurPyramid.blur_region(mut self, mut dev: gpu.Device, pipes: BlurPipelin
     let extra = i32(off.ceil()) + 2
 
     // Downsample chain: src -> level[0] -> level[1] -> ... -> level[n-1]
+    // (When n == 1, downsample writes directly into final_dst.)
     var prev = src
     var pw = fw
     var ph = fh
     for i in 0..n {
-        let dst = self.levels[i]
+        let dst = if n == 1 { final_dst } else { self.levels[i] }
         let dw = dst.width()
         let dh = dst.height()
         let push = BlurPush {
@@ -145,10 +191,15 @@ pub fn BlurPyramid.blur_region(mut self, mut dev: gpu.Device, pipes: BlurPipelin
             dy: off / max(ph, 1.0),
         }
         if use_scissor {
-            let sx0 = max(i32((bx0 * f32(dw) / fw).floor()) - extra, 0)
-            let sy0 = max(i32((by0 * f32(dh) / fh).floor()) - extra, 0)
-            let sx1 = min(i32((bx1 * f32(dw) / fw).ceil()) + extra, i32(dw))
-            let sy1 = min(i32((by1 * f32(dh) / fh).ceil()) + extra, i32(dh))
+            let ux0 = if n == 1 { max(region.x, 0.0) } else { bx0 }
+            let uy0 = if n == 1 { max(region.y, 0.0) } else { by0 }
+            let ux1 = if n == 1 { min(region.x + region.w, fw) } else { bx1 }
+            let uy1 = if n == 1 { min(region.y + region.h, fh) } else { by1 }
+            let pad_tx = if n == 1 { i32(2) } else { extra }
+            let sx0 = max(i32((ux0 * f32(dw) / fw).floor()) - pad_tx, 0)
+            let sy0 = max(i32((uy0 * f32(dh) / fh).floor()) - pad_tx, 0)
+            let sx1 = min(i32((ux1 * f32(dw) / fw).ceil()) + pad_tx, i32(dw))
+            let sy1 = min(i32((uy1 * f32(dh) / fh).ceil()) + pad_tx, i32(dh))
             let sw = u32(max(sx1 - sx0, 1))
             let sh = u32(max(sy1 - sy0, 1))
             e.render(gpu.Pass { target: dst, load: gpu.Load.Discard }, fn(mut r) {
@@ -169,11 +220,11 @@ pub fn BlurPyramid.blur_region(mut self, mut dev: gpu.Device, pipes: BlurPipelin
         ph = f32(dh)
     }
 
-    // Upsample chain: level[n-1] -> level[n-2] -> ... -> level[0]
+    // Upsample chain: level[n-1] -> level[n-2] -> ... -> final_dst
     var i = n - 2
     while i >= 0 {
         let src_t = self.levels[i + 1]
-        let dst_t = self.levels[i]
+        let dst_t = if i == 0 { final_dst } else { self.levels[i] }
         let dw = dst_t.width()
         let dh = dst_t.height()
         let push = BlurPush {
@@ -182,10 +233,17 @@ pub fn BlurPyramid.blur_region(mut self, mut dev: gpu.Device, pipes: BlurPipelin
             dy: off / max(f32(dh), 1.0),
         }
         if use_scissor {
-            let sx0 = max(i32((bx0 * f32(dw) / fw).floor()) - extra, 0)
-            let sy0 = max(i32((by0 * f32(dh) / fh).floor()) - extra, 0)
-            let sx1 = min(i32((bx1 * f32(dw) / fw).ceil()) + extra, i32(dw))
-            let sy1 = min(i32((by1 * f32(dh) / fh).ceil()) + extra, i32(dh))
+            // The final upsample pass (`i == 0`) is only bilinear-sampled inside `region`,
+            // so it needs only a 2-texel filter margin rather than the full blur kernel radius.
+            let ux0 = if i == 0 { max(region.x, 0.0) } else { bx0 }
+            let uy0 = if i == 0 { max(region.y, 0.0) } else { by0 }
+            let ux1 = if i == 0 { min(region.x + region.w, fw) } else { bx1 }
+            let uy1 = if i == 0 { min(region.y + region.h, fh) } else { by1 }
+            let pad_tx = if i == 0 { i32(2) } else { extra }
+            let sx0 = max(i32((ux0 * f32(dw) / fw).floor()) - pad_tx, 0)
+            let sy0 = max(i32((uy0 * f32(dh) / fh).floor()) - pad_tx, 0)
+            let sx1 = min(i32((ux1 * f32(dw) / fw).ceil()) + pad_tx, i32(dw))
+            let sy1 = min(i32((uy1 * f32(dh) / fh).ceil()) + pad_tx, i32(dh))
             let sw = u32(max(sx1 - sx0, 1))
             let sh = u32(max(sy1 - sy0, 1))
             e.render(gpu.Pass { target: dst_t, load: gpu.Load.Discard }, fn(mut r) {
@@ -203,42 +261,66 @@ pub fn BlurPyramid.blur_region(mut self, mut dev: gpu.Device, pipes: BlurPipelin
         }
         i -= 1
     }
+}
+
+/// Run Dual-Kawase downsample -> upsample on `src` and return the blurred level-0 texture.
+pub fn BlurPyramid.blur_from(mut self, mut dev: gpu.Device, pipes: BlurPipelines, mut e: gpu.Encoder, src: gpu.Texture, w: u32, h: u32, passes: int, offset: f32) -> Result[gpu.Texture, str] {
+    let full = draw2d.Rect { w: f32(w), h: f32(h) }
+    return self.blur_region(mut dev, pipes, mut e, src, w, h, passes, offset, full)
+}
+
+/// Run Dual-Kawase downsample -> upsample on `src` scissored to `region` expanded by the
+/// blur kernel radius, avoiding full-screen blur passes when moving/resizing floating windows.
+pub fn BlurPyramid.blur_region(mut self, mut dev: gpu.Device, pipes: BlurPipelines, mut e: gpu.Encoder, src: gpu.Texture, w: u32, h: u32, passes: int, offset: f32, region: draw2d.Rect) -> Result[gpu.Texture, str] {
+    let fmt = src.format()
+    try self.ensure(mut dev, w, h, passes, fmt)
+    // Preserve an intact X-Ray cache in `levels[0]` by promoting it to `xray_tex` without GPU copy.
+    if self.xray_valid and self.xray_in_level0 and not self.levels.is_empty() {
+        let l0 = self.levels[0]
+        let new_l0 = try dev.texture(gpu.TextureDesc { width: l0.width(), height: l0.height(), format: fmt, target: true })
+        if let Some(old_x) = self.xray_tex.take() {
+            dev.destroy_texture(old_x)
+        }
+        self.xray_tex = Some(l0)
+        self.levels[0] = new_l0
+        self.xray_in_level0 = false
+    }
+    self.run_chain(pipes, mut e, src, self.levels[0], w, h, passes, offset, region)
     return Ok(self.levels[0])
 }
 
-/// Ensure a cached X-Ray blurred texture exists at half resolution, blurring `src` only when invalid.
+/// Ensure a cached X-Ray blurred texture exists at half resolution, blurring `src` only when invalid
+/// and writing the final upsample pass directly into the cache texture (zero GPU copy).
 pub fn BlurPyramid.ensure_xray(mut self, mut dev: gpu.Device, pipes: BlurPipelines, mut e: gpu.Encoder, src: gpu.Texture, w: u32, h: u32, passes: int, offset: f32, bg: vec4) -> Result[gpu.Texture, str] {
     let fmt = src.format()
-    if self.xray_valid and self.xray_bg == bg and self.format == fmt {
-        if let Some(t) = self.xray_tex {
-            if t.width() == max(w / 2, u32(1)) and t.height() == max(h / 2, u32(1)) and t.format() == fmt {
-                return Ok(t)
-            }
+    if self.has_valid_xray(w, h, passes, fmt, bg) {
+        if let Some(t) = self.xray_texture() {
+            return Ok(t)
         }
     }
-    let blurred = try self.blur_from(mut dev, pipes, mut e, src, w, h, passes, offset)
-    let bw = blurred.width()
-    let bh = blurred.height()
-    var dst_opt = self.xray_tex
-    var need_alloc = true
-    if let Some(t) = dst_opt {
-        if t.width() == bw and t.height() == bh and t.format() == fmt {
-            need_alloc = false
-        } else {
-            dev.destroy_texture(t)
-            dst_opt = None
+    try self.ensure(mut dev, w, h, passes, fmt)
+    let bw = self.levels[0].width()
+    let bh = self.levels[0].height()
+    if let Some(xt) = self.xray_tex {
+        if xt.width() != bw or xt.height() != bh or xt.format() != fmt {
+            dev.destroy_texture(xt)
+            self.xray_tex = None
         }
     }
-    if need_alloc {
-        let tex = try dev.texture(gpu.TextureDesc { width: bw, height: bh, format: fmt, target: true })
-        dst_opt = Some(tex)
-        self.xray_tex = dst_opt
+    let full = draw2d.Rect { w: f32(w), h: f32(h) }
+    if let Some(cache) = self.xray_tex {
+        self.run_chain(pipes, mut e, src, cache, w, h, passes, offset, full)
+        self.xray_bg = bg
+        self.xray_valid = true
+        self.xray_in_level0 = false
+        return Ok(cache)
     }
-    let cache = dst_opt.unwrap()
-    e.copy_texture(blurred, cache, 0, 0, 0, 0, bw, bh)
+    let dst0 = self.levels[0]
+    self.run_chain(pipes, mut e, src, dst0, w, h, passes, offset, full)
     self.xray_bg = bg
     self.xray_valid = true
-    return Ok(cache)
+    self.xray_in_level0 = true
+    return Ok(dst0)
 }
 
 /// Conservative screen-pixel blur sampling radius for damage expansion.

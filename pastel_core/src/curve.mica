@@ -33,6 +33,42 @@ pub fn EaseKind.from_str(name: str) -> Result[EaseKind, str] {
     }
 }
 
+/// Evaluate easing `f(t)` without computing its derivative (fast path for `Anim.tick`).
+pub fn EaseKind.sample_pos(self, t: f64) -> f64 {
+    let u = t.clamp(0.0, 1.0)
+    match self {
+        Linear => {
+            return u
+        }
+        OutQuad => {
+            let inv = 1.0 - u
+            return 1.0 - inv * inv
+        }
+        OutCubic => {
+            let inv = 1.0 - u
+            return 1.0 - inv * inv * inv
+        }
+        OutQuint => {
+            let inv = 1.0 - u
+            let inv2 = inv * inv
+            return 1.0 - inv2 * inv2 * inv
+        }
+        OutExpo => {
+            if u >= 1.0 {
+                return 1.0
+            }
+            return 1.0 - (2.0).pow(-10.0 * u)
+        }
+        InOutCubic => {
+            if u < 0.5 {
+                return 4.0 * u * u * u
+            }
+            let inv = -2.0 * u + 2.0
+            return 1.0 - inv * inv * inv * 0.5
+        }
+    }
+}
+
 /// Evaluate easing `f(t)` and derivative `f'(t)` for `t` in `[0, 1]`.
 pub fn EaseKind.sample(self, t: f64) -> (f64, f64) {
     let u = t.clamp(0.0, 1.0)
@@ -115,20 +151,23 @@ pub fn Spring.eval(self, elapsed_s: f64, x0: f64, v0: f64, target: f64) -> (f64,
         // Critically damped: x(t) = e^(-w0*t) * (dx + (v0 + w0*dx)*t)
         let decay = (-w0 * t).exp()
         let b = v0 + w0 * dx
-        let pos = decay * (dx + b * t)
-        let vel = decay * (b - w0 * (dx + b * t))
+        let d = dx + b * t
+        let pos = decay * d
+        let vel = decay * (b - w0 * d)
         return (target + pos, vel)
     }
     if z < 1.0 {
         // Under-damped oscillation
+        let zw0 = z * w0
         let wd = w0 * (1.0 - z * z).sqrt()
-        let decay = (-z * w0 * t).exp()
+        let decay = (-zw0 * t).exp()
         let a = dx
-        let b = (v0 + z * w0 * dx) / wd
-        let cs = (wd * t).cos()
-        let sn = (wd * t).sin()
+        let b = (v0 + zw0 * dx) / wd
+        let wdt = wd * t
+        let cs = wdt.cos()
+        let sn = wdt.sin()
         let pos = decay * (a * cs + b * sn)
-        let vel = decay * ((b * wd - z * w0 * a) * cs - (a * wd + z * w0 * b) * sn)
+        let vel = decay * ((b * wd - zw0 * a) * cs - (a * wd + zw0 * b) * sn)
         return (target + pos, vel)
     }
     // Over-damped

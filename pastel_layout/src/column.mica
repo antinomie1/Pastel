@@ -31,8 +31,13 @@ pub fn Column.single(id: u64, width_frac: f64) -> Column {
 /// inside `viewport_w` without clipping any window edge:
 ///   `k * w + (k + 1) * gap = viewport_w  =>  w = floor(frac * (viewport_w - gap) - gap)`
 pub fn width_for_frac(viewport_w: f64, gap: f64, frac: f64) -> f64 {
+    return width_for_frac_pre(viewport_w - gap, gap, frac)
+}
+
+/// Fast path of `width_for_frac` with `viewport_w - gap` precomputed across a strip pass.
+pub fn width_for_frac_pre(viewport_minus_gap: f64, gap: f64, frac: f64) -> f64 {
     let f = frac.clamp(0.1, 1.0)
-    let w = (f * (viewport_w - gap) - gap).floor()
+    let w = (f * viewport_minus_gap - gap).floor()
     return max(w, 64.0)
 }
 

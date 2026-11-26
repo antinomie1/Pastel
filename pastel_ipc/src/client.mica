@@ -2,6 +2,58 @@
 
 import std.json
 import std.net
+import std.rt
+
+/// Buffered line reader over `net.Conn` (reads 4 KiB chunks instead of 1-byte syscalls).
+struct LineReader {
+    buf: List[u8]
+    lo: int = 0
+    hi: int = 0
+    eof: bool = false
+}
+
+fn LineReader.new() -> LineReader {
+    var buf: List[u8] = List.with_cap(4096)
+    for _ in 0..4096 {
+        buf.push(u8(0))
+    }
+    return LineReader { buf }
+}
+
+fn LineReader.read_line(mut self, conn: net.Conn) -> Result[Option[str], net.IoError] {
+    var out = ""
+    var any = false
+    while true {
+        if self.lo >= self.hi {
+            if self.eof {
+                break
+            }
+            self.lo = 0
+            self.hi = 0
+            let n = try conn.read_into(mut self.buf)
+            if n <= 0 {
+                self.eof = true
+                break
+            }
+            self.hi = n
+        }
+        any = true
+        var j = self.lo
+        while j < self.hi and self.buf[j] != 10 {
+            j += 1
+        }
+        rt.str_push_bytes(mut out, self.buf, self.lo, j)
+        if j < self.hi {
+            self.lo = j + 1
+            if out.ends_with("\r") {
+                return Ok(Some(out.slice(0, out.len() - 1)))
+            }
+            return Ok(Some(out))
+        }
+        self.lo = self.hi
+    }
+    return Ok(if any { Some(out) } else { None })
+}
 
 /// Send a single JSON request line and read back one JSON response line.
 pub fn request(sock_path: str, req: json.Value) -> Result[str, str] {
@@ -9,7 +61,8 @@ pub fn request(sock_path: str, req: json.Value) -> Result[str, str] {
     defer conn.close()
     let line = json.encode(req) + "\n"
     discard try conn.write(line).map_err(fn(e) => "write ipc: {e}")
-    guard let Some(resp) = try conn.read_line().map_err(fn(e) => "read ipc: {e}") else {
+    var rd = LineReader.new()
+    guard let Some(resp) = try rd.read_line(conn).map_err(fn(e) => "read ipc: {e}") else {
         return Err("compositor closed IPC connection")
     }
     return Ok(resp)
@@ -33,8 +86,9 @@ pub fn subscribe(sock_path: str, on_line: fn(str)) -> Result[(), str] {
     defer conn.close()
     let req = json.obj().with("cmd", json.Value.Str("subscribe"))
     discard try conn.write(json.encode(req) + "\n").map_err(fn(e) => "write ipc: {e}")
+    var rd = LineReader.new()
     while true {
-        match conn.read_line() {
+        match rd.read_line(conn) {
             Ok(Some(line)) => {
                 if not line.is_empty() {
                     on_line(line)

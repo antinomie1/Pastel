@@ -284,8 +284,8 @@ pub fn render_hotkey_overlay(c: cfg.Config, effective_mod: cfg.ModKey, scale_f: 
         var tw: i32 = 0
         for g in col {
             for r in g.rows {
-                kw = max(kw, face.measure(r.keys))
-                tw = max(tw, face.measure(r.title))
+                kw = max(kw, face.measure_cached(r.keys))
+                tw = max(tw, face.measure_cached(r.title))
             }
         }
         key_widths.push(kw)
@@ -318,11 +318,18 @@ pub fn render_hotkey_overlay(c: cfg.Config, effective_mod: cfg.ModKey, scale_f: 
     ).to_rgba8_premul()
     let total = int(width) * int(height)
     var px: List[u8] = List.with_cap(total * 4)
-    for _ in 0..total {
-        px.push(panel_rgba[0])
-        px.push(panel_rgba[1])
-        px.push(panel_rgba[2])
-        px.push(panel_rgba[3])
+    unsafe {
+        px.set_len(total * 4)
+        let pixel32 = u32(panel_rgba[0]) | (u32(panel_rgba[1]) << 8) | (u32(panel_rgba[2]) << 16) | (u32(panel_rgba[3]) << 24)
+        let pixel64 = u64(pixel32) | (u64(pixel32) << 32)
+        let p64 = px.as_ptr().cast[u64]()
+        let pairs = total / 2
+        for i in 0..pairs {
+            p64.offset(i).write(pixel64)
+        }
+        if (total & 1) != 0 {
+            px.as_ptr().cast[u32]().offset(total - 1).write(pixel32)
+        }
     }
 
     let text_ink = if dark { core.Color.rgb(0.92, 0.93, 0.95) } else { core.Color.rgb(0.10, 0.11, 0.14) }
@@ -335,12 +342,12 @@ pub fn render_hotkey_overlay(c: cfg.Config, effective_mod: cfg.ModKey, scale_f: 
     for ci, col in cols {
         var y = pad + header_h + face.ascent()
         for g in col {
-            face.draw(mut px, width, height, left, y, g.title, dim_ink, max_x)
+            face.draw_cached(mut px, width, height, left, y, g.title, dim_ink, max_x)
             y += line
             for r in g.rows {
-                face.draw(mut px, width, height, left, y, r.keys, accent, max_x)
+                face.draw_cached(mut px, width, height, left, y, r.keys, accent, max_x)
                 let tx = left + key_widths[ci] + key_gap
-                face.draw(mut px, width, height, tx, y, r.title, text_ink, max_x)
+                face.draw_cached(mut px, width, height, tx, y, r.title, text_ink, max_x)
                 y += line
             }
             y += sec_gap

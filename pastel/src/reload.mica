@@ -66,6 +66,7 @@ pub struct ConfigWatcher {
     pub target_dir: str = ""
     pub watching_target: bool = false
     pub last_text: str = ""
+    read_buf: List[u8] = []
 }
 
 pub fn ConfigWatcher.open(cfg_path: str) -> Option[ConfigWatcher] {
@@ -103,12 +104,14 @@ pub fn ConfigWatcher.poll_changed(mut self) -> bool {
     guard self.fd >= 0 else {
         return false
     }
-    var buf: List[u8] = List.with_cap(1024)
-    for _ in 0..1024 {
-        buf.push(u8(0))
+    if self.read_buf.len() < 1024 {
+        self.read_buf.reserve(1024 - self.read_buf.len())
+        while self.read_buf.len() < 1024 {
+            self.read_buf.push(u8(0))
+        }
     }
     while true {
-        match os.read_into(self.fd, mut buf) {
+        match os.read_into(self.fd, mut self.read_buf) {
             Ok(n) => {
                 if n <= 0 {
                     break
@@ -232,6 +235,7 @@ pub fn reload_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor
     let next = try cfg.load(p.cfg_path)
     let xw_changed = next.xwayland.enabled != p.cfg.xwayland.enabled or next.xwayland.path != p.cfg.xwayland.path or next.xwayland.display != p.cfg.xwayland.display
     p.cfg = next
+    p.sync_config_caches()
     if let Some(got) = p.cfg_watch.take() {
         var watcher = got
         watcher.sync_disk()
@@ -269,11 +273,13 @@ pub fn reload_config[O: lum.plug.Output, R: lum.plug.Renderer](mut p: compositor
     for w in wins {
         windows.resolve_rules(mut p, w)
     }
-    // Re-rasterize hotkey overlay with updated colors, border width, radius, opacity, and bindings.
-    p.rebuild_overlay()
+    // Re-rasterize hotkey overlay only if visible, otherwise drop stale texture until opened.
+    p.invalidate_overlay()
     p.sync_focus()
     p.needs_layout = true
-    p.broadcast_event("config-reloaded", json.obj().with("path", json.Value.Str(p.cfg_path.clone())))
+    if p.has_ipc_subscribers() {
+        p.broadcast_event("config-reloaded", json.obj().with("path", json.Value.Str(p.cfg_path.clone())))
+    }
     io.eprint("pastel: reloaded config from {p.cfg_path}")
     return Ok(())
 }

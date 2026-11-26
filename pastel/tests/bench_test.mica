@@ -5,13 +5,21 @@ import std.env
 import std.fs
 import std.io
 import std.os
+import std.path
+import std.sync
 import std.time
 import luminaria as lum
 import luminaria_types.stats as stats
+import luminaria_wire as wire
+import luminaria_proto as proto
+import luminaria_proto.wayland as wl
+import luminaria_proto.xdg_shell as xdg
 import pastel_core as core
 import pastel_config as cfg
 import pastel_layout as lay
 import pastel_render as ren
+import pastel_ipc as ipc
+import pastel
 
 test "benchmark: layout, analytical springs, overlay rasterization, and 240Hz headless Vulkan frame latency" {
     // 1. Scrolling-tiling layout throughput (100 columns / 100 windows).
@@ -211,4 +219,236 @@ test "benchmark: layout, analytical springs, overlay rasterization, and 240Hz he
     for img in imgs {
         d.drop_image(img)
     }
+}
+
+fn bench_pump[O: lum.plug.Output, R: lum.plug.Renderer](mut p: pastel.compositor.Pastel[O, R], mut c: wire.Conn, mut globals: List[(u32, u16)], ms: int) {
+    let end = time.now_ns() + ms * 1000000
+    while time.now_ns() < end {
+        discard c.flush()
+        while true {
+            guard let Some(e) = p.d.poll().expect("poll") else {
+                break
+            }
+            p.handle_event(e)
+        }
+        discard c.read()
+        while true {
+            match proto.next_event(mut c) {
+                Ok(Some(ev)) => {
+                    match ev {
+                        WlRegistry(_, Global(n, i, _)) => globals.push((n, proto.ifaces.by_name(i)))
+                        XdgSurface(xs, Configure(serial)) => xs.ack_configure(mut c, serial)
+                        _ => {}
+                    }
+                }
+                Ok(None) => {
+                    break
+                }
+                Err(err) => panic("bench client protocol error: {err}")
+            }
+        }
+        time.sleep_ms(1)
+    }
+}
+
+fn bench_find_global(globals: Slice[(u32, u16)], iface: u16) -> u32 {
+    for (n, i) in globals {
+        if i == iface {
+            return n
+        }
+    }
+    panic("missing global")
+}
+
+test "benchmark: desktop lifecycle, O(1) input dispatch, lazy overlay startup, sync_layout, and IPC latency" {
+    // 1. Desktop bulk window lifecycle (100 windows open, float toggle, focus, close).
+    let area = core.Rect.new(0.0, 0.0, 2560.0, 1440.0)
+    let life_iters = 50
+    let t_life0 = time.now_ns()
+    for _ in 0..life_iters {
+        var desk = lay.Desktop.new(0, 12.0, 0.5, lay.CenterMode.OnOverflow)
+        desk.add_monitor(1, "DP-1", area, area)
+        for i in 1..=100 {
+            desk.add_window(u64(i), false, 0.5, 1280.0, 1400.0, None)
+        }
+        for i in 1..=20 {
+            assert(desk.toggle_floating(u64(i)))
+            assert(desk.toggle_floating(u64(i)))
+        }
+        for i in 1..=100 {
+            assert(desk.remove_window(u64(i)))
+        }
+    }
+    let life_us = (time.now_ns() - t_life0) / (life_iters * 1000)
+
+    // 2. Lazy overlay startup + real mapped Wayland windows for input, sync_layout, WindowTitle & state_json.
+    let dir = fs.create_temp_dir("pastel-rt-bench").expect("temp dir")
+    discard env.set("XDG_RUNTIME_DIR", dir.clone())
+    let sheet = ren.EffectSheet.new()
+    guard let Ok(comp_ren) = ren.PastelRenderer.open(false, sheet.clone()) else {
+        io.eprint("skipped compositor runtime bench: no Vulkan device")
+        return
+    }
+    let mode = lum.Mode { width: 1280, height: 720, refresh_mhz: 240000 }
+    let opts = lum.Options { backend: lum.Kind.Headless, headless: [mode], title: "Pastel-RT-Bench" }
+    let be = lum.backend.Backend.open(lum.backend.Options { kind: lum.Kind.Headless, headless: [mode] }).expect("headless")
+    let disp = lum.display.Display.with(opts, be, comp_ren).expect("display")
+
+    let t_start0 = time.now_ns()
+    let config = cfg.from_toml("[overlay]\nat-startup = false\n").expect("config")
+    var p = pastel.compositor.Pastel.new(disp, config, "", false, sheet)
+    defer p.shutdown()
+    let start_us = (time.now_ns() - t_start0) / 1000
+    assert(p.overlay_img.is_none())
+
+    // Connect a headless Wayland client and map 16 real windows sharing one compact SHM buffer.
+    var conn = wire.connect(p.d.socket()).expect("connect wayland")
+    var globals: List[(u32, u16)] = []
+    let reg = wl.Display { id: 1 }.get_registry(mut conn)
+    bench_pump(mut p, mut conn, mut globals, 25)
+    let comp = wl.Compositor { id: reg.bind(mut conn, bench_find_global(globals, wl.compositor_iface), wl.compositor_iface, 6) }
+    let shm = wl.Shm { id: reg.bind(mut conn, bench_find_global(globals, wl.shm_iface), wl.shm_iface, 1) }
+    let wm = xdg.WmBase { id: reg.bind(mut conn, bench_find_global(globals, xdg.wm_base_iface), xdg.wm_base_iface, 2) }
+
+    let fd = os.memfd("bench-shm", 64 * 64 * 4).expect("memfd")
+    let pool = shm.create_pool(mut conn, fd, 64 * 64 * 4)
+    os.close(fd)
+    let buf = pool.create_buffer(mut conn, 0, 64, 64, 64 * 4, wl.ShmFormat.Argb8888)
+    var surfs: List[wl.Surface] = []
+    for i in 0..16 {
+        let s = comp.create_surface(mut conn)
+        let xs = wm.get_xdg_surface(mut conn, s)
+        let tl = xs.get_toplevel(mut conn)
+        tl.set_app_id(mut conn, "bench-app-{i}")
+        tl.set_title(mut conn, "Bench Window {i}")
+        s.commit(mut conn)
+        surfs.push(s)
+    }
+    bench_pump(mut p, mut conn, mut globals, 25)
+    for s in surfs {
+        s.attach(mut conn, Some(buf), 0, 0)
+        s.commit(mut conn)
+    }
+    bench_pump(mut p, mut conn, mut globals, 35)
+    assert_eq(p.win_by_id.len(), 16)
+
+    // Input dispatch benchmark: 20,000 typing/gaming keys + 20,000 scroll ticks + 1,000 already-focused clicks.
+    let key_iters = 20000
+    let t_key0 = time.now_ns()
+    for i in 0..key_iters {
+        let sym = u32(0x61 + (i % 26))
+        discard pastel.input.on_key(mut p, lum.Key { code: u32(30 + (i % 26)), sym, base_sym: sym, pressed: true, mods: lum.Mods {} })
+    }
+    let key_ns = (time.now_ns() - t_key0) / key_iters
+
+    let scroll_iters = 20000
+    let t_scr0 = time.now_ns()
+    for _ in 0..scroll_iters {
+        discard pastel.input.on_scroll(mut p, lum.Scroll { dy: 15.0 })
+    }
+    let scr_ns = (time.now_ns() - t_scr0) / scroll_iters
+
+    // Focused window click fast-path (no redundant sync_layout on clicks inside focused window).
+    let focused_id = p.desktop.focused_window().unwrap()
+    let focused_w = p.win_by_id.get(focused_id).unwrap()
+    p.sync_layout(time.now_ns() + 1000000000)
+    let focused_rect = p.anims.windows.get(focused_id).unwrap().rect
+    let click_x = focused_rect.x.target + 16.0
+    let click_y = focused_rect.y.target + 16.0
+    assert_eq(p.d.window_at(click_x, click_y), Some(focused_w))
+    let click_iters = 1000
+    let t_clk0 = time.now_ns()
+    for _ in 0..click_iters {
+        p.needs_layout = false
+        discard pastel.input.on_button(mut p, lum.Pointer { x: click_x, y: click_y, button: u32(272), pressed: true })
+        assert(not p.needs_layout)
+    }
+    let clk_ns = (time.now_ns() - t_clk0) / click_iters
+
+    // WindowTitle burst fast-path (no redundant sync_layout when title updates with no title rules).
+    let title_iters = 1000
+    let t_ttl0 = time.now_ns()
+    for _ in 0..title_iters {
+        p.needs_layout = false
+        p.handle_event(lum.Event.WindowTitle(focused_w))
+    }
+    let ttl_ns = (time.now_ns() - t_ttl0) / title_iters
+
+    // Real sync_layout (16 mapped Wayland windows) + state_json (16 mapped windows).
+    let sync_iters = 300
+    let t_sync0 = time.now_ns()
+    var now_ns = time.now_ns() + 2000000000
+    for r in 0..sync_iters {
+        p.desktop.monitors[0].workspaces[0].strip.active_col = r % 16
+        now_ns += 4166666
+        p.sync_layout(now_ns)
+    }
+    let sync_us = (time.now_ns() - t_sync0) / (sync_iters * 1000)
+
+    let state_iters = 300
+    let t_st0 = time.now_ns()
+    var state_bytes = 0
+    for _ in 0..state_iters {
+        let s = p.state_json()
+        state_bytes = s.len()
+    }
+    let state_us = (time.now_ns() - t_st0) / (state_iters * 1000)
+    assert(state_bytes > 1000)
+
+    // 3. IPC server + buffered client round-trip (100 state_json responses over Unix socket).
+    let sample_state = p.state_json()
+    let expect_len = sample_state.len() - 1
+    let sock = path.join(dir, "bench.sock")
+    var srv = ipc.IpcServer.open(sock.clone()).expect("open ipc")
+    defer srv.close()
+    let ipc_iters = 100
+    let done_ch: sync.Chan[int] = sync.chan(1)
+    let done_c = done_ch.clone()
+    let h = go {
+        let t0 = time.now_ns()
+        for _ in 0..ipc_iters {
+            let r = ipc.client.query_state(sock.clone()).expect("ipc bench")
+            assert_eq(r.len(), expect_len)
+        }
+        discard done_c.send((time.now_ns() - t0) / (ipc_iters * 1000))
+    }
+    var served = 0
+    var active_fds: List[int] = []
+    let deadline = time.now_ns() + 5000000000
+    while served < ipc_iters and time.now_ns() < deadline {
+        for fd in srv.accept_all() {
+            active_fds.push(fd)
+        }
+        var idx = 0
+        while idx < active_fds.len() {
+            let fd = active_fds[idx]
+            let (lines, closed) = srv.read_lines(fd)
+            for l in lines {
+                discard ipc.server.decode_request(l).expect("decode")
+                discard srv.send(fd, sample_state)
+                served += 1
+            }
+            if closed {
+                srv.disconnect(fd)
+                discard active_fds.remove(idx)
+            } else {
+                idx += 1
+            }
+        }
+    }
+    h.join()
+    let ipc_us = done_ch.recv().unwrap()
+    assert_eq(served, ipc_iters)
+
+    io.print("bench desktop lifecycle (100 win open/float/close): {life_us} us/cycle")
+    io.print("bench lazy-overlay startup (at-startup=false): {start_us} us")
+    io.print("bench input dispatch: key={key_ns} ns/ev scroll={scr_ns} ns/ev click={clk_ns} ns/ev title={ttl_ns} ns/ev")
+    io.print("bench compositor (16 mapped win): sync_layout={sync_us} us/frame state_json={state_us} us/call ({state_bytes} B)")
+    io.print("bench IPC state round-trip ({state_bytes} B): {ipc_us} us/req")
+    assert(life_us < 5000)
+    assert(key_ns < 1000)
+    assert(scr_ns < 1000)
+    assert(clk_ns < 5000)
+    assert(ttl_ns < 5000)
+    assert(sync_us < 1000)
 }

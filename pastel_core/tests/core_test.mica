@@ -94,3 +94,30 @@ test "a delayed animation resumes where it was held" {
     b.delay(30000000)
     assert_eq(b.t0, 0)
 }
+
+test "EaseKind.sample_pos matches sample().0 and zero-duration curves snap immediately" {
+    let kinds = [
+        core.EaseKind.Linear,
+        core.EaseKind.OutQuad,
+        core.EaseKind.OutCubic,
+        core.EaseKind.OutQuint,
+        core.EaseKind.OutExpo,
+        core.EaseKind.InOutCubic,
+    ]
+    for k in kinds {
+        for step in 0..=10 {
+            let t = f64(step) / 10.0
+            let (p, _) = k.sample(t)
+            let p2 = k.sample_pos(t)
+            assert((p - p2).abs() < 1e-12)
+        }
+    }
+    var a = core.Anim.new(0.0)
+    a.retarget(100.0, core.CurveSpec.ease(0.0, core.EaseKind.Linear), 1000, true, 1.0)
+    assert(not a.active)
+    assert_eq(a.target, 100.0)
+    var b = core.Anim.new(0.0)
+    b.retarget(50.0, core.CurveSpec.spring(0.0, 1.0), 1000, true, 1.0)
+    assert(not b.active)
+    assert_eq(b.target, 50.0)
+}
